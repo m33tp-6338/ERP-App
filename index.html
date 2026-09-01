@@ -1770,6 +1770,7 @@ function ERPApp(){
   const [toast, setToast] = useState(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [importFocus, setImportFocus] = useState("");
+  const [importCardHint, setImportCardHint] = useState("");
   const navigate = useCallback((t) => {
     if (typeof t === "string" && t.indexOf("import:") === 0) {
       setImportFocus(t.slice(7));
@@ -2247,7 +2248,7 @@ function ERPApp(){
 
   const TAB_TITLES = { dashboard:"Overview", vendors:"Ledgers", requisition:"New Payment Requisition", export:"Requisitions & Export", settings:"Settings", recurring:"Rent & EMI", company:"Company Details", payments:"Payment Register", import:"Import from Excel", receivables:"Receivables", expenses:"Expenses", sheets:"Sync from Google Sheets", statement:"Monthly Statement", sitesummary:"Site Summary", employees:"Employee Master", cash:"Cash & Card", diesel:"Diesel & Machinery", utilities:"Utilities", changelog:"What is New", fixedcost:"Fixed Cost Summary" };
 
-  const openImport = (kind) => { setImportFocus(kind || ""); setTab("import"); };
+  const openImport = (kind, cardId) => { setImportFocus(kind || ""); setImportCardHint(cardId || ""); setTab("import"); };
   const toPayCount = reqs.filter(r => r.paymentStatus !== "Paid" || !r.paymentDate).length;
 
   const syncProps = {
@@ -2288,7 +2289,7 @@ function ERPApp(){
         {tab==="requisition" && <RequisitionForm vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} expenses={expenses} setExpenses={setExpenses} lists={lists} setLists={setLists} goTo={navigate} openImport={openImport} showToast={showToast} />}
         {tab==="export" && <ExportTab reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} expenses={expenses} setExpenses={setExpenses} goTo={navigate} openImport={openImport} showToast={showToast} />}
         {tab==="recurring" && <RecurringTab vendors={vendors} setVendors={setVendors} recurring={recurring} setRecurring={setRecurring} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
-        {tab==="import" && <ImportTab focusKind={importFocus} clearFocus={()=>setImportFocus("")} vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} recurring={recurring} setRecurring={setRecurring} expenses={expenses} setExpenses={setExpenses} cards={cards} setCards={setCards} cashTxns={cashTxns} setCashTxns={setCashTxns} machines={machines} setMachines={setMachines} diesel={diesel} setDiesel={setDiesel} utilities={utilities} setUtilities={setUtilities} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} />}
+        {tab==="import" && <ImportTab focusKind={importFocus} clearFocus={()=>setImportFocus("")} presetCardId={importCardHint} vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} recurring={recurring} setRecurring={setRecurring} expenses={expenses} setExpenses={setExpenses} cards={cards} setCards={setCards} cashTxns={cashTxns} setCashTxns={setCashTxns} machines={machines} setMachines={setMachines} diesel={diesel} setDiesel={setDiesel} utilities={utilities} setUtilities={setUtilities} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} />}
         {tab==="fixedcost" && <FixedCostTab recurring={recurring} vendors={vendors} machines={machines} showToast={showToast} goTo={navigate} />}
         {tab==="changelog" && <ChangelogTab settings={settings} setSettings={setSettings} goTo={navigate} />}
         {tab==="utilities" && <UtilitiesTab utilities={utilities} setUtilities={setUtilities} cards={cards}
@@ -6811,6 +6812,14 @@ function CashTab({ cards, setCards, cashTxns, setCashTxns, cashCounts, setCashCo
           </div>
           <BigButton icon="check" label="Save Card" onClick={()=>saveCard(c)} tone="green" full />
 
+          {cards.some(x => x.id === c.id) && (
+            <button onClick={()=>openImport("cash", c.id)}
+              style={{ width:"100%", marginTop:10, borderRadius:16, padding:"14px 20px", fontSize:15, fontWeight:600,
+                background:SAND, color:INK, border:"none", cursor:"pointer" }}>
+              Import transactions for this card
+            </button>
+          )}
+
           {cards.some(x => x.id === c.id) && (() => {
             const mine = cashTxns.filter(t => t.cardId === c.id);
             const spent = mine.filter(t=>t.type==="Spend").reduce((a,t)=>a+Number(t.amount||0),0);
@@ -7046,7 +7055,7 @@ function CashTab({ cards, setCards, cashTxns, setCashTxns, cashCounts, setCashCo
           style={{ borderRadius:14, padding:"12px 6px", fontSize:13, fontWeight:600, background:SAND, color:INK, border:"none", cursor:"pointer" }}>
           Count cash
         </button>
-        <button onClick={()=>openImport("cash")}
+        <button onClick={()=>openImport("cash", cardFilter !== "All" ? cardFilter : "")}
           style={{ borderRadius:14, padding:"12px 6px", fontSize:13, fontWeight:600, background:SAND, color:INK, border:"none", cursor:"pointer" }}>
           Import
         </button>
@@ -10908,7 +10917,7 @@ function downloadTemplate(kind){
   XLSX.writeFile(wb, kind === "vendors" ? "Template_Vendors.xlsx" : "Template_Requisitions.xlsx");
 }
 
-function ImportTab({ focusKind, clearFocus, vendors, setVendors, reqs, setReqs, recurring, setRecurring, expenses, setExpenses, cards, setCards, cashTxns, setCashTxns, machines, setMachines, diesel, setDiesel, utilities, setUtilities, lists, setLists, showToast, goTo }){
+function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, reqs, setReqs, recurring, setRecurring, expenses, setExpenses, cards, setCards, cashTxns, setCashTxns, machines, setMachines, diesel, setDiesel, utilities, setUtilities, lists, setLists, showToast, goTo }){
   const [mapping, setMapping] = useState(null);   // column-mapping step
   const [preview, setPreview] = useState(null);   // final confirm step
   const [skip, setSkip] = useState(new Set());
@@ -10952,7 +10961,10 @@ function ImportTab({ focusKind, clearFocus, vendors, setVendors, reqs, setReqs, 
       auto[f.key] = hit || "";
     });
 
-    setMapping({ wb, kind, fileName, sheetNames: wb.SheetNames, sheetName, headerRow, headers, dataRows, map: auto });
+    const fallbackCardId = kind === "cash"
+      ? (presetCardId || (cards.length === 1 ? cards[0].id : ""))
+      : undefined;
+    setMapping({ wb, kind, fileName, sheetNames: wb.SheetNames, sheetName, headerRow, headers, dataRows, map: auto, fallbackCardId });
   }
 
   /* ---------- step 2: apply the mapping ---------- */
@@ -10981,6 +10993,10 @@ function ImportTab({ focusKind, clearFocus, vendors, setVendors, reqs, setReqs, 
     const missingRequired = tpl.filter(f => f.required && !map[f.key]);
     if (missingRequired.length) {
       showToast(`Choose a column for ${missingRequired.map(f=>f.headers[0]).join(", ")}`, "error");
+      return;
+    }
+    if (kind === "cash" && cards.length > 1 && !mapping.fallbackCardId) {
+      showToast("Choose which card this file is for, above", "error");
       return;
     }
     const toAdd = [], toUpdate = [], errors = [], duplicates = [];
@@ -11474,13 +11490,18 @@ function ImportTab({ focusKind, clearFocus, vendors, setVendors, reqs, setReqs, 
         delete d.__cardName;
         let card = findCard(cName);
         if (!cName && !card) {
-          // No card column in the sheet. Use the only card if there is one,
-          // otherwise make a single card for this import so the balance still adds up.
+          // No card named on this row. Use whichever card was chosen on the mapping
+          // screen for "if a row doesn't name a card" — set explicitly by the user
+          // whenever more than one card exists, so this never silently guesses wrong.
+          const chosen = mapping.fallbackCardId && (
+            (cards||[]).find(c => c.id === mapping.fallbackCardId) ||
+            newCards.find(c => c.id === mapping.fallbackCardId)
+          );
           const existing = (cards||[]);
-          card = existing.length === 1 ? existing[0]
+          card = chosen || (existing.length === 1 ? existing[0]
                : findCard("Site Cash")
                || (() => { const c = { ...emptyCard, id: uid(), name:"Site Cash", site: d.site || "" };
-                           newCards.push(c); return c; })();
+                           newCards.push(c); return c; })());
         } else if (cName && !card) {
           card = { ...emptyCard, id: uid(), name: cName, site: d.site || "" };
           newCards.push(card);
@@ -11710,6 +11731,12 @@ function ImportTab({ focusKind, clearFocus, vendors, setVendors, reqs, setReqs, 
   /* ================= RENDER: confirm step ================= */
   if (preview) {
     const label = preview.kind === "vendors" ? "ledger" : preview.kind === "recurring" ? "rental/installment" : preview.kind === "employees" ? "employee" : preview.kind === "expenses" ? "expense" : preview.kind === "cash" ? "cash entry" : preview.kind === "machinery" ? "machine" : preview.kind === "diesel" ? "diesel entry" : preview.kind === "utilities" ? "utility bill" : preview.kind === "register" ? "payment" : "requisition";
+    // Rows with no card named in the sheet fall back to whichever card was chosen
+    // on the mapping screen. Show that card's name here too, so the preview never
+    // looks blank for rows that will still land on a real card.
+    const fallbackCardName = preview.kind === "cash" && mapping && mapping.fallbackCardId
+      ? ((cards||[]).find(c => c.id === mapping.fallbackCardId) || {}).name || ""
+      : "";
     const totalChanges = preview.toAdd.filter((_,n)=>!skip.has("a"+n)).length
                        + preview.toUpdate.filter((_,n)=>!skip.has("u"+n)).length
                        + (preview.duplicates||[]).filter((_,n)=>forceAdd.has("d"+n)).length;
@@ -11878,7 +11905,7 @@ function ImportTab({ focusKind, clearFocus, vendors, setVendors, reqs, setReqs, 
                       {a.data.type==="Purchase" && a.data.amount ? ` · ₹${fmtINR(a.data.amount)}` : ""}
                     </span>
                   : preview.kind==="cash"
-                  ? <span><strong>{a.data.vendorName || a.data.description || a.data.type}</strong> · ₹{fmtINR(a.data.amount)} · {fmtDate(a.data.date)} · {a.data.__cardName}
+                  ? <span><strong>{a.data.vendorName || a.data.description || a.data.type}</strong> · ₹{fmtINR(a.data.amount)} · {fmtDate(a.data.date)} · {a.data.__cardName || fallbackCardName || "—"}
                       {a.data.type==="Spend" && !a.data.hasBill ? <span style={{ color:RED, fontWeight:600 }}> · no bill</span> : null}
                     </span>
                   : preview.kind==="expenses"
@@ -12032,6 +12059,30 @@ function ImportTab({ focusKind, clearFocus, vendors, setVendors, reqs, setReqs, 
             </Field>
           ))}
         </div>
+
+        {mapping.kind === "cash" && (
+          <div style={{ background:SURFACE, borderRadius:16, padding:20, marginBottom:16, border:`1px solid ${SAND}` }}>
+            <SectionLabel>Which card is this for?</SectionLabel>
+            <Field label="If a row doesn't name a card, put it on"
+              required={cards.length > 1}
+              hint={mapping.map.cardName
+                ? "Only used for rows where that column is left blank."
+                : "Your file has no card column mapped above, so every row will use this one."}>
+              <select style={{ ...inputStyle, borderColor: cards.length > 1 && !mapping.fallbackCardId ? RED : SAND }}
+                value={mapping.fallbackCardId || ""}
+                onChange={e=>setMapping({ ...mapping, fallbackCardId: e.target.value })}>
+                <option value="">{cards.length ? "— Choose a card —" : "— No cards added yet —"}</option>
+                {cards.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </Field>
+            {cards.length === 0 && (
+              <p style={{ fontSize:12, color:MUTED, lineHeight:1.5 }}>
+                No cards exist yet — go back to Cash &amp; Card and tap "Add Card" first, or leave this
+                blank and a card will be created automatically from your file.
+              </p>
+            )}
+          </div>
+        )}
 
         <BigButton icon="check" label="Continue" onClick={buildPreview} tone="amber" full />
       </div>
