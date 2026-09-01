@@ -2401,7 +2401,7 @@ function ERPApp(){
         {tab==="employees" && <EmployeesTab vendors={vendors} setVendors={setVendors} reqs={reqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
         {tab==="statement" && <MonthlyStatementTab reqs={reqs} expenses={expenses} cashTxns={cashTxns} cards={cards} showToast={showToast} goTo={navigate} />}
         {tab==="sitesummary" && <SiteSummaryTab reqs={reqs} expenses={expenses} cashTxns={cashTxns} cards={cards} diesel={diesel} utilities={utilities} machines={machines} vendors={vendors} showToast={showToast} goTo={navigate} />}
-        {tab==="sheets" && <SheetSyncTab sheets={sheets} setSheets={setSheets} reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} />}
+        {tab==="sheets" && <SheetSyncTab sheets={sheets} setSheets={setSheets} reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} expenses={expenses} setExpenses={setExpenses} recurring={recurring} setRecurring={setRecurring} />}
         {tab==="expenses" && <ExpensesTab expenses={expenses} setExpenses={setExpenses} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
         {tab==="receivables" && <ReceivablesTab reqs={reqs} setReqs={setReqs} showToast={showToast} goTo={navigate} />}
         {tab==="payments" && <PaymentRegisterTab reqs={reqs} setReqs={setReqs} vendors={vendors} expenses={expenses} setExpenses={setExpenses} cashTxns={cashTxns} cards={cards} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} />}
@@ -8302,7 +8302,8 @@ const FREQUENCIES = ["Monthly","Quarterly","Half-Yearly","Yearly","One-time"];
 
 const APPS_SCRIPT_CODE = "function doGet(e) {\n  var out = { ok: true, sheet: \"\", rows: [] };\n  try {\n    var ss = SpreadsheetApp.getActiveSpreadsheet();\n    var wanted = (e && e.parameter && e.parameter.sheet) || \"\";\n    var sh = wanted ? ss.getSheetByName(wanted) : ss.getSheets()[0];\n    if (!sh) throw new Error(\"Sheet not found: \" + wanted);\n    out.sheet = sh.getName();\n    var values = sh.getDataRange().getDisplayValues();\n    if (values.length > 1) {\n      var headers = values[0].map(function (h) { return String(h).trim(); });\n      for (var i = 1; i < values.length; i++) {\n        var row = values[i];\n        if (row.join(\"\").trim() === \"\") continue;\n        var obj = {};\n        for (var c = 0; c < headers.length; c++) {\n          if (headers[c]) obj[headers[c]] = row[c];\n        }\n        out.rows.push(obj);\n      }\n    }\n  } catch (err) {\n    out.ok = false;\n    out.error = String(err);\n  }\n  var json = JSON.stringify(out);\n  var cb = e && e.parameter && e.parameter.callback;\n  if (cb) {\n    return ContentService.createTextOutput(cb + \"(\" + json + \")\")\n      .setMimeType(ContentService.MimeType.JAVASCRIPT);\n  }\n  return ContentService.createTextOutput(json)\n    .setMimeType(ContentService.MimeType.JSON);\n}";
 
-function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, lists, setLists, showToast, goTo }){
+function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, lists, setLists, showToast, goTo,
+  expenses, setExpenses, recurring, setRecurring }){
   const [editing, setEditing] = useState(null);
   const [busy, setBusy] = useState("");
   const [preview, setPreview] = useState(null);
@@ -8432,31 +8433,92 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
   }
 
   function buildPreview(collected, failures, list, fileReport, skippedFiles, seenFiles, notes){
+    const kind = (list[0] && list[0].kind) || "requisitions";
+    const tpl = kind === "expenses" ? EXPENSE_TEMPLATE : REQ_TEMPLATE;
     const headers = [...new Set(collected.flatMap(c => Object.keys(c.row)))]
       .filter(h => h !== "__file" && h !== "__folder");
-    const map = autoMapHeaders(headers, REQ_TEMPLATE);
-    const missing = REQ_TEMPLATE.filter(f => f.required && !map[f.key]);
-
-    // nothing already recorded gets added again
-    const existingKeys = new Set(reqs.map(importDupKey));
-    const seenKeys = new Set();
+    const map = autoMapHeaders(headers, tpl);
+    const missing = tpl.filter(f => f.required && !map[f.key]);
     const toAdd = [], duplicates = [], errors = [];
 
+    if (kind === "expenses") {
+      // Mirrors ImportTab's own "expenses" row handling (see ImportTab.buildPreview),
+      // kept as its own copy here since this tab intentionally stays append-only —
+      // simpler than the update-merge logic Import from Excel supports.
+      const etypes = (lists && lists.expenseTypes) ? lists.expenseTypes : DEFAULT_LISTS.expenseTypes;
+      const existingKeys = new Set((expenses||[]).map(e =>
+        [e.date || e.periodText, String(e.paidBy||"").toLowerCase(), Number(e.amount||0),
+         String(e.description||"").toLowerCase(), String(e.subCategory||"").toLowerCase()].join("|")));
+      const seenKeys = new Set();
+
+      collected.forEach((c, i) => {
+        const { out, problems } = mapRowGeneric(c.row, tpl, map);
+        if (problems.length) { errors.push({ source:c.source, rowNum:i+2, why:`missing ${problems.join(", ")}` }); return; }
+
+        const raw = String(out.dateRaw || "").trim();
+        delete out.dateRaw;
+        const parsedDate = excelToDateStr(raw);
+        out.date = parsedDate || "";
+        out.periodText = parsedDate ? "" : raw;
+
+        if (!out.expenseType || !etypes.includes(out.expenseType)) {
+          const t = String(out.expenseType||"").toLowerCase();
+          out.expenseType = t.indexOf("travel")>=0 ? "Travel"
+            : t.indexOf("office")>=0 ? "Office"
+            : (t.indexOf("purchase")>=0 || t.indexOf("site")>=0) ? "Site Purchase"
+            : (out.expenseType || etypes[0] || "Site Purchase");
+        }
+        if (out.paidDate && !String(out.settledTo||"").trim()) out.settledTo = out.paidBy || "";
+        if (!out.site) out.site = c.source;
+
+        const k = [out.date || out.periodText, String(out.paidBy||"").toLowerCase(), Number(out.amount||0),
+                   String(out.description||"").toLowerCase(), String(out.subCategory||"").toLowerCase()].join("|");
+        if (existingKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"already in the app" }); return; }
+        if (seenKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"repeated inside this sync" }); return; }
+        seenKeys.add(k);
+        toAdd.push({ data:out, source:c.source });
+      });
+
+      setPreview({ kind, toAdd, duplicates, errors, failures, missing, map, headers, list, fileReport, skippedFiles, seenFiles, notes });
+      return;
+    }
+
+    // Nothing already recorded gets added again. A sheet source rarely carries
+    // its own Ref No or UTR (those get assigned once a row lands in the app), so
+    // comparing on those — like importDupKey does for a one-off Excel import —
+    // would never match on a re-sync and let the same row back in every time.
+    // Match on date + site + name + amount + description instead, which is what
+    // a repeated sync of the same sheet will actually reproduce.
+    const sheetDupKey = (r) => [dupKey(r), String(r.description||"").trim().toLowerCase()].join("|");
+    const existingKeys = new Set(reqs.map(sheetDupKey));
+    const seenKeys = new Set();
+    // A row that syncs in already paid, and whose Name matches exactly one active
+    // Rent & EMI item, also settles that item — same as generating it by hand
+    // would (advances the due date, counts an instalment). Skipped whenever the
+    // name is ambiguous or matches nothing, so this never guesses wrong.
+    const activeRecurring = (recurring||[]).filter(r => r.active !== false);
+
     collected.forEach((c, i) => {
-      const { out, problems } = mapRowGeneric(c.row, REQ_TEMPLATE, map);
+      const { out, problems } = mapRowGeneric(c.row, tpl, map);
       if (problems.length) { errors.push({ source:c.source, rowNum:i+2, why:`missing ${problems.join(", ")}` }); return; }
 
       settleRequisitionDates(out);
       if (!out.site) out.site = c.source;
 
-      const k = importDupKey(out);
+      const k = sheetDupKey(out);
       if (existingKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"already in the app" }); return; }
       if (seenKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"repeated inside this sync" }); return; }
       seenKeys.add(k);
+
+      if (out.paymentStatus === "Paid") {
+        const nameMatches = activeRecurring.filter(r =>
+          String(r.name||"").trim().toLowerCase() === String(out.name||"").trim().toLowerCase());
+        if (nameMatches.length === 1) out.__recurringMatchId = nameMatches[0].id;
+      }
       toAdd.push({ data:out, source:c.source });
     });
 
-    setPreview({ toAdd, duplicates, errors, failures, missing, map, headers, list, fileReport, skippedFiles, seenFiles, notes });
+    setPreview({ kind, toAdd, duplicates, errors, failures, missing, map, headers, list, fileReport, skippedFiles, seenFiles, notes });
   }
 
   async function testConnection(sh){
@@ -8488,9 +8550,38 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
 
   function applyPreview(){
     if (!preview || preview.toAdd.length === 0) return;
+    const stamp = new Date().toISOString();
+
+    if (preview.kind === "expenses") {
+      const added = preview.toAdd.map((a, idx) => ({
+        ...emptyExpense, ...a.data, id: uid(), claimId:"", claimRef:"", createdAt: Date.now() + idx,
+      }));
+      setExpenses([...(expenses||[]), ...added]);
+
+      const L = lists || DEFAULT_LISTS;
+      const nl = { ...L, sites:[...(L.sites||[])], categories:[...(L.categories||[])],
+                   expenseTypes:[...(L.expenseTypes||DEFAULT_LISTS.expenseTypes)], people:[...(L.people||[])] };
+      added.forEach(d => {
+        if (d.site && !nl.sites.includes(d.site)) nl.sites.push(d.site);
+        if (d.category && !nl.categories.includes(d.category)) nl.categories.push(d.category);
+        if (d.expenseType && !nl.expenseTypes.includes(d.expenseType)) nl.expenseTypes.push(d.expenseType);
+        if (d.paidBy && !nl.people.includes(d.paidBy)) nl.people.push(d.paidBy);
+      });
+      nl.sites.sort(); nl.categories.sort(); nl.people.sort();
+      setLists(nl);
+
+      setSheets(sheets.map(x => (preview.list || []).some(l => l.id === x.id) ? { ...x, lastSync: stamp } : x));
+      showToast(`${added.length} expense(s) brought in`);
+      setPreview(null);
+      return;
+    }
+
     const added = [];
+    const recurringUpdates = [];
     preview.toAdd.forEach((a, idx) => {
-      const d = a.data;
+      const d = { ...a.data };
+      const recurMatchId = d.__recurringMatchId;
+      delete d.__recurringMatchId;
       const vend = vendors.find(v => String(v.name||"").trim().toLowerCase() === String(d.name).trim().toLowerCase());
       added.push({
         ...emptyReq, ...d,
@@ -8502,9 +8593,26 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
         site: d.site || a.source,
         exported: false,
         createdAt: Date.now() + idx,
+        recurringId: recurMatchId || "",
       });
+      if (recurMatchId) {
+        const item = (recurring||[]).find(r => r.id === recurMatchId);
+        if (item && !recurringUpdates.some(u => u.id === item.id)) {
+          const upd = { ...item };
+          if (item.frequency === "One-time") upd.active = false;
+          else upd.nextDueDate = addInterval(item.nextDueDate, item.frequency);
+          if (isInstalment(item) && item.installmentsPaid !== "") {
+            upd.installmentsPaid = (Number(item.installmentsPaid)||0) + 1;
+            if (Number(item.totalInstallments) && upd.installmentsPaid >= Number(item.totalInstallments)) upd.active = false;
+          }
+          recurringUpdates.push(upd);
+        }
+      }
     });
     setReqs([...reqs, ...added]);
+    if (recurringUpdates.length) {
+      setRecurring(recurring.map(r => recurringUpdates.find(u => u.id === r.id) || r));
+    }
 
     const promoted = promoteSalaryLedgers(vendors, added);
     if (promoted) setVendors(promoted.vendors);
@@ -8522,9 +8630,8 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
     nl.sites.sort(); nl.categories.sort();
     setLists(nl);
 
-    const stamp = new Date().toISOString();
     setSheets(sheets.map(x => (preview.list || []).some(l => l.id === x.id) ? { ...x, lastSync: stamp } : x));
-    showToast(`${added.length} requisition(s) brought in`);
+    showToast(`${added.length} requisition(s) brought in${recurringUpdates.length ? ` · ${recurringUpdates.length} Rent & EMI item(s) updated` : ""}`);
     setPreview(null);
   }
 
@@ -8754,9 +8861,13 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
 
         <div style={{ background:SURFACE, borderRadius:16, padding:20, marginBottom:16, border:`1px solid ${SAND}` }}>
           <SectionLabel>Check before importing</SectionLabel>
-          <ReviewRow label="New requisitions" value={preview.toAdd.length} />
+          <ReviewRow label={preview.kind === "expenses" ? "New expenses" : "New requisitions"} value={preview.toAdd.length} />
           <ReviewRow label="Skipped as duplicates" value={preview.duplicates.length} />
           <ReviewRow label="Rows with problems" value={preview.errors.length} />
+          {preview.kind !== "expenses" && preview.toAdd.some(a=>a.data.__recurringMatchId) && (
+            <ReviewRow label="Will also update Rent & EMI"
+              value={preview.toAdd.filter(a=>a.data.__recurringMatchId).length} />
+          )}
         </div>
 
         {preview.notes && preview.notes.length > 0 && (
@@ -8830,11 +8941,22 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
             <div style={{ fontWeight:700, color:GREEN, fontSize:14, marginBottom:10 }}>Will be added ({preview.toAdd.length})</div>
             {preview.toAdd.slice(0,30).map((a,i) => (
               <div key={i} style={{ padding:"7px 0", borderTop: i? `1px solid ${SAND}`:"none", fontSize:13, color:INK }}>
-                <strong>{a.data.name}</strong> · ₹{fmtINR(a.data.amount)} · {fmtDate(a.data.date) || "no date"}
-                <span style={{ color:MUTED }}> · {a.data.site || a.source}</span>
-                {a.data.dateFromPayment && (
-                  <span style={{ color:AMBER, fontWeight:600 }}> · date taken from payment</span>
-                )}
+                {preview.kind === "expenses"
+                  ? <React.Fragment>
+                      <strong>{a.data.description || a.data.expenseType}</strong> · ₹{fmtINR(a.data.amount)}
+                      {a.data.date || a.data.periodText ? ` · ${a.data.date ? fmtDate(a.data.date) : a.data.periodText}` : " · no date"}
+                      <span style={{ color:MUTED }}> · {a.data.paidBy || "no payer"}</span>
+                    </React.Fragment>
+                  : <React.Fragment>
+                      <strong>{a.data.name}</strong> · ₹{fmtINR(a.data.amount)} · {fmtDate(a.data.date) || "no date"}
+                      <span style={{ color:MUTED }}> · {a.data.site || a.source}</span>
+                      {a.data.dateFromPayment && (
+                        <span style={{ color:AMBER, fontWeight:600 }}> · date taken from payment</span>
+                      )}
+                      {a.data.__recurringMatchId && (
+                        <span style={{ color:GREEN, fontWeight:600 }}> · settles Rent & EMI</span>
+                      )}
+                    </React.Fragment>}
               </div>
             ))}
             {preview.toAdd.length > 30 && <div style={{ fontSize:12, color:MUTED, marginTop:8 }}>…and {preview.toAdd.length-30} more</div>}
@@ -8849,7 +8971,8 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
             </div>
             {preview.duplicates.slice(0,20).map((d,i) => (
               <div key={i} style={{ fontSize:13, color:INK, padding:"4px 0" }}>
-                {d.data.name} · ₹{fmtINR(d.data.amount)} · {fmtDate(d.data.date)} <span style={{color:MUTED}}>— {d.why}</span>
+                {preview.kind === "expenses" ? (d.data.description || d.data.expenseType) : d.data.name} · ₹{fmtINR(d.data.amount)}
+                {d.data.date ? ` · ${fmtDate(d.data.date)}` : ""} <span style={{color:MUTED}}>— {d.why}</span>
               </div>
             ))}
             {preview.duplicates.length > 20 && <div style={{ fontSize:12, color:MUTED, marginTop:8 }}>…and {preview.duplicates.length-20} more</div>}
@@ -8868,7 +8991,9 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
         )}
 
         <BigButton icon="check"
-          label={preview.toAdd.length ? `Import ${preview.toAdd.length} Requisition(s)` : "Nothing new to import"}
+          label={preview.toAdd.length
+            ? `Import ${preview.toAdd.length} ${preview.kind === "expenses" ? "Expense" : "Requisition"}(s)`
+            : "Nothing new to import"}
           onClick={applyPreview} tone="green" full disabled={preview.toAdd.length===0} />
       </div>
     );
@@ -8906,6 +9031,15 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
           <Field label="Tab name inside each sheet" hint="Leave blank to use the first tab of every sheet">
             <input style={inputStyle} value={editing.tab || ""}
               onChange={e=>setEditing({...editing, tab:e.target.value})} placeholder="e.g. Requisitions" />
+          </Field>
+          <Field label="Syncs into" hint={editing.kind === "expenses"
+              ? "Rows land in Expenses — use this for a sheet like Office Master (Date, Expense Type, Paid By, Amount, ...)."
+              : "Rows land in Requisitions — a date in Payment Status sends that row straight to the Payment Register, same as Import from Excel."}>
+            <select style={inputStyle} value={editing.kind || "requisitions"}
+              onChange={e=>setEditing({...editing, kind:e.target.value})}>
+              <option value="requisitions">Requisitions (Payment to be done)</option>
+              <option value="expenses">Expenses (Office Master)</option>
+            </select>
           </Field>
           <BigButton icon="check" label="Save Folder" onClick={()=>saveSheet(editing)} tone="green" full
             disabled={!editing.name.trim() || !!urlProblem(editing.url)} />
@@ -9005,7 +9139,7 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
                   <div style={{ flex:1, minWidth:0 }}>
                     <div style={{ fontWeight:700, color:INK }}>{sh.name}</div>
                     <div style={{ fontSize:12, color:MUTED, marginTop:3 }}>
-                      {sh.tab ? `Tab: ${sh.tab} · ` : ""}Last sync {sh.lastSync ? friendlyTime(sh.lastSync) : "never"}
+                      Syncs into {(sh.kind||"requisitions") === "expenses" ? "Expenses" : "Requisitions"} · {sh.tab ? `Tab: ${sh.tab} · ` : ""}Last sync {sh.lastSync ? friendlyTime(sh.lastSync) : "never"}
                     </div>
                   </div>
                   <div style={{ display:"flex", gap:8, flexShrink:0 }}>
@@ -9083,11 +9217,17 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
       )}
 
       <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-        {sheets.length > 1 && (
-          <BigButton icon="download" label="Sync Everything" onClick={()=>syncSheets(sheets)} tone="green" full disabled={!!busy} />
-        )}
+        {["requisitions","expenses"].map(k => {
+          const group = sheets.filter(x => (x.kind||"requisitions") === k);
+          if (group.length < 2) return null;
+          return (
+            <BigButton key={k} icon="download"
+              label={`Sync all ${k==="expenses" ? "Expense" : "Requisition"} sources (${group.length})`}
+              onClick={()=>syncSheets(group)} tone="green" full disabled={!!busy} />
+          );
+        })}
         <BigButton icon="plus" label="Add Folder"
-          onClick={()=>setEditing({ id: uid(), name:"Site Sheets", url:"", tab:"", lastSync:null })} tone="amber" full />
+          onClick={()=>setEditing({ id: uid(), name:"Site Sheets", url:"", tab:"", kind:"requisitions", lastSync:null })} tone="amber" full />
         <BigButton icon="settings" label="Set up automatic sync (advanced)" onClick={()=>setShowSetup(true)} tone="ink" full />
       </div>
     </div>
