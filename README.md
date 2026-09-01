@@ -37,6 +37,41 @@ button under Settings & Backup — nothing is ever uploaded anywhere.
    **Settings & Backup** → **Restore From a Saved File** → pick the file.
 5. Turn on Airplane Mode and reopen the app to confirm it still works — it should.
 
+## If the app isn't showing recent updates
+
+**This has actually happened, and here's exactly why:** the app was found to be
+running on a version from months ago even though `index.html` had been
+re-uploaded several times since. The cause was `sw.js` — the file that decides
+whether the phone uses a cached copy of the app or fetches the new one. It had
+been stuck at its very first version (`v1`) the whole time, because **only
+`index.html` (and sometimes `README.md`) was being re-uploaded — `sw.js` itself
+was never replaced.** The phone's browser only checks for a new version of the
+app when `sw.js` itself changes; if that file is byte-for-byte the same as
+before, it never even looks at whether `index.html` changed on the server, so
+every update since the first one was silently ignored.
+
+**Going forward, every update package includes three files — upload all
+three, every time:** `index.html`, `sw.js`, and `README.md`. It's specifically
+`sw.js` that's easy to skip because it looks like plumbing rather than the
+actual app — but it's the one file that has to change for anything else to
+take effect.
+
+**To check it actually worked, on GitHub:** open your repo → click `sw.js` →
+the line near the top should say `const CACHE_NAME = "erp-ledger-cache-vN"`
+where `N` matches the version mentioned in that update's message from me. If
+you're ever unsure, paste me the repo link and I can check the live file for
+you before you go looking on the phone.
+
+**On the phone, after uploading all three files:**
+1. Close the app fully (swipe it away from your recent apps — don't just tap
+   back or leave it running in the background).
+2. Reopen it once while connected to the internet, and give it a few seconds.
+3. Still showing the old version? This is the guaranteed fix: in Chrome, go to
+   the site (long-press the app icon → App info → or visit the Pages URL in
+   Chrome directly) → **⋮ → Site settings → Clear & reset** (or uninstall the
+   home-screen icon and use **Add to Home screen** again from Chrome). This
+   forces a completely fresh copy, bypassing any caching layer.
+
 ## Google Drive backup setup (one-time, ~15–20 minutes)
 
 The app can now back itself up to your own Google Drive automatically after each
@@ -81,16 +116,87 @@ designed to work (unlike a password, nobody can do anything with just this ID).
 9. Settings & Backup → **Connect Google Drive** → sign in with the same Google
    account you added as a test user → approve access. From then on, changes
    back up automatically about 10 seconds after you stop typing/editing, to a
-   file named `ERP-Data.json` in your Drive's root folder.
+   file named `ERP-Data.json` — in your Drive's root folder unless you point it
+   at a specific folder using the next section.
 
 **Scope used:** the app only ever requests `drive.file` access — meaning it can
-only see/edit files *it* created, never your other Drive files.
+only see/edit files *it* created, never your other Drive files. This stays true
+even when you pick a specific existing folder below (see how that works there).
 
 **Known limits of browser-only sign-in (no backend server exists to keep you
 signed in forever):** occasionally — after a longer stretch away from the app —
 the automatic silent reconnect can fail, in which case the Sync Now button (or
 just reopening the app) will prompt a quick Google re-sign-in. This is a normal
-property of client-side-only OAuth, not a bug.
+property of client-side-only OAuth, not a bug. If it keeps failing repeatedly
+with the exact same message, tapping **Sync Now** once forces a completely
+fresh sign-in check rather than reusing whatever failed before.
+
+## Saving the backup into a specific Drive folder (optional, one-time)
+
+By default the backup file goes into your Drive's root folder. There are two
+ways to move it into a folder you already use instead (for example a "PW"
+folder with an "ERP" folder inside it) — a simple one that needs no setup at
+all, and Google's own folder-picker dialog, which needs a one-time API key
+but then lets you change the folder again from inside the app whenever you
+like.
+
+### The simple way (no setup, works right now)
+
+The app always backs up to the same one file, always named **ERP-Data.json**
+— it updates that file in place on every sync rather than creating a new one.
+That means you can move it yourself, once, using the Drive app or
+drive.google.com like any other file, and every future sync will keep
+updating it in its new location:
+
+1. Open Google Drive (the app or drive.google.com) and sign in with the same
+   account you connected in the app.
+2. Find **ERP-Data.json** — it's most likely sitting in your Drive's root
+   ("My Drive"), unless you've already moved it.
+3. Move it into your PW → ERP folder (drag it there, or use "Move to" /
+   "Organize" from its menu).
+
+That's it — nothing to change in the app, and nothing to re-upload. The next
+automatic backup (or the next time you tap **Sync now** in Settings) updates
+that same file wherever it now sits. The **Backup folder** line in Settings
+will still say "My Drive (root)" since the app itself didn't do the move —
+that line only updates when the app is the one that placed the file there
+(the folder-picker way, below) — but the file's real location is unaffected
+either way, so this is a cosmetic difference only.
+
+### The folder-picker way (optional, one-time setup, needs a free API key)
+
+This is the fancier route: a **Choose backup folder** button already exists
+under Settings & Backup, but it needs one more free API key from the same
+Google Cloud project as above before it will work.
+
+1. Go to **console.cloud.google.com/apis/library**, make sure the same project
+   from the steps above is selected (top-left), search for **Google Picker
+   API**, open it, and click **Enable**.
+2. Go to **console.cloud.google.com/apis/credentials** → **Create Credentials**
+   → **API key**. A key appears immediately — copy it.
+3. (Recommended, not required) Click the new key to restrict it: under
+   **Application restrictions** choose **Websites**, add your GitHub Pages
+   address with `/*` on the end, e.g. `https://m33tp-6338.github.io/*`; under
+   **API restrictions** choose **Restrict key** and tick only **Google Picker
+   API**. Save.
+4. Paste that key into `index.html`, replacing the placeholder near the top:
+   ```js
+   const GOOGLE_DRIVE_PICKER_API_KEY = "PASTE_YOUR_GOOGLE_PICKER_API_KEY_HERE";
+   ```
+5. Re-upload `index.html`, wait for Pages to redeploy, open the app once online.
+6. Settings & Backup → **Choose backup folder** → Google's own folder browser
+   opens → navigate into your folder (e.g. PW → ERP) → select it → Open/Select.
+   The app remembers this folder from then on, and if a backup file already
+   existed elsewhere it is moved into the newly chosen folder automatically.
+
+**Why this needs its own dialog instead of the app just searching your Drive
+for the folder by name:** the app's narrow `drive.file` permission (see above)
+means it normally can't see any file or folder it didn't create itself — that
+is deliberate, for your privacy. Google's own picker dialog is the standard,
+safe way around that: it runs as Google's own UI (not this app's code), so it
+can show you your real folders, and the moment you pick one, only *that one
+folder* becomes visible to the app — everything else in your Drive stays
+exactly as invisible to it as before.
 
 ## Known limitations of this feasibility build
 
@@ -103,8 +209,93 @@ property of client-side-only OAuth, not a bug.
 - **Optional PIN lock** exists under Settings if you want to lock the app on the
   phone — off by default.
 - If the app is ever updated (a new `index.html`), bump `CACHE_NAME` in `sw.js`
-  (currently `v4`) so installed phones pick up the new version instead of a
+  (currently `v9`) so installed phones pick up the new version instead of a
   cached old one, and re-upload everything to the repo.
+
+## Settings & Backup: smaller Google Drive sync control
+
+The Google Drive backup card in Settings now shows a compact **Sync now**
+button next to the last-synced time (instead of the earlier full-width "Sync
+Now" button and a longer paragraph of text) — everything else there works the
+same. The connected account's email now also shows right next to "Connected"
+at the top of the card.
+
+## Ledgers: sharing just the bank details
+
+Open any ledger (Ledgers → tap it) and there's now a **Share Bank Details
+Only** button, separate from the existing **Share** button. It shares just
+the name, bank, account number and IFSC code — nothing else (no GSTIN, PAN,
+address or category) — useful for quickly forwarding payment details to HO
+or anyone else who only needs to make the transfer, not see everything else
+on file for that ledger. It only appears when a bank account number or IFSC
+is actually saved for that ledger.
+
+## Ledgers: fixing entries that landed on the wrong same-named person
+
+If two different real people (or a vendor and a person) share the exact same
+name, the app used to have no way to tell their payment histories apart — an
+entry recorded against one of them could visually look like it belonged to
+both. This is now fixed with a **reassign** flow, and a warning that stops it
+happening again:
+
+**Warning when you save a ledger with a name already in use.** When you add
+or rename a ledger to a name that another ledger already has, you'll see a
+popup: *"A ledger named '...' already exists..."*. If it's genuinely the same
+person, cancel and use the existing ledger instead of creating a duplicate.
+If it's truly a different person who happens to share the name, add
+something to tell them apart before saving — e.g. `Ramesh Kumar (Site B)` or
+`Ramesh Kumar (Driver)` — then confirm to save anyway.
+
+**Moving entries off a ledger they don't belong to.** Open the ledger
+(Ledgers → tap it). If another ledger exists with the exact same name, you'll
+see an amber notice above Transaction History naming how many other ledgers
+share that name. To move a wrongly-attributed entry:
+
+1. Tap the small square to the left of the entry (or **Select all** at the
+   top of the list) to select the entry or entries that don't actually
+   belong on this ledger.
+2. A bar appears at the bottom showing how many are selected — tap
+   **Options**, then **Reassign to another ledger**.
+3. You'll see two ways to move them:
+   - **Create a new ledger** for the different person — type a
+     distinguishing name (e.g. `Ramesh Kumar (Site B)`) and tap **Create &
+     Move**. This creates a brand-new ledger and moves the selected entries
+     onto it in one step.
+   - **Move to an existing ledger** — search and tap any other ledger already
+     in your list (ledgers with the exact same name as the one you're on are
+     left out of this list, since that would just recreate the mix-up) to
+     move the selected entries there instead.
+
+The payment record itself is never deleted or changed in amount — only which
+ledger it's counted against changes. Nothing is lost, and both ledgers'
+totals update immediately to reflect the move.
+
+## Cash & Card: each card now has its own page
+
+Tapping a card (or its **Entries →** button) on the Cash & Card screen no
+longer just filters the shared list in place — it opens a **dedicated page
+for that card only**:
+
+- The page shows just that card's balance, badges (no-bill count, last
+  count, negative-balance warning), and its own entries — no other card's
+  entries are mixed in.
+- **Filter and sort** work exactly as before, scoped to this card: search
+  by payee/description/bill no., group by date/category/site/type, sort by
+  date/amount/type/paid-to/site, filter by month, and the "No bill" toggle.
+- **Select several entries and act on them together** — tap **Select all**
+  (or tick individual rows) to bring up the selection bar, then **Options**
+  for **Mark bill as on file** or **Delete**. A single entry can still be
+  deleted from its own row (trash icon), and tapping a row opens it for
+  editing, same as before.
+- **Add Entry**, **Count cash**, **Import** and **Export** on this page are
+  all pre-scoped to the open card — no need to pick it again.
+- **Back to Cash & Card** returns to the card list, where the **All
+  cards**/**Card name** chips below the cards still work as a quick filter
+  if you'd rather browse everything on one screen without opening a card's
+  own page.
+
+Nothing about how entries are stored, matched or balanced changed — this is
+purely how you get to and act on a card's entries.
 
 ## Importing Cash & Card transactions for a specific card
 
@@ -122,3 +313,85 @@ know which card they belong to:
   dropdown on the column-matching screen. With two or more cards saved, this
   choice is required — the app blocks the import until it's set, so a file
   can never land silently on the wrong card.
+
+## Syncing "Payment to be done" and "Office Master" from Google Sheets
+
+This replaces the two-file Excel workflow (Payment to be done + Master, with
+Office Master as a separate backing sheet) with one Google Sheet the app reads
+directly — no more entering the same payment twice, once in the sheet and once
+in the app.
+
+**How the pieces map onto the app:**
+
+- **"Master" goes away.** It doesn't need its own sheet or tab any more — the
+  app's own **Payment Register** is already exactly that: any Requisition
+  whose Payment Status holds a date (not "Pending") shows there automatically,
+  Account/IFSC included in the underlying record but not surfaced in that
+  view. Keep "Payment to be done" as your one working sheet; stop maintaining
+  Master by hand.
+- **"Payment to be done"** (Date, Site, Category, Sub-Category, Name, Amount,
+  Description, Payment Status, A/c No., IFSC Code) syncs straight into
+  **Requisitions**, using the exact same rule already built into the app:
+  a blank/"Pending" Payment Status stays a Requisition; a **date** in that
+  column sends the row straight to the Payment Register as paid. This is the
+  same behaviour Import from Excel already has for a requisition sheet — the
+  sync just does it automatically from the live Google Sheet instead of a
+  one-off file.
+- **Site expenses paid by your partner on their card** (electricity, etc.):
+  add a **"Paid By"** column to Payment to be done. Leave it blank (or write
+  "Company") for normal payments; write the partner's name for anything they
+  paid on the company's behalf. The app already treats "Paid By" anyone other
+  than Company as **partner-paid** and tracks it as a recoverable/receivable
+  amount from that partner automatically (Receivables tab) — nothing new to
+  build, this column is all that's needed.
+- **House/Land/Machinery rent and instalments:** if a paid row's **Name**
+  matches an existing, active Rent & EMI item exactly (same spelling), syncing
+  it also settles that Rent & EMI item automatically — advances its next due
+  date, and counts an instalment if it's an EMI/instalment type — the same
+  thing that happens when you generate and pay it by hand from Rent & EMI.
+  If the name doesn't match anything (a brand-new lease, a typo, or the name
+  matches more than one item), the row still comes in as a normal paid
+  Requisition — it's just not linked, and you can set up or fix the matching
+  Rent & EMI item separately. **The name has to match exactly**, so keep the
+  spelling in your sheet consistent with what's saved in Rent & EMI.
+- **Office Master** (the travel/office expense bifurcation) syncs into the
+  **Expenses** tab as its own sheet source, with each row becoming one
+  Expense entry (Date, Expense Type, Paid By, Amount, Description, Site) —
+  giving you the full breakdown in-app, not just a lump total. Keep recording
+  the monthly *total* of these as one ordinary line in Payment to be done (so
+  it still becomes a paid Requisition/Payment Register entry), while the
+  detail lives in Expenses via this second sync.
+- **Salary, Site Purchases, Installments, Service/Software Purchase** need no
+  special handling — they're just different values in the Category column of
+  ordinary Payment to be done rows.
+
+**Setup — you need two sync sources, both pointing at the same spreadsheet:**
+
+1. Move "Payment to be done" and "Office Master" into one Google Sheet (as two
+   tabs/sheets within it — drop "Master", it's no longer needed).
+2. In that Google Sheet: **Extensions → Apps Script**, paste in the script
+   from **Sync from Google Sheets → Set up automatic sync (advanced)** in the
+   app (see the note below — use this simple path, not the multi-site folder
+   wizard on that same screen), then **Deploy → New deployment → Web app**,
+   execute as **Me**, access **Anyone**, and copy the Web app URL it gives you
+   (ends in `/exec`).
+3. In the app: **Sync from Google Sheets → Add Folder** → give it a name,
+   paste that same Web app URL, set **Tab name** to `Payment to be done`, and
+   set **Syncs into** to **Requisitions**. Save.
+4. **Add Folder** again → same Web app URL, **Tab name** set to
+   `Office Master`, **Syncs into** set to **Expenses**. Save.
+5. From then on, tap **Sync now** on either card whenever you've added new
+   rows — it only pulls in rows it hasn't seen before (matched by date, site,
+   name and amount together, not by the sheet having its own reference
+   number, so re-syncing the same sheet repeatedly is safe).
+
+**A known issue on that same "Sync from Google Sheets" screen, found while
+building this — not something you did wrong:** the "Set up automatic sync
+(advanced) → Step 1 — name each site and paste its folder" wizard (for
+pulling many *separate* site workbooks out of Drive folders automatically)
+generates a script that doesn't actually use the folder names/links you type
+in — a pre-existing gap in the app, unrelated to this update. You don't need
+that wizard for this workflow: the plain single-spreadsheet setup above (copy
+the script once, paste it as-is, no folders to fill in) works correctly today
+and is exactly what steps 1–5 use. If multi-site folder scanning is ever
+needed, that's a separate fix.

@@ -59,6 +59,9 @@ const APP_VERSION = "6.2";
    in plain view — that's how Google's client-side sign-in is designed to work. */
 const GOOGLE_DRIVE_CLIENT_ID = "60621934527-fqfm91j6tmq9lepkmna0r7pkjfhjv697.apps.googleusercontent.com";
 const GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
+// Used only to open Google's own folder-picker dialog (so you can point the backup
+// at a folder you already have, like PW/ERP) — not a secret, same as the Client ID.
+const GOOGLE_DRIVE_PICKER_API_KEY = "PASTE_YOUR_GOOGLE_PICKER_API_KEY_HERE";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
@@ -436,6 +439,24 @@ const emptyVendor = { id:"", name:"", ledgerType:"Vendor", gstin:"", legalName:"
   empCode:"", designation:"", department:"", doj:"", salary:"", phone:"", email:"", uan:"", esic:"", empStatus:"Active", dol:"", rollType:"On Roll" };
 const EMP_STATUS = ["Active","On Leave","Left"];
 const ROLL_TYPES = ["On Roll","Off Roll"];
+
+// Requisitions/expenses match a ledger by name text as well as by vendorId
+// (see reassignToLedger below), so two ledgers with the identical name will
+// always have their histories mixed together. Warn (don't block - a real
+// same-entity re-entry is legitimate) whenever a save would create that.
+function warnIfDuplicateLedgerName(vendors, v){
+  const dupe = vendors.find(x => x.id !== v.id &&
+    String(x.name||"").trim().toLowerCase() === String(v.name||"").trim().toLowerCase());
+  if (!dupe) return true;
+  return confirm(
+    `A ledger named "${dupe.name}" already exists${dupe.ledgerType ? ` (${dupe.ledgerType})` : ""}.\n\n` +
+    `If this is the same real person or company, use that existing ledger instead - two ledgers ` +
+    `with an identical name will have their payment histories mixed together and cannot be told apart.\n\n` +
+    `If this is a different person who just happens to share the name, add something to tell them ` +
+    `apart (e.g. "${v.name} (Site B)") before saving.\n\n` +
+    `Save with this name anyway?`
+  );
+}
 const emptyReq = {
   coveredById:"", coveredByRef:"", dupOk:[], id:"", refNo:"", date:"", site:"", category:"", subCategory:"", vendorId:"", name:"", amount:"", description:"", paymentStatus:"Pending", accNo:"", ifsc:"", paidBy:"Company", paymentDate:"", paymentMode:"", utr:"", paidAmount:"", recovered:false, isReimbursement:false, claimId:"", exported:false, createdAt:0 };
 const PAYMENT_MODES = ["NEFT","RTGS","IMPS","UPI","Cheque","Cash","Other"];
@@ -1068,10 +1089,37 @@ function loadGisScript(){
     document.head.appendChild(s);
   });
 }
+function loadPickerLibrary(){
+  return new Promise((resolve, reject) => {
+    if (window.google && window.google.picker) { resolve(); return; }
+    const afterGapi = () => {
+      window.gapi.load("picker", { callback: resolve, onerror: () => reject(new Error("Could not load Google's folder picker")) });
+    };
+    if (window.gapi && window.gapi.load) { afterGapi(); return; }
+    const existing = document.getElementById("gapi-client-script");
+    if (existing) {
+      existing.addEventListener("load", afterGapi);
+      existing.addEventListener("error", () => reject(new Error("Could not load Google's folder picker — check your internet connection")));
+      return;
+    }
+    const s = document.createElement("script");
+    s.id = "gapi-client-script";
+    s.src = "https://apis.google.com/js/api.js";
+    s.async = true; s.defer = true;
+    s.onload = afterGapi;
+    s.onerror = () => reject(new Error("Could not load Google's folder picker — check your internet connection"));
+    document.head.appendChild(s);
+  });
+}
 async function driveApiFetch(url, token, options){
   const res = await fetch(url, { ...options, headers: { ...(options && options.headers), Authorization: `Bearer ${token}` } });
   if (!res.ok) {
-    const err = new Error(`Drive API ${res.status}`);
+    let detail = "";
+    try {
+      const body = await res.clone().json();
+      detail = (body && body.error && body.error.message) || "";
+    } catch (e) { /* response wasn't JSON — fall back to the status code below */ }
+    const err = new Error(detail ? `Drive: ${detail}` : `Drive API ${res.status}`);
     err.status = res.status;
     throw err;
   }
@@ -1801,6 +1849,8 @@ function ERPApp(){
   const [driveConnected, setDriveConnected] = useState(() => !!loadKey("erp:driveConnected", false));
   const [driveEmail, setDriveEmail] = useState(() => loadKey("erp:driveEmail", ""));
   const [driveFileId, setDriveFileId] = useState(() => loadKey("erp:driveFileId", ""));
+  const [driveFolderId, setDriveFolderId] = useState(() => loadKey("erp:driveFolderId", ""));
+  const [driveFolderName, setDriveFolderName] = useState(() => loadKey("erp:driveFolderName", ""));
   const [driveSyncing, setDriveSyncing] = useState(false);
   const [driveLastSynced, setDriveLastSynced] = useState(() => loadKey("erp:driveLastSynced", null));
   const [driveError, setDriveError] = useState("");
@@ -1985,8 +2035,10 @@ function ERPApp(){
       const content = JSON.stringify(payload, null, 2);
       let fileId = driveFileId || loadKey("erp:driveFileId", "");
 
+      const folderId = driveFolderId || loadKey("erp:driveFolderId", "");
       if (!fileId) {
         const metadata = { name: "ERP-Data.json", mimeType: "application/json" };
+        if (folderId) metadata.parents = [folderId];
         const form = new FormData();
         form.append("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
         form.append("file", new Blob([content], { type: "application/json" }));
@@ -2017,12 +2069,76 @@ function ERPApp(){
       setDriveError("");
       setDirty(false);
     } catch (e) {
+      if (e && e.status === 401) {
+        // Google rejected the saved sign-in — throw it away so the very next attempt
+        // (auto-retry, Sync Now, or reopening the app) fetches a fresh one instead of
+        // silently repeating the same rejected token until its hour-long timer runs out.
+        driveTokenRef.current = null;
+      }
       setDriveError((e && e.message) || "Sync failed");
     } finally {
       driveSyncingRef.current = false;
       setDriveSyncing(false);
     }
-  }, [driveConnected, driveFileId, driveGetFreshToken]);
+  }, [driveConnected, driveFileId, driveFolderId, driveGetFreshToken]);
+
+  const driveChooseFolder = useCallback(async () => {
+    if (!GOOGLE_DRIVE_PICKER_API_KEY || GOOGLE_DRIVE_PICKER_API_KEY.indexOf("PASTE_YOUR") === 0) {
+      showToast("The folder picker isn't set up in this copy of the app yet — see README.md", "error");
+      return;
+    }
+    try {
+      const token = await driveGetFreshToken(true); // interactive — must run from this tap
+      await loadPickerLibrary();
+      await new Promise((resolve) => {
+        const view = new google.picker.DocsView(google.picker.ViewId.FOLDERS)
+          .setSelectFolderEnabled(true)
+          .setIncludeFolders(true)
+          .setMimeTypes("application/vnd.google-apps.folder");
+        const picker = new google.picker.PickerBuilder()
+          .addView(view)
+          .setOAuthToken(token)
+          .setDeveloperKey(GOOGLE_DRIVE_PICKER_API_KEY)
+          .setOrigin(window.location.protocol + "//" + window.location.host)
+          .setTitle("Choose the folder to back up into")
+          .setCallback((data) => {
+            if (data.action === google.picker.Action.PICKED && data.docs && data.docs[0]) {
+              const folder = data.docs[0];
+              (async () => {
+                // If a backup file already exists somewhere else, move it into the
+                // newly chosen folder instead of leaving a stray copy behind.
+                const existingId = driveFileId || loadKey("erp:driveFileId", "");
+                if (existingId) {
+                  try {
+                    const t2 = await driveGetFreshToken(false);
+                    const metaRes = await driveApiFetch(
+                      `https://www.googleapis.com/drive/v3/files/${existingId}?fields=parents`, t2
+                    );
+                    const meta = await metaRes.json();
+                    const oldParents = (meta.parents || []).join(",");
+                    const qs = `addParents=${folder.id}` + (oldParents ? `&removeParents=${oldParents}` : "");
+                    await driveApiFetch(
+                      `https://www.googleapis.com/drive/v3/files/${existingId}?${qs}`, t2, { method: "PATCH" }
+                    );
+                  } catch (e) { /* best-effort move — a fresh sync below still lands it right if this fails */ }
+                }
+                setDriveFolderId(folder.id); saveKey("erp:driveFolderId", folder.id);
+                setDriveFolderName(folder.name || ""); saveKey("erp:driveFolderName", folder.name || "");
+                showToast(`Backup folder set to ${folder.name || "the chosen folder"}`);
+                driveSyncNow(true);
+                resolve();
+              })();
+            } else if (data.action === google.picker.Action.CANCEL) {
+              resolve();
+            }
+          })
+          .build();
+        picker.setVisible(true);
+      });
+    } catch (e) {
+      showToast("Could not open the folder picker — try again", "error");
+    }
+  }, [driveGetFreshToken, driveFileId, driveSyncNow, showToast]);
 
   const connectDrive = useCallback(async () => {
     if (!GOOGLE_DRIVE_CLIENT_ID || GOOGLE_DRIVE_CLIENT_ID.indexOf("PASTE_YOUR") === 0) {
@@ -2256,7 +2372,8 @@ function ERPApp(){
     connectDataFile, reconnectDataFile, disconnectDataFile, saveToFile,
     applyRestoredData: applyPayload, openExistingDataFile,
     driveConnected, driveEmail, driveSyncing, driveLastSynced, driveError,
-    connectDrive, disconnectDrive, driveSyncNow,
+    driveFolderId, driveFolderName,
+    connectDrive, disconnectDrive, driveSyncNow, driveChooseFolder,
   };
 
   return (
@@ -2285,7 +2402,7 @@ function ERPApp(){
 
       <main style={{ flex:1, maxWidth:720, width:"100%", margin:"0 auto", padding:"16px 16px 112px" }}>
         {tab==="dashboard" && <Dashboard vendors={vendors} reqs={reqs} setReqs={setReqs} recurring={recurring} setRecurring={setRecurring} expenses={expenses} cashTxns={cashTxns} goTo={navigate} showToast={showToast} sync={syncProps} />}
-        {tab==="vendors" && <VendorsTab vendors={vendors} setVendors={setVendors} reqs={reqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
+        {tab==="vendors" && <VendorsTab vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
         {tab==="requisition" && <RequisitionForm vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} expenses={expenses} setExpenses={setExpenses} lists={lists} setLists={setLists} goTo={navigate} openImport={openImport} showToast={showToast} />}
         {tab==="export" && <ExportTab reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} expenses={expenses} setExpenses={setExpenses} goTo={navigate} openImport={openImport} showToast={showToast} />}
         {tab==="recurring" && <RecurringTab vendors={vendors} setVendors={setVendors} recurring={recurring} setRecurring={setRecurring} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
@@ -2299,10 +2416,10 @@ function ERPApp(){
         {tab==="cash" && <CashTab cards={cards} setCards={setCards} cashTxns={cashTxns} setCashTxns={setCashTxns}
           cashCounts={cashCounts} setCashCounts={setCashCounts} vendors={vendors}
           lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
-        {tab==="employees" && <EmployeesTab vendors={vendors} setVendors={setVendors} reqs={reqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
+        {tab==="employees" && <EmployeesTab vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
         {tab==="statement" && <MonthlyStatementTab reqs={reqs} expenses={expenses} cashTxns={cashTxns} cards={cards} showToast={showToast} goTo={navigate} />}
         {tab==="sitesummary" && <SiteSummaryTab reqs={reqs} expenses={expenses} cashTxns={cashTxns} cards={cards} diesel={diesel} utilities={utilities} machines={machines} vendors={vendors} showToast={showToast} goTo={navigate} />}
-        {tab==="sheets" && <SheetSyncTab sheets={sheets} setSheets={setSheets} reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} />}
+        {tab==="sheets" && <SheetSyncTab sheets={sheets} setSheets={setSheets} reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} expenses={expenses} setExpenses={setExpenses} recurring={recurring} setRecurring={setRecurring} />}
         {tab==="expenses" && <ExpensesTab expenses={expenses} setExpenses={setExpenses} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
         {tab==="receivables" && <ReceivablesTab reqs={reqs} setReqs={setReqs} showToast={showToast} goTo={navigate} />}
         {tab==="payments" && <PaymentRegisterTab reqs={reqs} setReqs={setReqs} vendors={vendors} expenses={expenses} setExpenses={setExpenses} cashTxns={cashTxns} cards={cards} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} />}
@@ -2699,7 +2816,7 @@ function StatCard({ label, value, color, plain }) {
 }
 
 /* ================= VENDORS ================= */
-function VendorsTab({ vendors, setVendors, reqs, lists, setLists, showToast, goTo, openImport }){
+function VendorsTab({ vendors, setVendors, reqs, setReqs, lists, setLists, showToast, goTo, openImport }){
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState(null);
   const [showForm, setShowForm] = useState(false);
@@ -2771,6 +2888,7 @@ function VendorsTab({ vendors, setVendors, reqs, lists, setLists, showToast, goT
   function openEdit(v){ setEditing({...v}); setShowForm(true); }
   function saveVendor(v){
     if (!v.name.trim()) { showToast("Name is required","error"); return; }
+    if (!warnIfDuplicateLedgerName(vendors, v)) return;
     const exists = vendors.some(x=>x.id===v.id);
     const next = exists ? vendors.map(x=>x.id===v.id?v:x) : [...vendors, v];
     setVendors(next);
@@ -2812,7 +2930,7 @@ function VendorsTab({ vendors, setVendors, reqs, lists, setLists, showToast, goT
   if (showForm) return <VendorForm vendor={editing} lists={lists} setLists={setLists} onCancel={()=>setShowForm(false)} onSave={saveVendor} />;
   if (ledgerVendor) {
     const live = vendors.find(v => v.id === ledgerVendor.id) || ledgerVendor;
-    return <VendorLedger vendor={live} reqs={reqs} showToast={showToast}
+    return <VendorLedger vendor={live} reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} showToast={showToast}
       onBack={()=>setLedgerVendor(null)}
       onEdit={()=>{ setLedgerVendor(null); openEdit(live); }}
       onDelete={()=>{
@@ -2979,10 +3097,9 @@ function VendorsTab({ vendors, setVendors, reqs, lists, setLists, showToast, goT
   );
 }
 
-async function shareVendor(v){
-  const text = `Ledger Details\nName: ${v.name}\nGSTIN: ${v.gstin||"—"}\nPAN: ${v.pan||"—"}\nAddress: ${v.address||"—"}\nState: ${v.state||"—"}\nCategory: ${v.category||"—"}\nBank: ${v.bankName||"—"}\nA/c No.: ${v.accNo||"—"}\nIFSC: ${v.ifsc||"—"}`;
+async function shareText(title, text){
   if (navigator.share) {
-    try { await navigator.share({ title: v.name, text }); return; }
+    try { await navigator.share({ title, text }); return; }
     catch(e) { if (e && e.name === "AbortError") return; }
   }
   if (navigator.clipboard) {
@@ -2990,6 +3107,18 @@ async function shareVendor(v){
     catch(e) { /* fall through */ }
   }
   alert(text);
+}
+
+async function shareVendor(v){
+  const text = `Ledger Details\nName: ${v.name}\nGSTIN: ${v.gstin||"—"}\nPAN: ${v.pan||"—"}\nAddress: ${v.address||"—"}\nState: ${v.state||"—"}\nCategory: ${v.category||"—"}\nBank: ${v.bankName||"—"}\nA/c No.: ${v.accNo||"—"}\nIFSC: ${v.ifsc||"—"}`;
+  return shareText(v.name, text);
+}
+
+// Bank details only - for forwarding just the payment details (e.g. to HO for
+// processing a payment) without also sending GSTIN/PAN/address/category.
+async function shareVendorBank(v){
+  const text = `Bank Details\nName: ${v.name}\nBank: ${v.bankName||"—"}\nA/c No.: ${v.accNo||"—"}\nIFSC: ${v.ifsc||"—"}`;
+  return shareText(`${v.name} - Bank Details`, text);
 }
 
 function VendorForm({ vendor, lists, setLists, onCancel, onSave }){
@@ -3136,7 +3265,7 @@ function VendorForm({ vendor, lists, setLists, onCancel, onSave }){
 }
 
 /* ---------- Vendor Ledger (sub-page) ---------- */
-function VendorLedger({ vendor, reqs, showToast, onBack, onEdit, onDelete }){
+function VendorLedger({ vendor, reqs, setReqs, vendors, setVendors, showToast, onBack, onEdit, onDelete }){
   const rows = useMemo(() => {
     return reqs.filter(r => r.vendorId === vendor.id || r.name === vendor.name)
       .sort((a,b) => b.createdAt - a.createdAt);
@@ -3148,6 +3277,111 @@ function VendorLedger({ vendor, reqs, showToast, onBack, onEdit, onDelete }){
     return t;
   }, [rows]);
   const grandTotal = Object.values(totals).reduce((a,b)=>a+b,0);
+
+  // ---- selecting entries + reassigning them to a different, correctly
+  // distinct ledger (for two real people who happen to share a name) ----
+  const [selected, setSelected] = useState(new Set());
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [reassignOpen, setReassignOpen] = useState(false);
+  const [reassignQuery, setReassignQuery] = useState("");
+  const [newLedgerName, setNewLedgerName] = useState("");
+  const canReassign = !!(setReqs && vendors && setVendors);
+
+  function toggleSel(id){
+    setSelected(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  }
+
+  const sameNameCount = vendors ? vendors.filter(v => v.id !== vendor.id &&
+    String(v.name||"").trim().toLowerCase() === String(vendor.name||"").trim().toLowerCase()).length : 0;
+
+  // Picking a target with the identical name would accomplish nothing - a
+  // requisition would still be pulled into both ledgers by the name match.
+  const reassignTargets = useMemo(() => {
+    if (!vendors) return [];
+    const q = reassignQuery.trim().toLowerCase();
+    const myName = String(vendor.name||"").trim().toLowerCase();
+    return vendors
+      .filter(v => v.id !== vendor.id && String(v.name||"").trim().toLowerCase() !== myName)
+      .filter(v => !q || String(v.name||"").toLowerCase().includes(q))
+      .sort((a,b) => String(a.name||"").localeCompare(String(b.name||"")));
+  }, [vendors, vendor, reassignQuery]);
+
+  function doReassign(target){
+    const picked = rows.filter(r => selected.has(r.id));
+    if (!picked.length) return;
+    setReqs(reqs.map(r => selected.has(r.id) ? { ...r, vendorId: target.id, name: target.name } : r));
+    setSelected(new Set());
+    setReassignOpen(false);
+    setBulkOpen(false);
+    setReassignQuery("");
+    showToast(`${picked.length} moved to "${target.name}"`);
+  }
+
+  function createLedgerAndReassign(){
+    const name = newLedgerName.trim();
+    if (!name) { showToast("Enter a name for the new ledger", "error"); return; }
+    if (!warnIfDuplicateLedgerName(vendors, { id:"", name })) return;
+    const created = { ...emptyVendor, id: uid(), name, ledgerType: vendor.ledgerType || "Vendor" };
+    setVendors([...vendors, created]);
+    setNewLedgerName("");
+    doReassign(created);
+  }
+
+  if (reassignOpen) {
+    return (
+      <div>
+        <button onClick={()=>{ setReassignOpen(false); setReassignQuery(""); }}
+          style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
+          <Icon name="close" size={16} /> Cancel
+        </button>
+        <div style={{ marginBottom:14 }}>
+          <div style={{ fontWeight:700, fontSize:16, color:INK, marginBottom:4 }}>
+            Move {selected.size} entr{selected.size===1?"y":"ies"} to a different ledger
+          </div>
+          <p style={{ fontSize:13, color:MUTED, lineHeight:1.5 }}>
+            The payment record itself is kept - this only changes which ledger it belongs to.
+            Ledgers named exactly "{vendor.name}" are not offered below, since that wouldn't
+            actually separate the two histories.
+          </p>
+        </div>
+
+        <div style={{ background:SURFACE, borderRadius:16, padding:16, marginBottom:16, border:`1px solid ${SAND}` }}>
+          <SectionLabel>New ledger for a different "{vendor.name}"</SectionLabel>
+          <div style={{ display:"flex", gap:8 }}>
+            <input style={{ ...inputStyle, flex:1 }} value={newLedgerName}
+              onChange={e=>setNewLedgerName(e.target.value)}
+              placeholder={`e.g. "${vendor.name} (Site B)"`} />
+            <button onClick={createLedgerAndReassign}
+              style={{ borderRadius:12, padding:"0 18px", fontSize:14, fontWeight:700,
+                background:AMBER, color:"#fff", border:"none", cursor:"pointer", whiteSpace:"nowrap" }}>
+              Create &amp; Move
+            </button>
+          </div>
+        </div>
+
+        <SectionLabel>Or move to an existing ledger</SectionLabel>
+        <SearchBox value={reassignQuery} onChange={setReassignQuery} placeholder="Search ledgers by name" />
+        {reassignTargets.length === 0 ? (
+          <EmptyState text="No other ledgers to move to yet - create a new one above." />
+        ) : (
+          <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+            {reassignTargets.map(v => (
+              <button key={v.id} onClick={()=>doReassign(v)}
+                style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+                  background:SURFACE, borderRadius:14, padding:"12px 14px", border:`1px solid ${SAND}`,
+                  boxShadow:SHADOW, cursor:"pointer", textAlign:"left" }}>
+                <span style={{ minWidth:0 }}>
+                  <div style={{ fontWeight:650, fontSize:14.5, color:INK }}>{v.name}</div>
+                  <div style={{ fontSize:12, color:MUTED, marginTop:2 }}>{v.ledgerType || "Vendor"}</div>
+                </span>
+                <span style={{ fontSize:12.5, fontWeight:700, color:AMBER, flexShrink:0 }}>Move here</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div>
@@ -3263,6 +3497,16 @@ function VendorLedger({ vendor, reqs, showToast, onBack, onEdit, onDelete }){
         <BigButton icon="share" label="Share" onClick={()=>shareVendor(vendor)} tone="ink" full />
         <BigButton icon="edit" label="Edit" onClick={onEdit} tone="amber" full />
       </div>
+      {(vendor.accNo || vendor.ifsc) && (
+        <div style={{ marginBottom:10 }}>
+          <button onClick={()=>shareVendorBank(vendor)}
+            style={{ width:"100%", borderRadius:16, padding:"13px 20px", fontSize:14.5, fontWeight:600,
+              background:SAND, color:INK, border:"none", cursor:"pointer",
+              display:"flex", alignItems:"center", justifyContent:"center", gap:8 }}>
+            <Icon name="share" size={16} color={INK} /> Share Bank Details Only
+          </button>
+        </div>
+      )}
       <div style={{ marginBottom:16 }}>
         <BigButton icon="trash" label="Delete Ledger" onClick={onDelete} tone="red" full />
       </div>
@@ -3276,22 +3520,63 @@ function VendorLedger({ vendor, reqs, showToast, onBack, onEdit, onDelete }){
         ))}
       </div>
 
+      {canReassign && sameNameCount > 0 && (
+        <div style={{ background:"#EEF0FE", border:`1.5px solid ${AMBER}`, borderRadius:16, padding:14, marginBottom:14 }}>
+          <div style={{ fontWeight:700, color:INK, fontSize:13.5, marginBottom:6 }}>
+            {sameNameCount} other ledger{sameNameCount===1?"":"s"} named exactly "{vendor.name}"
+          </div>
+          <div style={{ fontSize:12.5, color:INK, lineHeight:1.6 }}>
+            If any of the entries below actually belong to a different person with this same
+            name, select them and use <strong>Reassign</strong> to move them onto the right ledger
+            - the payment itself is kept, only which ledger it belongs to changes.
+          </div>
+        </div>
+      )}
+
       <div style={{ fontWeight:700, marginBottom:8, color:INK, fontSize:14 }}>Transaction History</div>
       {rows.length===0 ? <EmptyState text="No requisitions recorded for this vendor yet." /> : (
-        <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
-          {rows.map(r => (
-            <div key={r.id} style={{ background:SURFACE, borderRadius:16, padding:14, border:`1px solid ${SAND}`, boxShadow:SHADOW }}>
-              <div style={{ display:"flex", justifyContent:"space-between" }}>
-                <div style={{ fontSize:12, color:MUTED }}>{fmtDate(r.date)} · {r.site}</div>
-                <div style={{ fontWeight:700, color:INK }}>₹{fmtINR(r.amount)}</div>
+        <React.Fragment>
+          {canReassign && (
+            <SelectAllBar count={selected.size} total={rows.length}
+              onToggleAll={()=>setSelected(selected.size===rows.length ? new Set() : new Set(rows.map(r=>r.id)))}
+              hint="Select to reassign" />
+          )}
+          <div style={{ display:"flex", flexDirection:"column", gap:8, marginBottom: selected.size ? 90 : 0 }}>
+            {rows.map(r => (
+              <div key={r.id} style={{ background:SURFACE, borderRadius:16, padding:14, border:`1.5px solid ${selected.has(r.id) ? AMBER : SAND}`,
+                boxShadow:SHADOW, display:"flex", gap:11, alignItems:"flex-start" }}>
+                {canReassign && <SelectCheck on={selected.has(r.id)} onToggle={()=>toggleSel(r.id)} />}
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ display:"flex", justifyContent:"space-between" }}>
+                    <div style={{ fontSize:12, color:MUTED }}>{fmtDate(r.date)} · {r.site}</div>
+                    <div style={{ fontWeight:700, color:INK }}>₹{fmtINR(r.amount)}</div>
+                  </div>
+                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginTop:6 }}>
+                    <span style={{ fontSize:12, color:MUTED }}>{r.category}{r.subCategory?" / "+r.subCategory:""}</span>
+                    <span style={{ fontSize:11, fontWeight:600, padding:"2px 8px", borderRadius:999, color:"#fff", background:STATUS_COLOR[r.paymentStatus] }}>{r.paymentStatus}</span>
+                  </div>
+                </div>
               </div>
-              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginTop:6 }}>
-                <span style={{ fontSize:12, color:MUTED }}>{r.category}{r.subCategory?" / "+r.subCategory:""}</span>
-                <span style={{ fontSize:11, fontWeight:600, padding:"2px 8px", borderRadius:999, color:"#fff", background:STATUS_COLOR[r.paymentStatus] }}>{r.paymentStatus}</span>
-              </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        </React.Fragment>
+      )}
+
+      {canReassign && selected.size > 0 && (
+        <React.Fragment>
+          <BulkBar count={selected.size} subtitle="entries selected" onOptions={()=>setBulkOpen(true)} />
+          {bulkOpen && (
+            <ActionSheet
+              title={`${selected.size} entr${selected.size===1?"y":"ies"} selected`}
+              subtitle="Choose what to do with them"
+              onClose={()=>setBulkOpen(false)}
+              actions={[
+                { label:"Reassign to another ledger", icon:"share", onPress: ()=>{ setBulkOpen(false); setReassignOpen(true); } },
+                { label:"Clear selection", icon:"close", onPress: ()=>setSelected(new Set()) },
+              ]}
+            />
+          )}
+        </React.Fragment>
       )}
     </div>
   );
@@ -6598,6 +6883,7 @@ function CashTab({ cards, setCards, cashTxns, setCashTxns, cashCounts, setCashCo
   const [query, setQuery] = useState("");
   const [groupBy, setGroupBy] = useState("date");
   const [balOrder, setBalOrder] = useState("entry");   // entry | date
+  const [openCardId, setOpenCardId] = useState(null);  // card id whose dedicated page is open, or null
 
   // Balance in hand after each entry, worked out per card in date order.
   // Independent of how the list is currently sorted or filtered.
@@ -6850,6 +7136,7 @@ function CashTab({ cards, setCards, cashTxns, setCashTxns, cashCounts, setCashCo
                     setCards(cards.filter(x => x.id !== c.id));
                     setCashCounts((cashCounts||[]).filter(x => x.cardId !== c.id));
                     if (cardFilter === c.id) setCardFilter("All");
+                    if (openCardId === c.id) setOpenCardId(null);
                     setEditingCard(null);
                     showToast(mine.length ? `Card and ${mine.length} entr${mine.length===1?"y":"ies"} deleted` : "Card deleted");
                   }}
@@ -6931,6 +7218,345 @@ function CashTab({ cards, setCards, cashTxns, setCashTxns, cashCounts, setCashCo
       onCancel={()=>setEditing(null)} onSave={saveTxn} />;
   }
 
+  /* ---- shared: month filter + summary + search/group/sort + entries list + bulk bar ----
+     Used by both the "all cards" screen and a single card's dedicated page below — the
+     scope (all cards vs one card) comes entirely from cardFilter, which is kept in sync
+     with openCardId whenever a dedicated page is open. */
+  function renderLedger(){
+    return (
+      <React.Fragment>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr auto", gap:8, marginBottom:14 }}>
+          <select style={inputStyle} value={monthFilter} onChange={e=>setMonthFilter(e.target.value)}>
+            <option value="all">All months</option>
+            {months.map(m => <option key={m} value={m}>{monthLabel(m)}</option>)}
+          </select>
+          <button onClick={()=>setOnlyMissingBill(!onlyMissingBill)}
+            style={{ borderRadius:14, padding:"0 14px", fontSize:13, fontWeight:600, whiteSpace:"nowrap", cursor:"pointer",
+              background: onlyMissingBill?RED:SURFACE, color: onlyMissingBill?"#fff":INK, border:`1px solid ${onlyMissingBill?RED:SAND}` }}>
+            No bill{missingBills.length ? ` (${missingBills.length})` : ""}
+          </button>
+        </div>
+
+        <div style={{ background:SURFACE, borderRadius:20, padding:18, marginBottom:14, border:`1px solid ${SAND}`, boxShadow:SHADOW }}>
+          <div style={{ fontSize:11.5, fontWeight:700, color:AMBER, textTransform:"uppercase",
+            letterSpacing:"0.08em", marginBottom:12 }}>
+            {monthFilter === "all" ? "All time" : monthLabel(monthFilter)}
+            {cardFilter !== "All" ? ` · ${(cards.find(c=>c.id===cardFilter)||{}).name || ""}` : ""}
+          </div>
+
+          {period && (
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+              paddingBottom:10, marginBottom:10, borderBottom:`1px solid ${SAND}` }}>
+              <span style={{ fontSize:13, color:MUTED, fontWeight:600 }}>Opening balance</span>
+              <span className="num" style={{ fontSize:15, fontWeight:700, color:INK }}>₹{fmtINR(period.opening)}</span>
+            </div>
+          )}
+
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"5px 0" }}>
+            <span style={{ display:"flex", alignItems:"center", gap:8, fontSize:13.5, color:INK }}>
+              <span style={{ width:7, height:7, borderRadius:"50%", background:GREEN }} />
+              Money in
+            </span>
+            <span className="num" style={{ fontSize:15, fontWeight:700, color:GREEN }}>+ ₹{fmtINR(refilled)}</span>
+          </div>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"5px 0" }}>
+            <span style={{ display:"flex", alignItems:"center", gap:8, fontSize:13.5, color:INK }}>
+              <span style={{ width:7, height:7, borderRadius:"50%", background:AMBER }} />
+              Spent
+            </span>
+            <span className="num" style={{ fontSize:15, fontWeight:700, color:INK }}>- ₹{fmtINR(spent)}</span>
+          </div>
+          {returned > 0 && (
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"5px 0" }}>
+              <span style={{ display:"flex", alignItems:"center", gap:8, fontSize:13.5, color:INK }}>
+                <span style={{ width:7, height:7, borderRadius:"50%", background:"#9AA7BC" }} />
+                Returned
+              </span>
+              <span className="num" style={{ fontSize:15, fontWeight:700, color:MUTED }}>- ₹{fmtINR(returned)}</span>
+            </div>
+          )}
+
+          {period && (
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+              paddingTop:11, marginTop:8, borderTop:`2px solid ${INK}` }}>
+              <span style={{ fontSize:14, fontWeight:700, color:INK }}>Should be in hand</span>
+              <span className="num" style={{ fontSize:19, fontWeight:800, color: period.closing < 0 ? RED : INK }}>
+                ₹{fmtINR(period.closing)}
+              </span>
+            </div>
+          )}
+
+          <div style={{ marginTop:14, paddingTop:12, borderTop:`1px solid ${SAND}` }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
+              <span style={{ fontSize:11.5, fontWeight:700, color:MUTED, textTransform:"uppercase", letterSpacing:"0.07em" }}>
+                Cash in hand, all entries
+              </span>
+              <div style={{ display:"flex", gap:5 }}>
+                {[["entry","As entered"],["date","By date"]].map(([k,lbl]) => (
+                  <button key={k} onClick={()=>setBalOrder(k)}
+                    style={{ padding:"5px 10px", borderRadius:9, fontSize:11, fontWeight:700, cursor:"pointer",
+                      background: balOrder===k?INK:SURFACE, color: balOrder===k?"#fff":MUTED,
+                      border:`1px solid ${balOrder===k?INK:SAND}` }}>
+                    {lbl}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {(() => {
+              const all = cardFilter === "All" ? cashTxns : cashTxns.filter(t => t.cardId === cardFilter);
+              const inAll  = all.filter(t=>t.type==="Refill").reduce((a,t)=>a+Number(t.amount||0),0);
+              const outAll = all.filter(t=>t.type!=="Refill").reduce((a,t)=>a+Number(t.amount||0),0);
+              const openAll = 0;
+              return (
+                <React.Fragment>
+                  <div style={{ display:"flex", justifyContent:"space-between", fontSize:13, padding:"3px 0" }}>
+                    <span style={{ color:MUTED }}>Total credit ({all.filter(t=>t.type==="Refill").length})</span>
+                    <span className="num" style={{ fontWeight:700, color:GREEN }}>{fmtINR(inAll)}</span>
+                  </div>
+                  <div style={{ display:"flex", justifyContent:"space-between", fontSize:13, padding:"3px 0" }}>
+                    <span style={{ color:MUTED }}>Total debit ({all.filter(t=>t.type!=="Refill").length})</span>
+                    <span className="num" style={{ fontWeight:700, color:INK }}>{fmtINR(outAll)}</span>
+                  </div>
+                  {openAll !== 0 && (
+                    <div style={{ display:"flex", justifyContent:"space-between", fontSize:13, padding:"3px 0" }}>
+                      <span style={{ color:MUTED }}>Opening balance</span>
+                      <span className="num" style={{ fontWeight:700, color:INK }}>{fmtINR(openAll)}</span>
+                    </div>
+                  )}
+                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+                    paddingTop:9, marginTop:5, borderTop:`2px solid ${INK}` }}>
+                    <span style={{ fontWeight:700, color:INK, fontSize:14 }}>Cash in hand</span>
+                    <span className="num" style={{ fontWeight:800, fontSize:19,
+                      color: (openAll + inAll - outAll) < 0 ? RED : INK }}>
+                      {fmtINR(openAll + inAll - outAll)}
+                    </span>
+                  </div>
+                  <div style={{ fontSize:11.5, color:MUTED, marginTop:6, lineHeight:1.5 }}>
+                    Credit minus debit. This total never depends on the order entries are in.
+                  </div>
+                </React.Fragment>
+              );
+            })()}
+          </div>
+
+          {missingBillValue > 0 && (
+            <button onClick={()=>setOnlyMissingBill(true)}
+              style={{ width:"100%", marginTop:12, padding:"10px 12px", borderRadius:12, cursor:"pointer",
+                background:"#FDECEE", border:`1px solid ${RED}`, textAlign:"left",
+                display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <span style={{ fontSize:12.5, fontWeight:600, color:INK }}>
+                {missingBills.length} spend(s) with no bill
+              </span>
+              <span className="num" style={{ fontSize:13, fontWeight:700, color:RED }}>₹{fmtINR(missingBillValue)}</span>
+            </button>
+          )}
+        </div>
+
+        <SearchBox value={query} onChange={setQuery} placeholder="Search payee, description, bill no" />
+        <GroupBar value={groupBy} onChange={setGroupBy} options={[
+          {k:"date",label:"Date"},{k:"category",label:"Category"},{k:"site",label:"Site"},{k:"type",label:"Type"}]} />
+        <SortBar sortKey={sortKey} onSortKey={setSortKey} options={CASH_SORTS} desc={desc} onDesc={setDesc} />
+        <SelectAllBar count={selected.size} total={visible.length}
+          onToggleAll={()=>setSelected(selected.size===visible.length ? new Set() : new Set(visible.map(t=>t.id)))} />
+
+        {visible.length === 0 ? (
+          <EmptyState text={onlyMissingBill ? "Every spend has a bill recorded." : "No entries for this filter yet."} />
+        ) : (
+          <React.Fragment>
+            {catBreak.length > 1 && (
+              <div style={{ background:SURFACE, borderRadius:20, padding:18, marginBottom:12, border:`1px solid ${SAND}`, boxShadow:SHADOW }}>
+                <div style={{ fontWeight:700, marginBottom:12, color:INK }}>Where the money went</div>
+                <BarList data={catBreak} color={AMBER} />
+              </div>
+            )}
+
+            <div style={{ display:"flex", flexDirection:"column", gap:6, marginBottom: selected.size ? 150 : 24 }}>
+              {sections.map(g => (
+                <React.Fragment key={g.key}>
+                  <GroupHead label={g.label} count={g.rows.length} total={g.total}
+                    tone={g.total < 0 ? GREEN : INK} />
+                  {g.rows.map(t => {
+                    const card = cards.find(c=>c.id===t.cardId);
+                    const isIn = t.type === "Refill";
+                    const noBill = t.type === "Spend" && !t.hasBill;
+                    return (
+                      <div key={t.id} onClick={()=>setEditing(t)}
+                        style={{ background:SURFACE, borderRadius:14, padding:"12px 14px", display:"flex", gap:11,
+                          alignItems:"center", cursor:"pointer",
+                          border:`1.5px solid ${selected.has(t.id) ? AMBER : SAND}`,
+                          borderLeft:`4px solid ${isIn ? GREEN : t.type==="Return" ? "#9AA7BC" : noBill ? RED : AMBER}`,
+                          boxShadow:SHADOW }}>
+                        <SelectCheck on={selected.has(t.id)} onToggle={()=>toggleSel(t.id)} />
+                        <div style={{ flex:1, minWidth:0 }}>
+                          <div style={{ fontWeight:650, fontSize:14.5, color:INK, overflow:"hidden",
+                            textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                            {t.vendorName || t.description || t.type}
+                          </div>
+                          <div style={{ fontSize:12, color:MUTED, marginTop:2, overflow:"hidden",
+                            textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                            {[groupBy === "date" ? (t.category || t.type) : fmtDate(t.date),
+                              t.site, card ? card.name : null,
+                              t.vendorName && t.description ? t.description : null
+                            ].filter(Boolean).join(" · ")}
+                          </div>
+                        </div>
+                        <div style={{ textAlign:"right", flexShrink:0 }}>
+                          <div className="num" style={{ fontWeight:750, fontSize:15,
+                            color: isIn ? GREEN : INK }}>
+                            {isIn ? "+" : "-"}₹{fmtINR(t.amount)}
+                          </div>
+                          {balanceAfter[t.id] !== undefined && (
+                            <div className="num" style={{ fontSize:10.5, color:MUTED, marginTop:2 }}>
+                              bal {fmtINR(balanceAfter[t.id])}
+                            </div>
+                          )}
+                          {noBill && (
+                            <div style={{ fontSize:10.5, fontWeight:700, color:RED, marginTop:2 }}>no bill</div>
+                          )}
+                          {t.billNo && (
+                            <div style={{ fontSize:10.5, color:MUTED, marginTop:2 }}>#{t.billNo}</div>
+                          )}
+                        </div>
+                        <button onClick={(e)=>{e.stopPropagation(); removeTxn(t);}}
+                          style={{ padding:5, borderRadius:8, background:"transparent", border:"none", cursor:"pointer", flexShrink:0 }}>
+                          <Icon name="trash" size={14} color="#C7D0DE" />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </React.Fragment>
+              ))}
+            </div>
+          </React.Fragment>
+        )}
+
+        {selected.size > 0 && (() => {
+          const rows = cashTxns.filter(t => selected.has(t.id));
+          const inAmt = rows.filter(t=>t.type==="Refill").reduce((a,t)=>a+Number(t.amount||0),0);
+          const outAmt = rows.filter(t=>t.type!=="Refill").reduce((a,t)=>a+Number(t.amount||0),0);
+          return (
+            <React.Fragment>
+              <BulkBar count={selected.size}
+                subtitle={`${inAmt ? "+ Rs "+fmtINR(inAmt)+"   " : ""}${outAmt ? "- Rs "+fmtINR(outAmt) : ""}`}
+                onOptions={()=>setBulkOpen(true)} />
+              {bulkOpen && (
+                <ActionSheet
+                  title={`${selected.size} entr${selected.size===1?"y":"ies"} selected`}
+                  subtitle="Choose what to do with them"
+                  onClose={()=>setBulkOpen(false)}
+                  actions={[
+                    { label:"Mark bill as on file", icon:"check", onPress: ()=>{
+                        setCashTxns(cashTxns.map(t => selected.has(t.id) ? { ...t, hasBill:true } : t));
+                        setSelected(new Set());
+                        showToast(`${rows.length} marked as having a bill`);
+                      } },
+                    { label:"Clear selection", icon:"close", onPress: ()=>setSelected(new Set()) },
+                    { label:"Delete", icon:"trash", danger:true, onPress: ()=>{
+                        if (!confirm(
+                          `Delete ${rows.length} entr${rows.length===1?"y":"ies"}?\n\n` +
+                          `${inAmt ? "Money in: Rs "+fmtINR(inAmt)+"\n" : ""}${outAmt ? "Spent: Rs "+fmtINR(outAmt)+"\n" : ""}` +
+                          `\nBalances will be worked out again without them. This cannot be undone.`
+                        )) return;
+                        setCashTxns(cashTxns.filter(t => !selected.has(t.id)));
+                        setSelected(new Set());
+                        showToast(`${rows.length} deleted`);
+                      } },
+                  ]}
+                />
+              )}
+            </React.Fragment>
+          );
+        })()}
+      </React.Fragment>
+    );
+  }
+
+  /* ---- dedicated page for one card: opened by tapping a card tile ---- */
+  if (openCardId) {
+    const card = cards.find(c => c.id === openCardId);
+    if (!card) {
+      return (
+        <div>
+          <button onClick={()=>{ setOpenCardId(null); setCardFilter("All"); }}
+            style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
+            <Icon name="close" size={16} /> Back to Cash & Card
+          </button>
+          <EmptyState text="This card no longer exists." />
+        </div>
+      );
+    }
+    const bal = cardBalance(card, cashTxns);
+    const miss = cashTxns.filter(t => t.cardId===card.id && t.type==="Spend" && !t.hasBill).length;
+    const lastCount = (cashCounts||[]).filter(x=>x.cardId===card.id)
+      .sort((a,b)=>String(b.date||"").localeCompare(String(a.date||"")))[0];
+    return (
+      <div>
+        <button onClick={()=>{ setOpenCardId(null); setCardFilter("All"); setSelected(new Set()); }}
+          style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
+          <Icon name="close" size={16} /> Back to Cash & Card
+        </button>
+
+        <div style={{ background:GRAD_INK, borderRadius:20, padding:18, boxShadow:SHADOW_LG, marginBottom:14 }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:10 }}>
+            <div style={{ minWidth:0 }}>
+              <div style={{ color:"#fff", fontWeight:700, fontSize:18 }}>{card.name}</div>
+              <div style={{ color:"#8FA0BC", fontSize:12, marginTop:3 }}>
+                {[card.site, card.holder, card.last4 ? "**** "+card.last4 : ""].filter(Boolean).join(" · ")}
+              </div>
+            </div>
+            <button onClick={()=>setEditingCard(card)}
+              style={{ background:"rgba(255,255,255,0.12)", border:"none", borderRadius:10, padding:8, cursor:"pointer", flexShrink:0 }}>
+              <Icon name="edit" size={14} color="#fff" />
+            </button>
+          </div>
+          <div className="num" style={{ color:"#fff", fontWeight:800, fontSize:28, marginTop:12 }}>
+            ₹{fmtINR(bal)}
+          </div>
+          <div style={{ color:"#8FA0BC", fontSize:12 }}>cash in hand</div>
+          <div style={{ display:"flex", gap:8, marginTop:12, flexWrap:"wrap" }}>
+            {miss > 0 && (
+              <span style={{ fontSize:11, fontWeight:700, padding:"4px 10px", borderRadius:999, background:"rgba(225,75,84,0.25)", color:"#FFB4B4" }}>
+                {miss} without bill
+              </span>
+            )}
+            {lastCount && (
+              <span style={{ fontSize:11, fontWeight:600, padding:"4px 10px", borderRadius:999, background:"rgba(255,255,255,0.12)", color:"#fff" }}>
+                counted {fmtDate(lastCount.date)}
+              </span>
+            )}
+            {bal < 0 && (
+              <span style={{ fontSize:11, fontWeight:700, padding:"4px 10px", borderRadius:999, background:"rgba(225,75,84,0.25)", color:"#FFB4B4" }}>
+                negative — check entries
+              </span>
+            )}
+          </div>
+        </div>
+
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:10 }}>
+          <BigButton icon="plus" label="Add Entry"
+            onClick={()=>setEditing({ ...emptyCashTxn, id: uid(), date: todayStr(), cardId: card.id, site: card.site || "" })}
+            tone="amber" full />
+          <button onClick={()=>setCounting({ ...emptyCashCount, id: uid(), date: todayStr(), cardId: card.id })}
+            style={{ borderRadius:16, padding:"14px 6px", fontSize:14, fontWeight:600, background:SAND, color:INK, border:"none", cursor:"pointer" }}>
+            Count cash
+          </button>
+        </div>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:14 }}>
+          <button onClick={()=>openImport("cash", card.id)}
+            style={{ borderRadius:14, padding:"12px 6px", fontSize:13, fontWeight:600, background:SAND, color:INK, border:"none", cursor:"pointer" }}>
+            Import
+          </button>
+          <button onClick={exportCash}
+            style={{ borderRadius:14, padding:"12px 6px", fontSize:13, fontWeight:700, background:GREEN, color:"#fff", border:"none", cursor:"pointer" }}>
+            Export
+          </button>
+        </div>
+
+        {renderLedger()}
+      </div>
+    );
+  }
+
   /* ---- main ---- */
   return (
     <div>
@@ -6951,7 +7577,7 @@ function CashTab({ cards, setCards, cashTxns, setCashTxns, cashCounts, setCashCo
             const lastCount = (cashCounts||[]).filter(x=>x.cardId===c.id)
               .sort((a,b)=>String(b.date||"").localeCompare(String(a.date||"")))[0];
             return (
-              <div key={c.id} onClick={()=>setCardFilter(cardFilter === c.id ? "All" : c.id)}
+              <div key={c.id} onClick={()=>{ setCardFilter(c.id); setSelected(new Set()); setOpenCardId(c.id); }}
                 style={{ background:GRAD_INK, borderRadius:20, padding:18, boxShadow:SHADOW_LG, cursor:"pointer",
                   outline: cardFilter === c.id ? `2.5px solid ${AMBER}` : "none", outlineOffset:2 }}>
                 <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:10 }}>
@@ -6962,10 +7588,10 @@ function CashTab({ cards, setCards, cashTxns, setCashTxns, cashCounts, setCashCo
                     </div>
                   </div>
                   <div style={{ display:"flex", gap:7, flexShrink:0 }}>
-                    <button onClick={(e)=>{ e.stopPropagation(); setCardFilter(cardFilter === c.id ? "All" : c.id); }}
-                      style={{ background: cardFilter === c.id ? AMBER : "rgba(255,255,255,0.12)", border:"none",
+                    <button onClick={(e)=>{ e.stopPropagation(); setCardFilter(c.id); setSelected(new Set()); setOpenCardId(c.id); }}
+                      style={{ background: "rgba(255,255,255,0.12)", border:"none",
                         borderRadius:10, padding:"8px 11px", cursor:"pointer", fontSize:12, fontWeight:700, color:"#fff" }}>
-                      {cardFilter === c.id ? "Showing" : "Entries"}
+                      Entries →
                     </button>
                     <button onClick={(e)=>{ e.stopPropagation(); setEditingCard(c); }}
                       style={{ background:"rgba(255,255,255,0.12)", border:"none", borderRadius:10, padding:8, cursor:"pointer" }}>
@@ -7022,7 +7648,7 @@ function CashTab({ cards, setCards, cashTxns, setCashTxns, cashCounts, setCashCo
                     lowest {fmtINR(low)}
                   </span>
                 </div>
-                <button onClick={()=>{ setCardFilter(card.id); setSortKey("entry"); setDesc(false); }}
+                <button onClick={()=>{ setCardFilter(card.id); setSortKey("entry"); setDesc(false); setSelected(new Set()); setOpenCardId(card.id); }}
                   style={{ width:"100%", borderRadius:11, padding:"10px 6px", fontSize:12.5, fontWeight:600,
                     background:SAND, color:INK, border:"none", cursor:"pointer" }}>
                   Show its entries in written order
@@ -7081,248 +7707,7 @@ function CashTab({ cards, setCards, cashTxns, setCashTxns, cashCounts, setCashCo
         </div>
       )}
 
-      <div style={{ display:"grid", gridTemplateColumns:"1fr auto", gap:8, marginBottom:14 }}>
-        <select style={inputStyle} value={monthFilter} onChange={e=>setMonthFilter(e.target.value)}>
-          <option value="all">All months</option>
-          {months.map(m => <option key={m} value={m}>{monthLabel(m)}</option>)}
-        </select>
-        <button onClick={()=>setOnlyMissingBill(!onlyMissingBill)}
-          style={{ borderRadius:14, padding:"0 14px", fontSize:13, fontWeight:600, whiteSpace:"nowrap", cursor:"pointer",
-            background: onlyMissingBill?RED:SURFACE, color: onlyMissingBill?"#fff":INK, border:`1px solid ${onlyMissingBill?RED:SAND}` }}>
-          No bill{missingBills.length ? ` (${missingBills.length})` : ""}
-        </button>
-      </div>
-
-      <div style={{ background:SURFACE, borderRadius:20, padding:18, marginBottom:14, border:`1px solid ${SAND}`, boxShadow:SHADOW }}>
-        <div style={{ fontSize:11.5, fontWeight:700, color:AMBER, textTransform:"uppercase",
-          letterSpacing:"0.08em", marginBottom:12 }}>
-          {monthFilter === "all" ? "All time" : monthLabel(monthFilter)}
-          {cardFilter !== "All" ? ` · ${(cards.find(c=>c.id===cardFilter)||{}).name || ""}` : ""}
-        </div>
-
-        {period && (
-          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
-            paddingBottom:10, marginBottom:10, borderBottom:`1px solid ${SAND}` }}>
-            <span style={{ fontSize:13, color:MUTED, fontWeight:600 }}>Opening balance</span>
-            <span className="num" style={{ fontSize:15, fontWeight:700, color:INK }}>₹{fmtINR(period.opening)}</span>
-          </div>
-        )}
-
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"5px 0" }}>
-          <span style={{ display:"flex", alignItems:"center", gap:8, fontSize:13.5, color:INK }}>
-            <span style={{ width:7, height:7, borderRadius:"50%", background:GREEN }} />
-            Money in
-          </span>
-          <span className="num" style={{ fontSize:15, fontWeight:700, color:GREEN }}>+ ₹{fmtINR(refilled)}</span>
-        </div>
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"5px 0" }}>
-          <span style={{ display:"flex", alignItems:"center", gap:8, fontSize:13.5, color:INK }}>
-            <span style={{ width:7, height:7, borderRadius:"50%", background:AMBER }} />
-            Spent
-          </span>
-          <span className="num" style={{ fontSize:15, fontWeight:700, color:INK }}>- ₹{fmtINR(spent)}</span>
-        </div>
-        {returned > 0 && (
-          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"5px 0" }}>
-            <span style={{ display:"flex", alignItems:"center", gap:8, fontSize:13.5, color:INK }}>
-              <span style={{ width:7, height:7, borderRadius:"50%", background:"#9AA7BC" }} />
-              Returned
-            </span>
-            <span className="num" style={{ fontSize:15, fontWeight:700, color:MUTED }}>- ₹{fmtINR(returned)}</span>
-          </div>
-        )}
-
-        {period && (
-          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
-            paddingTop:11, marginTop:8, borderTop:`2px solid ${INK}` }}>
-            <span style={{ fontSize:14, fontWeight:700, color:INK }}>Should be in hand</span>
-            <span className="num" style={{ fontSize:19, fontWeight:800, color: period.closing < 0 ? RED : INK }}>
-              ₹{fmtINR(period.closing)}
-            </span>
-          </div>
-        )}
-
-        <div style={{ marginTop:14, paddingTop:12, borderTop:`1px solid ${SAND}` }}>
-          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
-            <span style={{ fontSize:11.5, fontWeight:700, color:MUTED, textTransform:"uppercase", letterSpacing:"0.07em" }}>
-              Cash in hand, all entries
-            </span>
-            <div style={{ display:"flex", gap:5 }}>
-              {[["entry","As entered"],["date","By date"]].map(([k,lbl]) => (
-                <button key={k} onClick={()=>setBalOrder(k)}
-                  style={{ padding:"5px 10px", borderRadius:9, fontSize:11, fontWeight:700, cursor:"pointer",
-                    background: balOrder===k?INK:SURFACE, color: balOrder===k?"#fff":MUTED,
-                    border:`1px solid ${balOrder===k?INK:SAND}` }}>
-                  {lbl}
-                </button>
-              ))}
-            </div>
-          </div>
-          {(() => {
-            const all = cardFilter === "All" ? cashTxns : cashTxns.filter(t => t.cardId === cardFilter);
-            const inAll  = all.filter(t=>t.type==="Refill").reduce((a,t)=>a+Number(t.amount||0),0);
-            const outAll = all.filter(t=>t.type!=="Refill").reduce((a,t)=>a+Number(t.amount||0),0);
-            const openAll = 0;
-            return (
-              <React.Fragment>
-                <div style={{ display:"flex", justifyContent:"space-between", fontSize:13, padding:"3px 0" }}>
-                  <span style={{ color:MUTED }}>Total credit ({all.filter(t=>t.type==="Refill").length})</span>
-                  <span className="num" style={{ fontWeight:700, color:GREEN }}>{fmtINR(inAll)}</span>
-                </div>
-                <div style={{ display:"flex", justifyContent:"space-between", fontSize:13, padding:"3px 0" }}>
-                  <span style={{ color:MUTED }}>Total debit ({all.filter(t=>t.type!=="Refill").length})</span>
-                  <span className="num" style={{ fontWeight:700, color:INK }}>{fmtINR(outAll)}</span>
-                </div>
-                {openAll !== 0 && (
-                  <div style={{ display:"flex", justifyContent:"space-between", fontSize:13, padding:"3px 0" }}>
-                    <span style={{ color:MUTED }}>Opening balance</span>
-                    <span className="num" style={{ fontWeight:700, color:INK }}>{fmtINR(openAll)}</span>
-                  </div>
-                )}
-                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
-                  paddingTop:9, marginTop:5, borderTop:`2px solid ${INK}` }}>
-                  <span style={{ fontWeight:700, color:INK, fontSize:14 }}>Cash in hand</span>
-                  <span className="num" style={{ fontWeight:800, fontSize:19,
-                    color: (openAll + inAll - outAll) < 0 ? RED : INK }}>
-                    {fmtINR(openAll + inAll - outAll)}
-                  </span>
-                </div>
-                <div style={{ fontSize:11.5, color:MUTED, marginTop:6, lineHeight:1.5 }}>
-                  Credit minus debit. This total never depends on the order entries are in.
-                </div>
-              </React.Fragment>
-            );
-          })()}
-        </div>
-
-        {missingBillValue > 0 && (
-          <button onClick={()=>setOnlyMissingBill(true)}
-            style={{ width:"100%", marginTop:12, padding:"10px 12px", borderRadius:12, cursor:"pointer",
-              background:"#FDECEE", border:`1px solid ${RED}`, textAlign:"left",
-              display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-            <span style={{ fontSize:12.5, fontWeight:600, color:INK }}>
-              {missingBills.length} spend(s) with no bill
-            </span>
-            <span className="num" style={{ fontSize:13, fontWeight:700, color:RED }}>₹{fmtINR(missingBillValue)}</span>
-          </button>
-        )}
-      </div>
-
-      <SearchBox value={query} onChange={setQuery} placeholder="Search payee, description, bill no" />
-      <GroupBar value={groupBy} onChange={setGroupBy} options={[
-        {k:"date",label:"Date"},{k:"category",label:"Category"},{k:"site",label:"Site"},{k:"type",label:"Type"}]} />
-      <SortBar sortKey={sortKey} onSortKey={setSortKey} options={CASH_SORTS} desc={desc} onDesc={setDesc} />
-      <SelectAllBar count={selected.size} total={visible.length}
-        onToggleAll={()=>setSelected(selected.size===visible.length ? new Set() : new Set(visible.map(t=>t.id)))} />
-
-      {visible.length === 0 ? (
-        <EmptyState text={onlyMissingBill ? "Every spend has a bill recorded." : "No entries for this filter yet."} />
-      ) : (
-        <React.Fragment>
-          {catBreak.length > 1 && (
-            <div style={{ background:SURFACE, borderRadius:20, padding:18, marginBottom:12, border:`1px solid ${SAND}`, boxShadow:SHADOW }}>
-              <div style={{ fontWeight:700, marginBottom:12, color:INK }}>Where the money went</div>
-              <BarList data={catBreak} color={AMBER} />
-            </div>
-          )}
-
-          <div style={{ display:"flex", flexDirection:"column", gap:6, marginBottom: selected.size ? 150 : 24 }}>
-            {sections.map(g => (
-              <React.Fragment key={g.key}>
-                <GroupHead label={g.label} count={g.rows.length} total={g.total}
-                  tone={g.total < 0 ? GREEN : INK} />
-                {g.rows.map(t => {
-                  const card = cards.find(c=>c.id===t.cardId);
-                  const isIn = t.type === "Refill";
-                  const noBill = t.type === "Spend" && !t.hasBill;
-                  return (
-                    <div key={t.id} onClick={()=>setEditing(t)}
-                      style={{ background:SURFACE, borderRadius:14, padding:"12px 14px", display:"flex", gap:11,
-                        alignItems:"center", cursor:"pointer",
-                        border:`1.5px solid ${selected.has(t.id) ? AMBER : SAND}`,
-                        borderLeft:`4px solid ${isIn ? GREEN : t.type==="Return" ? "#9AA7BC" : noBill ? RED : AMBER}`,
-                        boxShadow:SHADOW }}>
-                      <SelectCheck on={selected.has(t.id)} onToggle={()=>toggleSel(t.id)} />
-                      <div style={{ flex:1, minWidth:0 }}>
-                        <div style={{ fontWeight:650, fontSize:14.5, color:INK, overflow:"hidden",
-                          textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
-                          {t.vendorName || t.description || t.type}
-                        </div>
-                        <div style={{ fontSize:12, color:MUTED, marginTop:2, overflow:"hidden",
-                          textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
-                          {[groupBy === "date" ? (t.category || t.type) : fmtDate(t.date),
-                            t.site, card ? card.name : null,
-                            t.vendorName && t.description ? t.description : null
-                          ].filter(Boolean).join(" · ")}
-                        </div>
-                      </div>
-                      <div style={{ textAlign:"right", flexShrink:0 }}>
-                        <div className="num" style={{ fontWeight:750, fontSize:15,
-                          color: isIn ? GREEN : INK }}>
-                          {isIn ? "+" : "-"}₹{fmtINR(t.amount)}
-                        </div>
-                        {balanceAfter[t.id] !== undefined && (
-                          <div className="num" style={{ fontSize:10.5, color:MUTED, marginTop:2 }}>
-                            bal {fmtINR(balanceAfter[t.id])}
-                          </div>
-                        )}
-                        {noBill && (
-                          <div style={{ fontSize:10.5, fontWeight:700, color:RED, marginTop:2 }}>no bill</div>
-                        )}
-                        {t.billNo && (
-                          <div style={{ fontSize:10.5, color:MUTED, marginTop:2 }}>#{t.billNo}</div>
-                        )}
-                      </div>
-                      <button onClick={(e)=>{e.stopPropagation(); removeTxn(t);}}
-                        style={{ padding:5, borderRadius:8, background:"transparent", border:"none", cursor:"pointer", flexShrink:0 }}>
-                        <Icon name="trash" size={14} color="#C7D0DE" />
-                      </button>
-                    </div>
-                  );
-                })}
-              </React.Fragment>
-            ))}
-          </div>
-        </React.Fragment>
-      )}
-
-      {selected.size > 0 && (() => {
-        const rows = cashTxns.filter(t => selected.has(t.id));
-        const inAmt = rows.filter(t=>t.type==="Refill").reduce((a,t)=>a+Number(t.amount||0),0);
-        const outAmt = rows.filter(t=>t.type!=="Refill").reduce((a,t)=>a+Number(t.amount||0),0);
-        return (
-          <React.Fragment>
-            <BulkBar count={selected.size}
-              subtitle={`${inAmt ? "+ Rs "+fmtINR(inAmt)+"   " : ""}${outAmt ? "- Rs "+fmtINR(outAmt) : ""}`}
-              onOptions={()=>setBulkOpen(true)} />
-            {bulkOpen && (
-              <ActionSheet
-                title={`${selected.size} entr${selected.size===1?"y":"ies"} selected`}
-                subtitle="Choose what to do with them"
-                onClose={()=>setBulkOpen(false)}
-                actions={[
-                  { label:"Mark bill as on file", icon:"check", onPress: ()=>{
-                      setCashTxns(cashTxns.map(t => selected.has(t.id) ? { ...t, hasBill:true } : t));
-                      setSelected(new Set());
-                      showToast(`${rows.length} marked as having a bill`);
-                    } },
-                  { label:"Clear selection", icon:"close", onPress: ()=>setSelected(new Set()) },
-                  { label:"Delete", icon:"trash", danger:true, onPress: ()=>{
-                      if (!confirm(
-                        `Delete ${rows.length} entr${rows.length===1?"y":"ies"}?\n\n` +
-                        `${inAmt ? "Money in: Rs "+fmtINR(inAmt)+"\n" : ""}${outAmt ? "Spent: Rs "+fmtINR(outAmt)+"\n" : ""}` +
-                        `\nBalances will be worked out again without them. This cannot be undone.`
-                      )) return;
-                      setCashTxns(cashTxns.filter(t => !selected.has(t.id)));
-                      setSelected(new Set());
-                      showToast(`${rows.length} deleted`);
-                    } },
-                ]}
-              />
-            )}
-          </React.Fragment>
-        );
-      })()}
+      {renderLedger()}
 
     </div>
   );
@@ -7458,7 +7843,7 @@ function CashTxnForm({ txn, cards, vendors, lists, setLists, onCancel, onSave })
 }
 
 /* ================= EMPLOYEE MASTER ================= */
-function EmployeesTab({ vendors, setVendors, reqs, lists, setLists, showToast, goTo, openImport }){
+function EmployeesTab({ vendors, setVendors, reqs, setReqs, lists, setLists, showToast, goTo, openImport }){
   const [query, setQuery] = useState("");
   const [siteFilter, setSiteFilter] = useState("All");
   const [statusFilter, setStatusFilter] = useState("Active");
@@ -7500,6 +7885,7 @@ function EmployeesTab({ vendors, setVendors, reqs, lists, setLists, showToast, g
 
   function saveEmp(v){
     if (!v.name.trim()) { showToast("Name is required", "error"); return; }
+    if (!warnIfDuplicateLedgerName(vendors, v)) return;
     const exists = vendors.some(x => x.id === v.id);
     setVendors(exists ? vendors.map(x => x.id===v.id ? v : x) : [...vendors, v]);
     setEditing(null);
@@ -7565,7 +7951,7 @@ function EmployeesTab({ vendors, setVendors, reqs, lists, setLists, showToast, g
 
   if (openEmp) {
     const live = vendors.find(v => v.id === openEmp.id) || openEmp;
-    return <VendorLedger vendor={live} reqs={reqs} showToast={showToast}
+    return <VendorLedger vendor={live} reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} showToast={showToast}
       onBack={()=>setOpenEmp(null)}
       onEdit={()=>{ setOpenEmp(null); setEditing(live); }}
       onDelete={()=>{
@@ -8203,7 +8589,8 @@ const FREQUENCIES = ["Monthly","Quarterly","Half-Yearly","Yearly","One-time"];
 
 const APPS_SCRIPT_CODE = "function doGet(e) {\n  var out = { ok: true, sheet: \"\", rows: [] };\n  try {\n    var ss = SpreadsheetApp.getActiveSpreadsheet();\n    var wanted = (e && e.parameter && e.parameter.sheet) || \"\";\n    var sh = wanted ? ss.getSheetByName(wanted) : ss.getSheets()[0];\n    if (!sh) throw new Error(\"Sheet not found: \" + wanted);\n    out.sheet = sh.getName();\n    var values = sh.getDataRange().getDisplayValues();\n    if (values.length > 1) {\n      var headers = values[0].map(function (h) { return String(h).trim(); });\n      for (var i = 1; i < values.length; i++) {\n        var row = values[i];\n        if (row.join(\"\").trim() === \"\") continue;\n        var obj = {};\n        for (var c = 0; c < headers.length; c++) {\n          if (headers[c]) obj[headers[c]] = row[c];\n        }\n        out.rows.push(obj);\n      }\n    }\n  } catch (err) {\n    out.ok = false;\n    out.error = String(err);\n  }\n  var json = JSON.stringify(out);\n  var cb = e && e.parameter && e.parameter.callback;\n  if (cb) {\n    return ContentService.createTextOutput(cb + \"(\" + json + \")\")\n      .setMimeType(ContentService.MimeType.JAVASCRIPT);\n  }\n  return ContentService.createTextOutput(json)\n    .setMimeType(ContentService.MimeType.JSON);\n}";
 
-function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, lists, setLists, showToast, goTo }){
+function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, lists, setLists, showToast, goTo,
+  expenses, setExpenses, recurring, setRecurring }){
   const [editing, setEditing] = useState(null);
   const [busy, setBusy] = useState("");
   const [preview, setPreview] = useState(null);
@@ -8333,31 +8720,92 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
   }
 
   function buildPreview(collected, failures, list, fileReport, skippedFiles, seenFiles, notes){
+    const kind = (list[0] && list[0].kind) || "requisitions";
+    const tpl = kind === "expenses" ? EXPENSE_TEMPLATE : REQ_TEMPLATE;
     const headers = [...new Set(collected.flatMap(c => Object.keys(c.row)))]
       .filter(h => h !== "__file" && h !== "__folder");
-    const map = autoMapHeaders(headers, REQ_TEMPLATE);
-    const missing = REQ_TEMPLATE.filter(f => f.required && !map[f.key]);
-
-    // nothing already recorded gets added again
-    const existingKeys = new Set(reqs.map(importDupKey));
-    const seenKeys = new Set();
+    const map = autoMapHeaders(headers, tpl);
+    const missing = tpl.filter(f => f.required && !map[f.key]);
     const toAdd = [], duplicates = [], errors = [];
 
+    if (kind === "expenses") {
+      // Mirrors ImportTab's own "expenses" row handling (see ImportTab.buildPreview),
+      // kept as its own copy here since this tab intentionally stays append-only —
+      // simpler than the update-merge logic Import from Excel supports.
+      const etypes = (lists && lists.expenseTypes) ? lists.expenseTypes : DEFAULT_LISTS.expenseTypes;
+      const existingKeys = new Set((expenses||[]).map(e =>
+        [e.date || e.periodText, String(e.paidBy||"").toLowerCase(), Number(e.amount||0),
+         String(e.description||"").toLowerCase(), String(e.subCategory||"").toLowerCase()].join("|")));
+      const seenKeys = new Set();
+
+      collected.forEach((c, i) => {
+        const { out, problems } = mapRowGeneric(c.row, tpl, map);
+        if (problems.length) { errors.push({ source:c.source, rowNum:i+2, why:`missing ${problems.join(", ")}` }); return; }
+
+        const raw = String(out.dateRaw || "").trim();
+        delete out.dateRaw;
+        const parsedDate = excelToDateStr(raw);
+        out.date = parsedDate || "";
+        out.periodText = parsedDate ? "" : raw;
+
+        if (!out.expenseType || !etypes.includes(out.expenseType)) {
+          const t = String(out.expenseType||"").toLowerCase();
+          out.expenseType = t.indexOf("travel")>=0 ? "Travel"
+            : t.indexOf("office")>=0 ? "Office"
+            : (t.indexOf("purchase")>=0 || t.indexOf("site")>=0) ? "Site Purchase"
+            : (out.expenseType || etypes[0] || "Site Purchase");
+        }
+        if (out.paidDate && !String(out.settledTo||"").trim()) out.settledTo = out.paidBy || "";
+        if (!out.site) out.site = c.source;
+
+        const k = [out.date || out.periodText, String(out.paidBy||"").toLowerCase(), Number(out.amount||0),
+                   String(out.description||"").toLowerCase(), String(out.subCategory||"").toLowerCase()].join("|");
+        if (existingKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"already in the app" }); return; }
+        if (seenKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"repeated inside this sync" }); return; }
+        seenKeys.add(k);
+        toAdd.push({ data:out, source:c.source });
+      });
+
+      setPreview({ kind, toAdd, duplicates, errors, failures, missing, map, headers, list, fileReport, skippedFiles, seenFiles, notes });
+      return;
+    }
+
+    // Nothing already recorded gets added again. A sheet source rarely carries
+    // its own Ref No or UTR (those get assigned once a row lands in the app), so
+    // comparing on those — like importDupKey does for a one-off Excel import —
+    // would never match on a re-sync and let the same row back in every time.
+    // Match on date + site + name + amount + description instead, which is what
+    // a repeated sync of the same sheet will actually reproduce.
+    const sheetDupKey = (r) => [dupKey(r), String(r.description||"").trim().toLowerCase()].join("|");
+    const existingKeys = new Set(reqs.map(sheetDupKey));
+    const seenKeys = new Set();
+    // A row that syncs in already paid, and whose Name matches exactly one active
+    // Rent & EMI item, also settles that item — same as generating it by hand
+    // would (advances the due date, counts an instalment). Skipped whenever the
+    // name is ambiguous or matches nothing, so this never guesses wrong.
+    const activeRecurring = (recurring||[]).filter(r => r.active !== false);
+
     collected.forEach((c, i) => {
-      const { out, problems } = mapRowGeneric(c.row, REQ_TEMPLATE, map);
+      const { out, problems } = mapRowGeneric(c.row, tpl, map);
       if (problems.length) { errors.push({ source:c.source, rowNum:i+2, why:`missing ${problems.join(", ")}` }); return; }
 
       settleRequisitionDates(out);
       if (!out.site) out.site = c.source;
 
-      const k = importDupKey(out);
+      const k = sheetDupKey(out);
       if (existingKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"already in the app" }); return; }
       if (seenKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"repeated inside this sync" }); return; }
       seenKeys.add(k);
+
+      if (out.paymentStatus === "Paid") {
+        const nameMatches = activeRecurring.filter(r =>
+          String(r.name||"").trim().toLowerCase() === String(out.name||"").trim().toLowerCase());
+        if (nameMatches.length === 1) out.__recurringMatchId = nameMatches[0].id;
+      }
       toAdd.push({ data:out, source:c.source });
     });
 
-    setPreview({ toAdd, duplicates, errors, failures, missing, map, headers, list, fileReport, skippedFiles, seenFiles, notes });
+    setPreview({ kind, toAdd, duplicates, errors, failures, missing, map, headers, list, fileReport, skippedFiles, seenFiles, notes });
   }
 
   async function testConnection(sh){
@@ -8389,9 +8837,38 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
 
   function applyPreview(){
     if (!preview || preview.toAdd.length === 0) return;
+    const stamp = new Date().toISOString();
+
+    if (preview.kind === "expenses") {
+      const added = preview.toAdd.map((a, idx) => ({
+        ...emptyExpense, ...a.data, id: uid(), claimId:"", claimRef:"", createdAt: Date.now() + idx,
+      }));
+      setExpenses([...(expenses||[]), ...added]);
+
+      const L = lists || DEFAULT_LISTS;
+      const nl = { ...L, sites:[...(L.sites||[])], categories:[...(L.categories||[])],
+                   expenseTypes:[...(L.expenseTypes||DEFAULT_LISTS.expenseTypes)], people:[...(L.people||[])] };
+      added.forEach(d => {
+        if (d.site && !nl.sites.includes(d.site)) nl.sites.push(d.site);
+        if (d.category && !nl.categories.includes(d.category)) nl.categories.push(d.category);
+        if (d.expenseType && !nl.expenseTypes.includes(d.expenseType)) nl.expenseTypes.push(d.expenseType);
+        if (d.paidBy && !nl.people.includes(d.paidBy)) nl.people.push(d.paidBy);
+      });
+      nl.sites.sort(); nl.categories.sort(); nl.people.sort();
+      setLists(nl);
+
+      setSheets(sheets.map(x => (preview.list || []).some(l => l.id === x.id) ? { ...x, lastSync: stamp } : x));
+      showToast(`${added.length} expense(s) brought in`);
+      setPreview(null);
+      return;
+    }
+
     const added = [];
+    const recurringUpdates = [];
     preview.toAdd.forEach((a, idx) => {
-      const d = a.data;
+      const d = { ...a.data };
+      const recurMatchId = d.__recurringMatchId;
+      delete d.__recurringMatchId;
       const vend = vendors.find(v => String(v.name||"").trim().toLowerCase() === String(d.name).trim().toLowerCase());
       added.push({
         ...emptyReq, ...d,
@@ -8403,9 +8880,26 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
         site: d.site || a.source,
         exported: false,
         createdAt: Date.now() + idx,
+        recurringId: recurMatchId || "",
       });
+      if (recurMatchId) {
+        const item = (recurring||[]).find(r => r.id === recurMatchId);
+        if (item && !recurringUpdates.some(u => u.id === item.id)) {
+          const upd = { ...item };
+          if (item.frequency === "One-time") upd.active = false;
+          else upd.nextDueDate = addInterval(item.nextDueDate, item.frequency);
+          if (isInstalment(item) && item.installmentsPaid !== "") {
+            upd.installmentsPaid = (Number(item.installmentsPaid)||0) + 1;
+            if (Number(item.totalInstallments) && upd.installmentsPaid >= Number(item.totalInstallments)) upd.active = false;
+          }
+          recurringUpdates.push(upd);
+        }
+      }
     });
     setReqs([...reqs, ...added]);
+    if (recurringUpdates.length) {
+      setRecurring(recurring.map(r => recurringUpdates.find(u => u.id === r.id) || r));
+    }
 
     const promoted = promoteSalaryLedgers(vendors, added);
     if (promoted) setVendors(promoted.vendors);
@@ -8423,9 +8917,8 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
     nl.sites.sort(); nl.categories.sort();
     setLists(nl);
 
-    const stamp = new Date().toISOString();
     setSheets(sheets.map(x => (preview.list || []).some(l => l.id === x.id) ? { ...x, lastSync: stamp } : x));
-    showToast(`${added.length} requisition(s) brought in`);
+    showToast(`${added.length} requisition(s) brought in${recurringUpdates.length ? ` · ${recurringUpdates.length} Rent & EMI item(s) updated` : ""}`);
     setPreview(null);
   }
 
@@ -8655,9 +9148,13 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
 
         <div style={{ background:SURFACE, borderRadius:16, padding:20, marginBottom:16, border:`1px solid ${SAND}` }}>
           <SectionLabel>Check before importing</SectionLabel>
-          <ReviewRow label="New requisitions" value={preview.toAdd.length} />
+          <ReviewRow label={preview.kind === "expenses" ? "New expenses" : "New requisitions"} value={preview.toAdd.length} />
           <ReviewRow label="Skipped as duplicates" value={preview.duplicates.length} />
           <ReviewRow label="Rows with problems" value={preview.errors.length} />
+          {preview.kind !== "expenses" && preview.toAdd.some(a=>a.data.__recurringMatchId) && (
+            <ReviewRow label="Will also update Rent & EMI"
+              value={preview.toAdd.filter(a=>a.data.__recurringMatchId).length} />
+          )}
         </div>
 
         {preview.notes && preview.notes.length > 0 && (
@@ -8731,11 +9228,22 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
             <div style={{ fontWeight:700, color:GREEN, fontSize:14, marginBottom:10 }}>Will be added ({preview.toAdd.length})</div>
             {preview.toAdd.slice(0,30).map((a,i) => (
               <div key={i} style={{ padding:"7px 0", borderTop: i? `1px solid ${SAND}`:"none", fontSize:13, color:INK }}>
-                <strong>{a.data.name}</strong> · ₹{fmtINR(a.data.amount)} · {fmtDate(a.data.date) || "no date"}
-                <span style={{ color:MUTED }}> · {a.data.site || a.source}</span>
-                {a.data.dateFromPayment && (
-                  <span style={{ color:AMBER, fontWeight:600 }}> · date taken from payment</span>
-                )}
+                {preview.kind === "expenses"
+                  ? <React.Fragment>
+                      <strong>{a.data.description || a.data.expenseType}</strong> · ₹{fmtINR(a.data.amount)}
+                      {a.data.date || a.data.periodText ? ` · ${a.data.date ? fmtDate(a.data.date) : a.data.periodText}` : " · no date"}
+                      <span style={{ color:MUTED }}> · {a.data.paidBy || "no payer"}</span>
+                    </React.Fragment>
+                  : <React.Fragment>
+                      <strong>{a.data.name}</strong> · ₹{fmtINR(a.data.amount)} · {fmtDate(a.data.date) || "no date"}
+                      <span style={{ color:MUTED }}> · {a.data.site || a.source}</span>
+                      {a.data.dateFromPayment && (
+                        <span style={{ color:AMBER, fontWeight:600 }}> · date taken from payment</span>
+                      )}
+                      {a.data.__recurringMatchId && (
+                        <span style={{ color:GREEN, fontWeight:600 }}> · settles Rent & EMI</span>
+                      )}
+                    </React.Fragment>}
               </div>
             ))}
             {preview.toAdd.length > 30 && <div style={{ fontSize:12, color:MUTED, marginTop:8 }}>…and {preview.toAdd.length-30} more</div>}
@@ -8750,7 +9258,8 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
             </div>
             {preview.duplicates.slice(0,20).map((d,i) => (
               <div key={i} style={{ fontSize:13, color:INK, padding:"4px 0" }}>
-                {d.data.name} · ₹{fmtINR(d.data.amount)} · {fmtDate(d.data.date)} <span style={{color:MUTED}}>— {d.why}</span>
+                {preview.kind === "expenses" ? (d.data.description || d.data.expenseType) : d.data.name} · ₹{fmtINR(d.data.amount)}
+                {d.data.date ? ` · ${fmtDate(d.data.date)}` : ""} <span style={{color:MUTED}}>— {d.why}</span>
               </div>
             ))}
             {preview.duplicates.length > 20 && <div style={{ fontSize:12, color:MUTED, marginTop:8 }}>…and {preview.duplicates.length-20} more</div>}
@@ -8769,7 +9278,9 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
         )}
 
         <BigButton icon="check"
-          label={preview.toAdd.length ? `Import ${preview.toAdd.length} Requisition(s)` : "Nothing new to import"}
+          label={preview.toAdd.length
+            ? `Import ${preview.toAdd.length} ${preview.kind === "expenses" ? "Expense" : "Requisition"}(s)`
+            : "Nothing new to import"}
           onClick={applyPreview} tone="green" full disabled={preview.toAdd.length===0} />
       </div>
     );
@@ -8807,6 +9318,15 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
           <Field label="Tab name inside each sheet" hint="Leave blank to use the first tab of every sheet">
             <input style={inputStyle} value={editing.tab || ""}
               onChange={e=>setEditing({...editing, tab:e.target.value})} placeholder="e.g. Requisitions" />
+          </Field>
+          <Field label="Syncs into" hint={editing.kind === "expenses"
+              ? "Rows land in Expenses — use this for a sheet like Office Master (Date, Expense Type, Paid By, Amount, ...)."
+              : "Rows land in Requisitions — a date in Payment Status sends that row straight to the Payment Register, same as Import from Excel."}>
+            <select style={inputStyle} value={editing.kind || "requisitions"}
+              onChange={e=>setEditing({...editing, kind:e.target.value})}>
+              <option value="requisitions">Requisitions (Payment to be done)</option>
+              <option value="expenses">Expenses (Office Master)</option>
+            </select>
           </Field>
           <BigButton icon="check" label="Save Folder" onClick={()=>saveSheet(editing)} tone="green" full
             disabled={!editing.name.trim() || !!urlProblem(editing.url)} />
@@ -8906,7 +9426,7 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
                   <div style={{ flex:1, minWidth:0 }}>
                     <div style={{ fontWeight:700, color:INK }}>{sh.name}</div>
                     <div style={{ fontSize:12, color:MUTED, marginTop:3 }}>
-                      {sh.tab ? `Tab: ${sh.tab} · ` : ""}Last sync {sh.lastSync ? friendlyTime(sh.lastSync) : "never"}
+                      Syncs into {(sh.kind||"requisitions") === "expenses" ? "Expenses" : "Requisitions"} · {sh.tab ? `Tab: ${sh.tab} · ` : ""}Last sync {sh.lastSync ? friendlyTime(sh.lastSync) : "never"}
                     </div>
                   </div>
                   <div style={{ display:"flex", gap:8, flexShrink:0 }}>
@@ -8984,11 +9504,17 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
       )}
 
       <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-        {sheets.length > 1 && (
-          <BigButton icon="download" label="Sync Everything" onClick={()=>syncSheets(sheets)} tone="green" full disabled={!!busy} />
-        )}
+        {["requisitions","expenses"].map(k => {
+          const group = sheets.filter(x => (x.kind||"requisitions") === k);
+          if (group.length < 2) return null;
+          return (
+            <BigButton key={k} icon="download"
+              label={`Sync all ${k==="expenses" ? "Expense" : "Requisition"} sources (${group.length})`}
+              onClick={()=>syncSheets(group)} tone="green" full disabled={!!busy} />
+          );
+        })}
         <BigButton icon="plus" label="Add Folder"
-          onClick={()=>setEditing({ id: uid(), name:"Site Sheets", url:"", tab:"", lastSync:null })} tone="amber" full />
+          onClick={()=>setEditing({ id: uid(), name:"Site Sheets", url:"", tab:"", kind:"requisitions", lastSync:null })} tone="amber" full />
         <BigButton icon="settings" label="Set up automatic sync (advanced)" onClick={()=>setShowSetup(true)} tone="ink" full />
       </div>
     </div>
@@ -13444,7 +13970,8 @@ function SettingsTab({ settings, setSettings, vendors, reqs, recurring, expenses
           connectDataFile, reconnectDataFile, disconnectDataFile, saveToFile, applyRestoredData,
           openExistingDataFile,
           driveConnected, driveEmail, driveSyncing, driveLastSynced, driveError,
-          connectDrive, disconnectDrive, driveSyncNow } = sync;
+          driveFolderId, driveFolderName,
+          connectDrive, disconnectDrive, driveSyncNow, driveChooseFolder } = sync;
 
   function saveApiKey(){ setSettings({...settings, gstApiKey:key}); showToast("Settings saved"); }
 
@@ -13560,19 +14087,14 @@ function SettingsTab({ settings, setSettings, vendors, reqs, recurring, expenses
             background: driveConnected ? (driveError ? RED : (driveSyncing ? AMBER : GREEN)) : SAND }} />
           <span style={{ fontWeight:700, color:INK }}>
             {driveConnected ? (driveSyncing ? "Syncing…" : driveError ? "Sync problem" : "Connected") : "Not connected"}
+            {driveConnected && driveEmail ? ` · ${driveEmail}` : ""}
           </span>
         </div>
 
-        {driveConnected && !driveError && (
-          <p style={{ fontSize:14, color:MUTED, lineHeight:1.5, marginBottom:14 }}>
-            Backing up to Google Drive{driveEmail ? ` (${driveEmail})` : ""} automatically, shortly after you make changes.
-            Last synced {friendlyTime(driveLastSynced)}.
-          </p>
-        )}
         {driveConnected && driveError && (
-          <p style={{ fontSize:14, color:INK, lineHeight:1.5, marginBottom:14 }}>
+          <p style={{ fontSize:14, color:INK, lineHeight:1.5, marginBottom:12 }}>
             The last sync attempt didn't go through ({driveError}). It will retry automatically on your
-            next change or when you reopen the app — or tap Sync Now below.
+            next change or when you reopen the app — or tap Sync now below.
           </p>
         )}
         {!driveConnected && (
@@ -13582,11 +14104,33 @@ function SettingsTab({ settings, setSettings, vendors, reqs, recurring, expenses
           </p>
         )}
 
+        {driveConnected && (
+          <React.Fragment>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:10, marginBottom:8 }}>
+              <span style={{ fontSize:13, color:MUTED, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                {driveError ? "Retry the backup" : `Last synced ${friendlyTime(driveLastSynced)}`}
+              </span>
+              <button onClick={()=>driveSyncNow(false)} disabled={driveSyncing}
+                style={{ padding:"9px 16px", borderRadius:10, fontSize:13, fontWeight:700, whiteSpace:"nowrap", flexShrink:0,
+                  background: driveSyncing ? SAND : INK, color: driveSyncing ? MUTED : "#fff",
+                  border:"none", cursor: driveSyncing ? "default" : "pointer" }}>
+                {driveSyncing ? "Syncing…" : "Sync now"}
+              </button>
+            </div>
+            <p style={{ fontSize:13, color:MUTED, lineHeight:1.5, marginBottom:14 }}>
+              Backup folder: <strong style={{ color:INK }}>{driveFolderName || "My Drive (root)"}</strong>
+            </p>
+          </React.Fragment>
+        )}
+
         <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
           {!driveConnected && <BigButton icon="check" label="Connect Google Drive" onClick={connectDrive} tone="green" full />}
           {driveConnected && (
             <React.Fragment>
-              <BigButton icon="download" label="Sync Now" onClick={()=>driveSyncNow(false)} tone="ink" full />
+              <button onClick={driveChooseFolder}
+                style={{ borderRadius:16, padding:"14px 20px", fontSize:15, fontWeight:600, background:SAND, color:INK, border:"none", cursor:"pointer" }}>
+                {driveFolderName ? "Change backup folder" : "Choose backup folder"}
+              </button>
               <button onClick={disconnectDrive}
                 style={{ borderRadius:16, padding:"14px 20px", fontSize:15, fontWeight:600, background:SURFACE, color:MUTED, border:`1.5px solid ${SAND}`, cursor:"pointer" }}>
                 Disconnect
