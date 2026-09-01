@@ -81,16 +81,56 @@ designed to work (unlike a password, nobody can do anything with just this ID).
 9. Settings & Backup → **Connect Google Drive** → sign in with the same Google
    account you added as a test user → approve access. From then on, changes
    back up automatically about 10 seconds after you stop typing/editing, to a
-   file named `ERP-Data.json` in your Drive's root folder.
+   file named `ERP-Data.json` — in your Drive's root folder unless you point it
+   at a specific folder using the next section.
 
 **Scope used:** the app only ever requests `drive.file` access — meaning it can
-only see/edit files *it* created, never your other Drive files.
+only see/edit files *it* created, never your other Drive files. This stays true
+even when you pick a specific existing folder below (see how that works there).
 
 **Known limits of browser-only sign-in (no backend server exists to keep you
 signed in forever):** occasionally — after a longer stretch away from the app —
 the automatic silent reconnect can fail, in which case the Sync Now button (or
 just reopening the app) will prompt a quick Google re-sign-in. This is a normal
-property of client-side-only OAuth, not a bug.
+property of client-side-only OAuth, not a bug. If it keeps failing repeatedly
+with the exact same message, tapping **Sync Now** once forces a completely
+fresh sign-in check rather than reusing whatever failed before.
+
+## Saving the backup into a specific Drive folder (optional, one-time)
+
+By default the backup file goes into your Drive's root folder. To have it
+land inside a folder you already use instead (for example a "PW" folder with
+an "ERP" folder inside it), the app needs Google's own folder-browser dialog —
+this needs one more free API key from the same Google Cloud project as above.
+
+1. Go to **console.cloud.google.com/apis/library**, make sure the same project
+   from the steps above is selected (top-left), search for **Google Picker
+   API**, open it, and click **Enable**.
+2. Go to **console.cloud.google.com/apis/credentials** → **Create Credentials**
+   → **API key**. A key appears immediately — copy it.
+3. (Recommended, not required) Click the new key to restrict it: under
+   **Application restrictions** choose **Websites**, add your GitHub Pages
+   address with `/*` on the end, e.g. `https://m33tp-6338.github.io/*`; under
+   **API restrictions** choose **Restrict key** and tick only **Google Picker
+   API**. Save.
+4. Paste that key into `index.html`, replacing the placeholder near the top:
+   ```js
+   const GOOGLE_DRIVE_PICKER_API_KEY = "PASTE_YOUR_GOOGLE_PICKER_API_KEY_HERE";
+   ```
+5. Re-upload `index.html`, wait for Pages to redeploy, open the app once online.
+6. Settings & Backup → **Choose backup folder** → Google's own folder browser
+   opens → navigate into your folder (e.g. PW → ERP) → select it → Open/Select.
+   The app remembers this folder from then on, and if a backup file already
+   existed elsewhere it is moved into the newly chosen folder automatically.
+
+**Why this needs its own dialog instead of the app just searching your Drive
+for the folder by name:** the app's narrow `drive.file` permission (see above)
+means it normally can't see any file or folder it didn't create itself — that
+is deliberate, for your privacy. Google's own picker dialog is the standard,
+safe way around that: it runs as Google's own UI (not this app's code), so it
+can show you your real folders, and the moment you pick one, only *that one
+folder* becomes visible to the app — everything else in your Drive stays
+exactly as invisible to it as before.
 
 ## Known limitations of this feasibility build
 
@@ -103,7 +143,7 @@ property of client-side-only OAuth, not a bug.
 - **Optional PIN lock** exists under Settings if you want to lock the app on the
   phone — off by default.
 - If the app is ever updated (a new `index.html`), bump `CACHE_NAME` in `sw.js`
-  (currently `v4`) so installed phones pick up the new version instead of a
+  (currently `v5`) so installed phones pick up the new version instead of a
   cached old one, and re-upload everything to the repo.
 
 ## Importing Cash & Card transactions for a specific card
