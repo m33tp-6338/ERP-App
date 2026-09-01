@@ -53,6 +53,13 @@ const { useState, useEffect, useCallback, useMemo } = React;
 
 const APP_VERSION = "6.2";
 
+/* ---------- Google Drive backup ----------
+   Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
+   "Google Drive backup setup"). It is not a secret; it's fine for it to sit here
+   in plain view — that's how Google's client-side sign-in is designed to work. */
+const GOOGLE_DRIVE_CLIENT_ID = "60621934527-fqfm91j6tmq9lepkmna0r7pkjfhjv697.apps.googleusercontent.com";
+const GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
+
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
   { v:"6.2", date:"2026-08-23", title:"Attachments and partner reconciliation", items:[
@@ -1040,6 +1047,36 @@ async function readFromFileHandle(handle){
 function isValidPayload(d){
   return d && typeof d === "object" && (Array.isArray(d.vendors) || Array.isArray(d.requisitions));
 }
+
+/* ---------- Google Drive backup: loaded only when actually used, so the
+   app's normal offline operation never depends on this being reachable ---------- */
+function loadGisScript(){
+  return new Promise((resolve, reject) => {
+    if (window.google && window.google.accounts && window.google.accounts.oauth2) { resolve(); return; }
+    const existing = document.getElementById("gis-client-script");
+    if (existing) {
+      existing.addEventListener("load", () => resolve());
+      existing.addEventListener("error", () => reject(new Error("Could not load Google sign-in — check your internet connection")));
+      return;
+    }
+    const s = document.createElement("script");
+    s.id = "gis-client-script";
+    s.src = "https://accounts.google.com/gsi/client";
+    s.async = true; s.defer = true;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error("Could not load Google sign-in — check your internet connection"));
+    document.head.appendChild(s);
+  });
+}
+async function driveApiFetch(url, token, options){
+  const res = await fetch(url, { ...options, headers: { ...(options && options.headers), Authorization: `Bearer ${token}` } });
+  if (!res.ok) {
+    const err = new Error(`Drive API ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+  return res;
+}
 function payloadCounts(d){
   const c = d.counts || {};
   return {
@@ -1155,10 +1192,13 @@ function friendlyTime(iso){
   return `${days} days ago`;
 }
 
-function SaveChip({ fileHandle, needsReconnect, dirty, saving, lastSaved, onTap }){
+function SaveChip({ fileHandle, needsReconnect, dirty, saving, lastSaved, onTap,
+                     driveConnected, driveSyncing, driveError, driveLastSynced }){
   let bg = "#3C7A5A", label = "Saved";
-  if (saving) { bg = MUTED; label = "Saving…"; }
+  if (saving || driveSyncing) { bg = MUTED; label = "Saving…"; }
   else if (needsReconnect) { bg = RED; label = "Reconnect"; }
+  else if (driveConnected && driveError) { bg = RED; label = "Drive sync issue"; }
+  else if (driveConnected) { bg = "#3C7A5A"; label = `Synced ${friendlyTime(driveLastSynced)}`; }
   else if (!fileHandle) { bg = AMBER; label = daysSince(lastSaved) === null ? "Not backed up" : `Backup ${friendlyTime(lastSaved)}`; }
   else if (dirty) { bg = AMBER; label = "Saving…"; }
 
@@ -1175,19 +1215,24 @@ function SaveChip({ fileHandle, needsReconnect, dirty, saving, lastSaved, onTap 
 /* ---------- backup warning banner (dashboard) ---------- */
 function BackupBanner({ sync, goToSettings }){
   if (!sync) return null;
-  const { fileHandle, needsReconnect, lastSaved, fsSupported } = sync;
+  const { fileHandle, needsReconnect, lastSaved, fsSupported, driveConnected, driveError } = sync;
   const days = daysSince(lastSaved);
+  const hasAutoBackup = fileHandle || (driveConnected && !driveError);
 
   let tone = null, text = "", action = "";
   if (needsReconnect) {
     tone = "danger";
     text = "Your data file is disconnected. Changes are not being saved to it.";
     action = "Reconnect now";
-  } else if (!fileHandle && fsSupported) {
+  } else if (driveConnected && driveError) {
+    tone = "warn";
+    text = `Google Drive backup has a problem (${driveError}). Your data here on the phone is safe, it just isn't reaching Drive right now.`;
+    action = "Check Drive backup";
+  } else if (!hasAutoBackup && fsSupported) {
     tone = "warn";
     text = "Your data lives only in this browser right now. Connect a data file so clearing browsing data can't erase it.";
     action = "Set up my data file";
-  } else if (!fileHandle && !fsSupported) {
+  } else if (!hasAutoBackup && !fsSupported) {
     if (days === null) {
       tone = "warn";
       text = "You haven't saved a copy yet. If browsing data is cleared, everything here is lost.";
@@ -1751,6 +1796,17 @@ function ERPApp(){
   const [lastSaved, setLastSaved] = useState(loadKey("erp:lastSaved", null));
   const [saving, setSaving] = useState(false);
 
+  // --- Google Drive backup state ---
+  const [driveConnected, setDriveConnected] = useState(() => !!loadKey("erp:driveConnected", false));
+  const [driveEmail, setDriveEmail] = useState(() => loadKey("erp:driveEmail", ""));
+  const [driveFileId, setDriveFileId] = useState(() => loadKey("erp:driveFileId", ""));
+  const [driveSyncing, setDriveSyncing] = useState(false);
+  const [driveLastSynced, setDriveLastSynced] = useState(() => loadKey("erp:driveLastSynced", null));
+  const [driveError, setDriveError] = useState("");
+  const driveTokenRef = React.useRef(null);       // { access_token, expires_at }
+  const driveTokenClientRef = React.useRef(null);
+  const driveSyncingRef = React.useRef(false);     // guards against overlapping sync calls
+
   const showToast = useCallback((message, type="ok") => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 2600);
@@ -1881,6 +1937,146 @@ function ERPApp(){
     const t = setTimeout(() => { saveToFile(true); }, 1200);
     return () => clearTimeout(t);
   }, [dirty, loaded, fileHandle, saveToFile]);
+
+  // --- Google Drive backup ---
+  const driveEnsureTokenClient = useCallback(async () => {
+    await loadGisScript();
+    if (!window.google || !google.accounts || !google.accounts.oauth2) {
+      throw new Error("Google sign-in did not load");
+    }
+    if (!driveTokenClientRef.current) {
+      driveTokenClientRef.current = google.accounts.oauth2.initTokenClient({
+        client_id: GOOGLE_DRIVE_CLIENT_ID,
+        scope: GOOGLE_DRIVE_SCOPE,
+        callback: () => {}, // replaced per-request below
+      });
+    }
+    return driveTokenClientRef.current;
+  }, []);
+
+  const driveGetFreshToken = useCallback(async (interactive) => {
+    if (driveTokenRef.current && driveTokenRef.current.expires_at > Date.now()) {
+      return driveTokenRef.current.access_token;
+    }
+    const tokenClient = await driveEnsureTokenClient();
+    return new Promise((resolve, reject) => {
+      tokenClient.callback = (resp) => {
+        if (resp && resp.error) { reject(new Error(resp.error)); return; }
+        driveTokenRef.current = {
+          access_token: resp.access_token,
+          expires_at: Date.now() + (Number(resp.expires_in || 3600) * 1000) - 60000,
+        };
+        resolve(driveTokenRef.current.access_token);
+      };
+      tokenClient.requestAccessToken({ prompt: interactive ? "consent" : "" });
+    });
+  }, [driveEnsureTokenClient]);
+
+  const driveSyncNow = useCallback(async (isInitial) => {
+    if (!isInitial && !driveConnected) return;
+    if (driveSyncingRef.current) return;
+    if (!GOOGLE_DRIVE_CLIENT_ID || GOOGLE_DRIVE_CLIENT_ID.indexOf("PASTE_YOUR") === 0) return;
+    driveSyncingRef.current = true;
+    setDriveSyncing(true);
+    try {
+      const token = await driveGetFreshToken(false);
+      const payload = buildBackupPayload();
+      const content = JSON.stringify(payload, null, 2);
+      let fileId = driveFileId || loadKey("erp:driveFileId", "");
+
+      if (!fileId) {
+        const metadata = { name: "ERP-Data.json", mimeType: "application/json" };
+        const form = new FormData();
+        form.append("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
+        form.append("file", new Blob([content], { type: "application/json" }));
+        const res = await driveApiFetch(
+          "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id",
+          token, { method: "POST", body: form }
+        );
+        const j = await res.json();
+        fileId = j.id;
+        setDriveFileId(fileId); saveKey("erp:driveFileId", fileId);
+      } else {
+        try {
+          await driveApiFetch(
+            `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`,
+            token, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: content }
+          );
+        } catch (e) {
+          if (e && e.status === 404) {
+            // the file was removed on Drive's side — drop the stale id, next sync recreates it
+            setDriveFileId(""); saveKey("erp:driveFileId", "");
+          }
+          throw e;
+        }
+      }
+
+      const stamp = new Date().toISOString();
+      setDriveLastSynced(stamp); saveKey("erp:driveLastSynced", stamp);
+      setDriveError("");
+      setDirty(false);
+    } catch (e) {
+      setDriveError((e && e.message) || "Sync failed");
+    } finally {
+      driveSyncingRef.current = false;
+      setDriveSyncing(false);
+    }
+  }, [driveConnected, driveFileId, driveGetFreshToken]);
+
+  const connectDrive = useCallback(async () => {
+    if (!GOOGLE_DRIVE_CLIENT_ID || GOOGLE_DRIVE_CLIENT_ID.indexOf("PASTE_YOUR") === 0) {
+      showToast("Google Drive isn't set up in this copy of the app yet — see README.md", "error");
+      return;
+    }
+    setDriveError("");
+    try {
+      const token = await driveGetFreshToken(true); // interactive — must run from this tap
+      let email = "";
+      try {
+        const res = await driveApiFetch("https://www.googleapis.com/drive/v3/about?fields=user", token);
+        const j = await res.json();
+        email = (j.user && j.user.emailAddress) || "";
+      } catch (e) { /* best-effort only */ }
+      setDriveConnected(true); saveKey("erp:driveConnected", true);
+      setDriveEmail(email); saveKey("erp:driveEmail", email);
+      showToast("Google Drive connected");
+      await driveSyncNow(true);
+    } catch (e) {
+      showToast("Could not connect Google Drive — try again", "error");
+    }
+  }, [driveGetFreshToken, driveSyncNow, showToast]);
+
+  const disconnectDrive = useCallback(() => {
+    try {
+      if (driveTokenRef.current && window.google) {
+        google.accounts.oauth2.revoke(driveTokenRef.current.access_token, () => {});
+      }
+    } catch (e) { /* ignore */ }
+    driveTokenRef.current = null;
+    setDriveConnected(false); saveKey("erp:driveConnected", false);
+    setDriveEmail(""); saveKey("erp:driveEmail", "");
+    setDriveError("");
+    showToast("Google Drive disconnected");
+  }, [showToast]);
+
+  // debounced auto-backup to Drive shortly after each change
+  useEffect(() => {
+    if (!loaded || !dirty || !driveConnected) return;
+    const t = setTimeout(() => { driveSyncNow(false); }, 10000);
+    return () => clearTimeout(t);
+  }, [dirty, loaded, driveConnected, driveSyncNow]);
+
+  // catch up on reconnecting to the internet or returning to the app
+  useEffect(() => {
+    if (!driveConnected) return;
+    const trySync = () => { if (dirty || driveError) driveSyncNow(false); };
+    window.addEventListener("online", trySync);
+    document.addEventListener("visibilitychange", trySync);
+    return () => {
+      window.removeEventListener("online", trySync);
+      document.removeEventListener("visibilitychange", trySync);
+    };
+  }, [driveConnected, dirty, driveError, driveSyncNow]);
 
   const setVendors = useCallback((next) => {
     setVendorsState(next);
@@ -2058,6 +2254,8 @@ function ERPApp(){
     fsSupported: FS_SUPPORTED, fileHandle, fileName, needsReconnect, dirty, lastSaved, saving,
     connectDataFile, reconnectDataFile, disconnectDataFile, saveToFile,
     applyRestoredData: applyPayload, openExistingDataFile,
+    driveConnected, driveEmail, driveSyncing, driveLastSynced, driveError,
+    connectDrive, disconnectDrive, driveSyncNow,
   };
 
   return (
@@ -13193,7 +13391,9 @@ function SettingsTab({ settings, setSettings, vendors, reqs, recurring, expenses
   const [key, setKey] = useState(settings.gstApiKey);
   const { fsSupported, fileHandle, fileName, needsReconnect, dirty, lastSaved, saving,
           connectDataFile, reconnectDataFile, disconnectDataFile, saveToFile, applyRestoredData,
-          openExistingDataFile } = sync;
+          openExistingDataFile,
+          driveConnected, driveEmail, driveSyncing, driveLastSynced, driveError,
+          connectDrive, disconnectDrive, driveSyncNow } = sync;
 
   function saveApiKey(){ setSettings({...settings, gstApiKey:key}); showToast("Settings saved"); }
 
@@ -13292,6 +13492,51 @@ function SettingsTab({ settings, setSettings, vendors, reqs, recurring, expenses
                 Change data file
               </button>
               <button onClick={disconnectDataFile}
+                style={{ borderRadius:16, padding:"14px 20px", fontSize:15, fontWeight:600, background:SURFACE, color:MUTED, border:`1.5px solid ${SAND}`, cursor:"pointer" }}>
+                Disconnect
+              </button>
+            </React.Fragment>
+          )}
+        </div>
+      </div>
+
+      {/* ---- GOOGLE DRIVE BACKUP ---- */}
+      <div style={{ background:SURFACE, borderRadius:16, padding:20,
+        border:`2px solid ${driveConnected ? (driveError ? RED : GREEN) : SAND}` }}>
+        <SectionLabel>Google Drive backup</SectionLabel>
+        <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:12 }}>
+          <div style={{ width:10, height:10, borderRadius:"50%",
+            background: driveConnected ? (driveError ? RED : (driveSyncing ? AMBER : GREEN)) : SAND }} />
+          <span style={{ fontWeight:700, color:INK }}>
+            {driveConnected ? (driveSyncing ? "Syncing…" : driveError ? "Sync problem" : "Connected") : "Not connected"}
+          </span>
+        </div>
+
+        {driveConnected && !driveError && (
+          <p style={{ fontSize:14, color:MUTED, lineHeight:1.5, marginBottom:14 }}>
+            Backing up to Google Drive{driveEmail ? ` (${driveEmail})` : ""} automatically, shortly after you make changes.
+            Last synced {friendlyTime(driveLastSynced)}.
+          </p>
+        )}
+        {driveConnected && driveError && (
+          <p style={{ fontSize:14, color:INK, lineHeight:1.5, marginBottom:14 }}>
+            The last sync attempt didn't go through ({driveError}). It will retry automatically on your
+            next change or when you reopen the app — or tap Sync Now below.
+          </p>
+        )}
+        {!driveConnected && (
+          <p style={{ fontSize:14, color:MUTED, lineHeight:1.5, marginBottom:14 }}>
+            Connect your Google account once, and every change you make from then on backs up automatically
+            to a file in your own Google Drive — no manual saving needed.
+          </p>
+        )}
+
+        <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+          {!driveConnected && <BigButton icon="check" label="Connect Google Drive" onClick={connectDrive} tone="green" full />}
+          {driveConnected && (
+            <React.Fragment>
+              <BigButton icon="download" label="Sync Now" onClick={()=>driveSyncNow(false)} tone="ink" full />
+              <button onClick={disconnectDrive}
                 style={{ borderRadius:16, padding:"14px 20px", fontSize:15, fontWeight:600, background:SURFACE, color:MUTED, border:`1.5px solid ${SAND}`, cursor:"pointer" }}>
                 Disconnect
               </button>
