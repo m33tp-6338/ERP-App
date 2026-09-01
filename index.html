@@ -59,9 +59,6 @@ const APP_VERSION = "6.2";
    in plain view — that's how Google's client-side sign-in is designed to work. */
 const GOOGLE_DRIVE_CLIENT_ID = "60621934527-fqfm91j6tmq9lepkmna0r7pkjfhjv697.apps.googleusercontent.com";
 const GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
-// Used only to open Google's own folder-picker dialog (so you can point the backup
-// at a folder you already have, like PW/ERP) — not a secret, same as the Client ID.
-const GOOGLE_DRIVE_PICKER_API_KEY = "PASTE_YOUR_GOOGLE_PICKER_API_KEY_HERE";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
@@ -1071,37 +1068,10 @@ function loadGisScript(){
     document.head.appendChild(s);
   });
 }
-function loadPickerLibrary(){
-  return new Promise((resolve, reject) => {
-    if (window.google && window.google.picker) { resolve(); return; }
-    const afterGapi = () => {
-      window.gapi.load("picker", { callback: resolve, onerror: () => reject(new Error("Could not load Google's folder picker")) });
-    };
-    if (window.gapi && window.gapi.load) { afterGapi(); return; }
-    const existing = document.getElementById("gapi-client-script");
-    if (existing) {
-      existing.addEventListener("load", afterGapi);
-      existing.addEventListener("error", () => reject(new Error("Could not load Google's folder picker — check your internet connection")));
-      return;
-    }
-    const s = document.createElement("script");
-    s.id = "gapi-client-script";
-    s.src = "https://apis.google.com/js/api.js";
-    s.async = true; s.defer = true;
-    s.onload = afterGapi;
-    s.onerror = () => reject(new Error("Could not load Google's folder picker — check your internet connection"));
-    document.head.appendChild(s);
-  });
-}
 async function driveApiFetch(url, token, options){
   const res = await fetch(url, { ...options, headers: { ...(options && options.headers), Authorization: `Bearer ${token}` } });
   if (!res.ok) {
-    let detail = "";
-    try {
-      const body = await res.clone().json();
-      detail = (body && body.error && body.error.message) || "";
-    } catch (e) { /* response wasn't JSON — fall back to the status code below */ }
-    const err = new Error(detail ? `Drive: ${detail}` : `Drive API ${res.status}`);
+    const err = new Error(`Drive API ${res.status}`);
     err.status = res.status;
     throw err;
   }
@@ -1831,8 +1801,6 @@ function ERPApp(){
   const [driveConnected, setDriveConnected] = useState(() => !!loadKey("erp:driveConnected", false));
   const [driveEmail, setDriveEmail] = useState(() => loadKey("erp:driveEmail", ""));
   const [driveFileId, setDriveFileId] = useState(() => loadKey("erp:driveFileId", ""));
-  const [driveFolderId, setDriveFolderId] = useState(() => loadKey("erp:driveFolderId", ""));
-  const [driveFolderName, setDriveFolderName] = useState(() => loadKey("erp:driveFolderName", ""));
   const [driveSyncing, setDriveSyncing] = useState(false);
   const [driveLastSynced, setDriveLastSynced] = useState(() => loadKey("erp:driveLastSynced", null));
   const [driveError, setDriveError] = useState("");
@@ -2017,10 +1985,8 @@ function ERPApp(){
       const content = JSON.stringify(payload, null, 2);
       let fileId = driveFileId || loadKey("erp:driveFileId", "");
 
-      const folderId = driveFolderId || loadKey("erp:driveFolderId", "");
       if (!fileId) {
         const metadata = { name: "ERP-Data.json", mimeType: "application/json" };
-        if (folderId) metadata.parents = [folderId];
         const form = new FormData();
         form.append("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
         form.append("file", new Blob([content], { type: "application/json" }));
@@ -2051,76 +2017,12 @@ function ERPApp(){
       setDriveError("");
       setDirty(false);
     } catch (e) {
-      if (e && e.status === 401) {
-        // Google rejected the saved sign-in — throw it away so the very next attempt
-        // (auto-retry, Sync Now, or reopening the app) fetches a fresh one instead of
-        // silently repeating the same rejected token until its hour-long timer runs out.
-        driveTokenRef.current = null;
-      }
       setDriveError((e && e.message) || "Sync failed");
     } finally {
       driveSyncingRef.current = false;
       setDriveSyncing(false);
     }
-  }, [driveConnected, driveFileId, driveFolderId, driveGetFreshToken]);
-
-  const driveChooseFolder = useCallback(async () => {
-    if (!GOOGLE_DRIVE_PICKER_API_KEY || GOOGLE_DRIVE_PICKER_API_KEY.indexOf("PASTE_YOUR") === 0) {
-      showToast("The folder picker isn't set up in this copy of the app yet — see README.md", "error");
-      return;
-    }
-    try {
-      const token = await driveGetFreshToken(true); // interactive — must run from this tap
-      await loadPickerLibrary();
-      await new Promise((resolve) => {
-        const view = new google.picker.DocsView(google.picker.ViewId.FOLDERS)
-          .setSelectFolderEnabled(true)
-          .setIncludeFolders(true)
-          .setMimeTypes("application/vnd.google-apps.folder");
-        const picker = new google.picker.PickerBuilder()
-          .addView(view)
-          .setOAuthToken(token)
-          .setDeveloperKey(GOOGLE_DRIVE_PICKER_API_KEY)
-          .setOrigin(window.location.protocol + "//" + window.location.host)
-          .setTitle("Choose the folder to back up into")
-          .setCallback((data) => {
-            if (data.action === google.picker.Action.PICKED && data.docs && data.docs[0]) {
-              const folder = data.docs[0];
-              (async () => {
-                // If a backup file already exists somewhere else, move it into the
-                // newly chosen folder instead of leaving a stray copy behind.
-                const existingId = driveFileId || loadKey("erp:driveFileId", "");
-                if (existingId) {
-                  try {
-                    const t2 = await driveGetFreshToken(false);
-                    const metaRes = await driveApiFetch(
-                      `https://www.googleapis.com/drive/v3/files/${existingId}?fields=parents`, t2
-                    );
-                    const meta = await metaRes.json();
-                    const oldParents = (meta.parents || []).join(",");
-                    const qs = `addParents=${folder.id}` + (oldParents ? `&removeParents=${oldParents}` : "");
-                    await driveApiFetch(
-                      `https://www.googleapis.com/drive/v3/files/${existingId}?${qs}`, t2, { method: "PATCH" }
-                    );
-                  } catch (e) { /* best-effort move — a fresh sync below still lands it right if this fails */ }
-                }
-                setDriveFolderId(folder.id); saveKey("erp:driveFolderId", folder.id);
-                setDriveFolderName(folder.name || ""); saveKey("erp:driveFolderName", folder.name || "");
-                showToast(`Backup folder set to ${folder.name || "the chosen folder"}`);
-                driveSyncNow(true);
-                resolve();
-              })();
-            } else if (data.action === google.picker.Action.CANCEL) {
-              resolve();
-            }
-          })
-          .build();
-        picker.setVisible(true);
-      });
-    } catch (e) {
-      showToast("Could not open the folder picker — try again", "error");
-    }
-  }, [driveGetFreshToken, driveFileId, driveSyncNow, showToast]);
+  }, [driveConnected, driveFileId, driveGetFreshToken]);
 
   const connectDrive = useCallback(async () => {
     if (!GOOGLE_DRIVE_CLIENT_ID || GOOGLE_DRIVE_CLIENT_ID.indexOf("PASTE_YOUR") === 0) {
@@ -2354,8 +2256,7 @@ function ERPApp(){
     connectDataFile, reconnectDataFile, disconnectDataFile, saveToFile,
     applyRestoredData: applyPayload, openExistingDataFile,
     driveConnected, driveEmail, driveSyncing, driveLastSynced, driveError,
-    driveFolderId, driveFolderName,
-    connectDrive, disconnectDrive, driveSyncNow, driveChooseFolder,
+    connectDrive, disconnectDrive, driveSyncNow,
   };
 
   return (
@@ -2401,7 +2302,7 @@ function ERPApp(){
         {tab==="employees" && <EmployeesTab vendors={vendors} setVendors={setVendors} reqs={reqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
         {tab==="statement" && <MonthlyStatementTab reqs={reqs} expenses={expenses} cashTxns={cashTxns} cards={cards} showToast={showToast} goTo={navigate} />}
         {tab==="sitesummary" && <SiteSummaryTab reqs={reqs} expenses={expenses} cashTxns={cashTxns} cards={cards} diesel={diesel} utilities={utilities} machines={machines} vendors={vendors} showToast={showToast} goTo={navigate} />}
-        {tab==="sheets" && <SheetSyncTab sheets={sheets} setSheets={setSheets} reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} expenses={expenses} setExpenses={setExpenses} recurring={recurring} setRecurring={setRecurring} />}
+        {tab==="sheets" && <SheetSyncTab sheets={sheets} setSheets={setSheets} reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} />}
         {tab==="expenses" && <ExpensesTab expenses={expenses} setExpenses={setExpenses} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
         {tab==="receivables" && <ReceivablesTab reqs={reqs} setReqs={setReqs} showToast={showToast} goTo={navigate} />}
         {tab==="payments" && <PaymentRegisterTab reqs={reqs} setReqs={setReqs} vendors={vendors} expenses={expenses} setExpenses={setExpenses} cashTxns={cashTxns} cards={cards} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} />}
@@ -8302,8 +8203,7 @@ const FREQUENCIES = ["Monthly","Quarterly","Half-Yearly","Yearly","One-time"];
 
 const APPS_SCRIPT_CODE = "function doGet(e) {\n  var out = { ok: true, sheet: \"\", rows: [] };\n  try {\n    var ss = SpreadsheetApp.getActiveSpreadsheet();\n    var wanted = (e && e.parameter && e.parameter.sheet) || \"\";\n    var sh = wanted ? ss.getSheetByName(wanted) : ss.getSheets()[0];\n    if (!sh) throw new Error(\"Sheet not found: \" + wanted);\n    out.sheet = sh.getName();\n    var values = sh.getDataRange().getDisplayValues();\n    if (values.length > 1) {\n      var headers = values[0].map(function (h) { return String(h).trim(); });\n      for (var i = 1; i < values.length; i++) {\n        var row = values[i];\n        if (row.join(\"\").trim() === \"\") continue;\n        var obj = {};\n        for (var c = 0; c < headers.length; c++) {\n          if (headers[c]) obj[headers[c]] = row[c];\n        }\n        out.rows.push(obj);\n      }\n    }\n  } catch (err) {\n    out.ok = false;\n    out.error = String(err);\n  }\n  var json = JSON.stringify(out);\n  var cb = e && e.parameter && e.parameter.callback;\n  if (cb) {\n    return ContentService.createTextOutput(cb + \"(\" + json + \")\")\n      .setMimeType(ContentService.MimeType.JAVASCRIPT);\n  }\n  return ContentService.createTextOutput(json)\n    .setMimeType(ContentService.MimeType.JSON);\n}";
 
-function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, lists, setLists, showToast, goTo,
-  expenses, setExpenses, recurring, setRecurring }){
+function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, lists, setLists, showToast, goTo }){
   const [editing, setEditing] = useState(null);
   const [busy, setBusy] = useState("");
   const [preview, setPreview] = useState(null);
@@ -8433,92 +8333,31 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
   }
 
   function buildPreview(collected, failures, list, fileReport, skippedFiles, seenFiles, notes){
-    const kind = (list[0] && list[0].kind) || "requisitions";
-    const tpl = kind === "expenses" ? EXPENSE_TEMPLATE : REQ_TEMPLATE;
     const headers = [...new Set(collected.flatMap(c => Object.keys(c.row)))]
       .filter(h => h !== "__file" && h !== "__folder");
-    const map = autoMapHeaders(headers, tpl);
-    const missing = tpl.filter(f => f.required && !map[f.key]);
+    const map = autoMapHeaders(headers, REQ_TEMPLATE);
+    const missing = REQ_TEMPLATE.filter(f => f.required && !map[f.key]);
+
+    // nothing already recorded gets added again
+    const existingKeys = new Set(reqs.map(importDupKey));
+    const seenKeys = new Set();
     const toAdd = [], duplicates = [], errors = [];
 
-    if (kind === "expenses") {
-      // Mirrors ImportTab's own "expenses" row handling (see ImportTab.buildPreview),
-      // kept as its own copy here since this tab intentionally stays append-only —
-      // simpler than the update-merge logic Import from Excel supports.
-      const etypes = (lists && lists.expenseTypes) ? lists.expenseTypes : DEFAULT_LISTS.expenseTypes;
-      const existingKeys = new Set((expenses||[]).map(e =>
-        [e.date || e.periodText, String(e.paidBy||"").toLowerCase(), Number(e.amount||0),
-         String(e.description||"").toLowerCase(), String(e.subCategory||"").toLowerCase()].join("|")));
-      const seenKeys = new Set();
-
-      collected.forEach((c, i) => {
-        const { out, problems } = mapRowGeneric(c.row, tpl, map);
-        if (problems.length) { errors.push({ source:c.source, rowNum:i+2, why:`missing ${problems.join(", ")}` }); return; }
-
-        const raw = String(out.dateRaw || "").trim();
-        delete out.dateRaw;
-        const parsedDate = excelToDateStr(raw);
-        out.date = parsedDate || "";
-        out.periodText = parsedDate ? "" : raw;
-
-        if (!out.expenseType || !etypes.includes(out.expenseType)) {
-          const t = String(out.expenseType||"").toLowerCase();
-          out.expenseType = t.indexOf("travel")>=0 ? "Travel"
-            : t.indexOf("office")>=0 ? "Office"
-            : (t.indexOf("purchase")>=0 || t.indexOf("site")>=0) ? "Site Purchase"
-            : (out.expenseType || etypes[0] || "Site Purchase");
-        }
-        if (out.paidDate && !String(out.settledTo||"").trim()) out.settledTo = out.paidBy || "";
-        if (!out.site) out.site = c.source;
-
-        const k = [out.date || out.periodText, String(out.paidBy||"").toLowerCase(), Number(out.amount||0),
-                   String(out.description||"").toLowerCase(), String(out.subCategory||"").toLowerCase()].join("|");
-        if (existingKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"already in the app" }); return; }
-        if (seenKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"repeated inside this sync" }); return; }
-        seenKeys.add(k);
-        toAdd.push({ data:out, source:c.source });
-      });
-
-      setPreview({ kind, toAdd, duplicates, errors, failures, missing, map, headers, list, fileReport, skippedFiles, seenFiles, notes });
-      return;
-    }
-
-    // Nothing already recorded gets added again. A sheet source rarely carries
-    // its own Ref No or UTR (those get assigned once a row lands in the app), so
-    // comparing on those — like importDupKey does for a one-off Excel import —
-    // would never match on a re-sync and let the same row back in every time.
-    // Match on date + site + name + amount + description instead, which is what
-    // a repeated sync of the same sheet will actually reproduce.
-    const sheetDupKey = (r) => [dupKey(r), String(r.description||"").trim().toLowerCase()].join("|");
-    const existingKeys = new Set(reqs.map(sheetDupKey));
-    const seenKeys = new Set();
-    // A row that syncs in already paid, and whose Name matches exactly one active
-    // Rent & EMI item, also settles that item — same as generating it by hand
-    // would (advances the due date, counts an instalment). Skipped whenever the
-    // name is ambiguous or matches nothing, so this never guesses wrong.
-    const activeRecurring = (recurring||[]).filter(r => r.active !== false);
-
     collected.forEach((c, i) => {
-      const { out, problems } = mapRowGeneric(c.row, tpl, map);
+      const { out, problems } = mapRowGeneric(c.row, REQ_TEMPLATE, map);
       if (problems.length) { errors.push({ source:c.source, rowNum:i+2, why:`missing ${problems.join(", ")}` }); return; }
 
       settleRequisitionDates(out);
       if (!out.site) out.site = c.source;
 
-      const k = sheetDupKey(out);
+      const k = importDupKey(out);
       if (existingKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"already in the app" }); return; }
       if (seenKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"repeated inside this sync" }); return; }
       seenKeys.add(k);
-
-      if (out.paymentStatus === "Paid") {
-        const nameMatches = activeRecurring.filter(r =>
-          String(r.name||"").trim().toLowerCase() === String(out.name||"").trim().toLowerCase());
-        if (nameMatches.length === 1) out.__recurringMatchId = nameMatches[0].id;
-      }
       toAdd.push({ data:out, source:c.source });
     });
 
-    setPreview({ kind, toAdd, duplicates, errors, failures, missing, map, headers, list, fileReport, skippedFiles, seenFiles, notes });
+    setPreview({ toAdd, duplicates, errors, failures, missing, map, headers, list, fileReport, skippedFiles, seenFiles, notes });
   }
 
   async function testConnection(sh){
@@ -8550,38 +8389,9 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
 
   function applyPreview(){
     if (!preview || preview.toAdd.length === 0) return;
-    const stamp = new Date().toISOString();
-
-    if (preview.kind === "expenses") {
-      const added = preview.toAdd.map((a, idx) => ({
-        ...emptyExpense, ...a.data, id: uid(), claimId:"", claimRef:"", createdAt: Date.now() + idx,
-      }));
-      setExpenses([...(expenses||[]), ...added]);
-
-      const L = lists || DEFAULT_LISTS;
-      const nl = { ...L, sites:[...(L.sites||[])], categories:[...(L.categories||[])],
-                   expenseTypes:[...(L.expenseTypes||DEFAULT_LISTS.expenseTypes)], people:[...(L.people||[])] };
-      added.forEach(d => {
-        if (d.site && !nl.sites.includes(d.site)) nl.sites.push(d.site);
-        if (d.category && !nl.categories.includes(d.category)) nl.categories.push(d.category);
-        if (d.expenseType && !nl.expenseTypes.includes(d.expenseType)) nl.expenseTypes.push(d.expenseType);
-        if (d.paidBy && !nl.people.includes(d.paidBy)) nl.people.push(d.paidBy);
-      });
-      nl.sites.sort(); nl.categories.sort(); nl.people.sort();
-      setLists(nl);
-
-      setSheets(sheets.map(x => (preview.list || []).some(l => l.id === x.id) ? { ...x, lastSync: stamp } : x));
-      showToast(`${added.length} expense(s) brought in`);
-      setPreview(null);
-      return;
-    }
-
     const added = [];
-    const recurringUpdates = [];
     preview.toAdd.forEach((a, idx) => {
-      const d = { ...a.data };
-      const recurMatchId = d.__recurringMatchId;
-      delete d.__recurringMatchId;
+      const d = a.data;
       const vend = vendors.find(v => String(v.name||"").trim().toLowerCase() === String(d.name).trim().toLowerCase());
       added.push({
         ...emptyReq, ...d,
@@ -8593,26 +8403,9 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
         site: d.site || a.source,
         exported: false,
         createdAt: Date.now() + idx,
-        recurringId: recurMatchId || "",
       });
-      if (recurMatchId) {
-        const item = (recurring||[]).find(r => r.id === recurMatchId);
-        if (item && !recurringUpdates.some(u => u.id === item.id)) {
-          const upd = { ...item };
-          if (item.frequency === "One-time") upd.active = false;
-          else upd.nextDueDate = addInterval(item.nextDueDate, item.frequency);
-          if (isInstalment(item) && item.installmentsPaid !== "") {
-            upd.installmentsPaid = (Number(item.installmentsPaid)||0) + 1;
-            if (Number(item.totalInstallments) && upd.installmentsPaid >= Number(item.totalInstallments)) upd.active = false;
-          }
-          recurringUpdates.push(upd);
-        }
-      }
     });
     setReqs([...reqs, ...added]);
-    if (recurringUpdates.length) {
-      setRecurring(recurring.map(r => recurringUpdates.find(u => u.id === r.id) || r));
-    }
 
     const promoted = promoteSalaryLedgers(vendors, added);
     if (promoted) setVendors(promoted.vendors);
@@ -8630,8 +8423,9 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
     nl.sites.sort(); nl.categories.sort();
     setLists(nl);
 
+    const stamp = new Date().toISOString();
     setSheets(sheets.map(x => (preview.list || []).some(l => l.id === x.id) ? { ...x, lastSync: stamp } : x));
-    showToast(`${added.length} requisition(s) brought in${recurringUpdates.length ? ` · ${recurringUpdates.length} Rent & EMI item(s) updated` : ""}`);
+    showToast(`${added.length} requisition(s) brought in`);
     setPreview(null);
   }
 
@@ -8861,13 +8655,9 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
 
         <div style={{ background:SURFACE, borderRadius:16, padding:20, marginBottom:16, border:`1px solid ${SAND}` }}>
           <SectionLabel>Check before importing</SectionLabel>
-          <ReviewRow label={preview.kind === "expenses" ? "New expenses" : "New requisitions"} value={preview.toAdd.length} />
+          <ReviewRow label="New requisitions" value={preview.toAdd.length} />
           <ReviewRow label="Skipped as duplicates" value={preview.duplicates.length} />
           <ReviewRow label="Rows with problems" value={preview.errors.length} />
-          {preview.kind !== "expenses" && preview.toAdd.some(a=>a.data.__recurringMatchId) && (
-            <ReviewRow label="Will also update Rent & EMI"
-              value={preview.toAdd.filter(a=>a.data.__recurringMatchId).length} />
-          )}
         </div>
 
         {preview.notes && preview.notes.length > 0 && (
@@ -8941,22 +8731,11 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
             <div style={{ fontWeight:700, color:GREEN, fontSize:14, marginBottom:10 }}>Will be added ({preview.toAdd.length})</div>
             {preview.toAdd.slice(0,30).map((a,i) => (
               <div key={i} style={{ padding:"7px 0", borderTop: i? `1px solid ${SAND}`:"none", fontSize:13, color:INK }}>
-                {preview.kind === "expenses"
-                  ? <React.Fragment>
-                      <strong>{a.data.description || a.data.expenseType}</strong> · ₹{fmtINR(a.data.amount)}
-                      {a.data.date || a.data.periodText ? ` · ${a.data.date ? fmtDate(a.data.date) : a.data.periodText}` : " · no date"}
-                      <span style={{ color:MUTED }}> · {a.data.paidBy || "no payer"}</span>
-                    </React.Fragment>
-                  : <React.Fragment>
-                      <strong>{a.data.name}</strong> · ₹{fmtINR(a.data.amount)} · {fmtDate(a.data.date) || "no date"}
-                      <span style={{ color:MUTED }}> · {a.data.site || a.source}</span>
-                      {a.data.dateFromPayment && (
-                        <span style={{ color:AMBER, fontWeight:600 }}> · date taken from payment</span>
-                      )}
-                      {a.data.__recurringMatchId && (
-                        <span style={{ color:GREEN, fontWeight:600 }}> · settles Rent & EMI</span>
-                      )}
-                    </React.Fragment>}
+                <strong>{a.data.name}</strong> · ₹{fmtINR(a.data.amount)} · {fmtDate(a.data.date) || "no date"}
+                <span style={{ color:MUTED }}> · {a.data.site || a.source}</span>
+                {a.data.dateFromPayment && (
+                  <span style={{ color:AMBER, fontWeight:600 }}> · date taken from payment</span>
+                )}
               </div>
             ))}
             {preview.toAdd.length > 30 && <div style={{ fontSize:12, color:MUTED, marginTop:8 }}>…and {preview.toAdd.length-30} more</div>}
@@ -8971,8 +8750,7 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
             </div>
             {preview.duplicates.slice(0,20).map((d,i) => (
               <div key={i} style={{ fontSize:13, color:INK, padding:"4px 0" }}>
-                {preview.kind === "expenses" ? (d.data.description || d.data.expenseType) : d.data.name} · ₹{fmtINR(d.data.amount)}
-                {d.data.date ? ` · ${fmtDate(d.data.date)}` : ""} <span style={{color:MUTED}}>— {d.why}</span>
+                {d.data.name} · ₹{fmtINR(d.data.amount)} · {fmtDate(d.data.date)} <span style={{color:MUTED}}>— {d.why}</span>
               </div>
             ))}
             {preview.duplicates.length > 20 && <div style={{ fontSize:12, color:MUTED, marginTop:8 }}>…and {preview.duplicates.length-20} more</div>}
@@ -8991,9 +8769,7 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
         )}
 
         <BigButton icon="check"
-          label={preview.toAdd.length
-            ? `Import ${preview.toAdd.length} ${preview.kind === "expenses" ? "Expense" : "Requisition"}(s)`
-            : "Nothing new to import"}
+          label={preview.toAdd.length ? `Import ${preview.toAdd.length} Requisition(s)` : "Nothing new to import"}
           onClick={applyPreview} tone="green" full disabled={preview.toAdd.length===0} />
       </div>
     );
@@ -9031,15 +8807,6 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
           <Field label="Tab name inside each sheet" hint="Leave blank to use the first tab of every sheet">
             <input style={inputStyle} value={editing.tab || ""}
               onChange={e=>setEditing({...editing, tab:e.target.value})} placeholder="e.g. Requisitions" />
-          </Field>
-          <Field label="Syncs into" hint={editing.kind === "expenses"
-              ? "Rows land in Expenses — use this for a sheet like Office Master (Date, Expense Type, Paid By, Amount, ...)."
-              : "Rows land in Requisitions — a date in Payment Status sends that row straight to the Payment Register, same as Import from Excel."}>
-            <select style={inputStyle} value={editing.kind || "requisitions"}
-              onChange={e=>setEditing({...editing, kind:e.target.value})}>
-              <option value="requisitions">Requisitions (Payment to be done)</option>
-              <option value="expenses">Expenses (Office Master)</option>
-            </select>
           </Field>
           <BigButton icon="check" label="Save Folder" onClick={()=>saveSheet(editing)} tone="green" full
             disabled={!editing.name.trim() || !!urlProblem(editing.url)} />
@@ -9139,7 +8906,7 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
                   <div style={{ flex:1, minWidth:0 }}>
                     <div style={{ fontWeight:700, color:INK }}>{sh.name}</div>
                     <div style={{ fontSize:12, color:MUTED, marginTop:3 }}>
-                      Syncs into {(sh.kind||"requisitions") === "expenses" ? "Expenses" : "Requisitions"} · {sh.tab ? `Tab: ${sh.tab} · ` : ""}Last sync {sh.lastSync ? friendlyTime(sh.lastSync) : "never"}
+                      {sh.tab ? `Tab: ${sh.tab} · ` : ""}Last sync {sh.lastSync ? friendlyTime(sh.lastSync) : "never"}
                     </div>
                   </div>
                   <div style={{ display:"flex", gap:8, flexShrink:0 }}>
@@ -9217,17 +8984,11 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
       )}
 
       <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-        {["requisitions","expenses"].map(k => {
-          const group = sheets.filter(x => (x.kind||"requisitions") === k);
-          if (group.length < 2) return null;
-          return (
-            <BigButton key={k} icon="download"
-              label={`Sync all ${k==="expenses" ? "Expense" : "Requisition"} sources (${group.length})`}
-              onClick={()=>syncSheets(group)} tone="green" full disabled={!!busy} />
-          );
-        })}
+        {sheets.length > 1 && (
+          <BigButton icon="download" label="Sync Everything" onClick={()=>syncSheets(sheets)} tone="green" full disabled={!!busy} />
+        )}
         <BigButton icon="plus" label="Add Folder"
-          onClick={()=>setEditing({ id: uid(), name:"Site Sheets", url:"", tab:"", kind:"requisitions", lastSync:null })} tone="amber" full />
+          onClick={()=>setEditing({ id: uid(), name:"Site Sheets", url:"", tab:"", lastSync:null })} tone="amber" full />
         <BigButton icon="settings" label="Set up automatic sync (advanced)" onClick={()=>setShowSetup(true)} tone="ink" full />
       </div>
     </div>
@@ -13683,8 +13444,7 @@ function SettingsTab({ settings, setSettings, vendors, reqs, recurring, expenses
           connectDataFile, reconnectDataFile, disconnectDataFile, saveToFile, applyRestoredData,
           openExistingDataFile,
           driveConnected, driveEmail, driveSyncing, driveLastSynced, driveError,
-          driveFolderId, driveFolderName,
-          connectDrive, disconnectDrive, driveSyncNow, driveChooseFolder } = sync;
+          connectDrive, disconnectDrive, driveSyncNow } = sync;
 
   function saveApiKey(){ setSettings({...settings, gstApiKey:key}); showToast("Settings saved"); }
 
@@ -13822,21 +13582,11 @@ function SettingsTab({ settings, setSettings, vendors, reqs, recurring, expenses
           </p>
         )}
 
-        {driveConnected && (
-          <p style={{ fontSize:13, color:MUTED, lineHeight:1.5, marginBottom:14 }}>
-            Backup folder: <strong style={{ color:INK }}>{driveFolderName || "My Drive (root)"}</strong>
-          </p>
-        )}
-
         <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
           {!driveConnected && <BigButton icon="check" label="Connect Google Drive" onClick={connectDrive} tone="green" full />}
           {driveConnected && (
             <React.Fragment>
               <BigButton icon="download" label="Sync Now" onClick={()=>driveSyncNow(false)} tone="ink" full />
-              <button onClick={driveChooseFolder}
-                style={{ borderRadius:16, padding:"14px 20px", fontSize:15, fontWeight:600, background:SAND, color:INK, border:"none", cursor:"pointer" }}>
-                {driveFolderName ? "Change backup folder" : "Choose backup folder"}
-              </button>
               <button onClick={disconnectDrive}
                 style={{ borderRadius:16, padding:"14px 20px", fontSize:15, fontWeight:600, background:SURFACE, color:MUTED, border:`1.5px solid ${SAND}`, cursor:"pointer" }}>
                 Disconnect
