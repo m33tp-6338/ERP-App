@@ -209,8 +209,12 @@ exactly as invisible to it as before.
 - **Optional PIN lock** exists under Settings if you want to lock the app on the
   phone — off by default.
 - If the app is ever updated (a new `index.html`), bump `CACHE_NAME` in `sw.js`
-  (currently `v10`) so installed phones pick up the new version instead of a
-  cached old one, and re-upload everything to the repo.
+  (currently `v11`) so installed phones pick up the new version instead of a
+  cached old one — and **re-upload all three of `index.html`, `sw.js`, and
+  `README.md` together, every time**, even if only one of them actually
+  changed. Uploading just `index.html` leaves the live site serving an old
+  `sw.js`, which then keeps installed phones (and the folder-picker/API-key
+  fix) stuck on the previous version — this has happened more than once.
 
 ## Settings & Backup: smaller Google Drive sync control
 
@@ -344,6 +348,13 @@ below.
   same behaviour Import from Excel already has for a requisition sheet — the
   sync just does it automatically from the live Google Sheet instead of a
   one-off file.
+- **No Ref No. column on Payment to be done, deliberately.** Rows on that tab
+  get edited or deleted before a payment is finalised, so a stable ID there
+  would be misleading — the app just assigns its own Ref No. once a row
+  syncs in, same as always. If you want a Ref No. you can trace later, add
+  it on **"Master"** instead once that row is settled and copied across (see
+  the Master template's Read Me tab) — Office Master rows get their own
+  optional **ID** column there for the same reason.
 - **Site expenses paid by your partner on their card** (electricity, etc.):
   add a **"Paid By"** column to Payment to be done. Leave it blank (or write
   "Company") for normal payments; write the partner's name for anything they
@@ -372,36 +383,271 @@ below.
   special handling — they're just different values in the Category column of
   ordinary Payment to be done rows.
 
-**Setup — you need two sync sources, both pointing at the same spreadsheet:**
+**How the sync actually reads your data (as of v6.12):** the old Apps
+Script / Web app URL setup is gone. It meant deploying your own script on
+`script.google.com` and pasting the URL it gave you — fiddly on a phone, and
+prone to failing in ways that were genuinely impossible to diagnose from
+outside (a correctly deployed, "Anyone"-access script would still
+intermittently 404 for no visible reason). It's been replaced with something
+much simpler: the app reads Excel files straight out of a Google Drive
+folder you choose, using the exact same Google sign-in already proven
+reliable for Drive backup. There is nothing to deploy and no URL to paste.
 
-1. Move "Payment to be done" and "Office Master" into one Google Sheet (as two
-   tabs/sheets within it — drop "Master", it's no longer needed).
-2. In that Google Sheet: **Extensions → Apps Script**, paste in the script
-   from **Sync from Google Sheets → Set up automatic sync (advanced)** in the
-   app (see the note below — use this simple path, not the multi-site folder
-   wizard on that same screen), then **Deploy → New deployment → Web app**,
-   execute as **Me**, access **Anyone**, and copy the Web app URL it gives you
-   (ends in `/exec`).
-3. In the app: **Sync from Google Sheets → Add Folder** → give it a name,
-   paste that same Web app URL, set **Tab name** to `Payment to be done`, and
-   set **Syncs into** to **Requisitions**. Save.
-4. **Add Folder** again → same Web app URL, **Tab name** set to
+**Setup — you need one import folder and two sync sources:**
+
+1. In Google Drive, pick (or create) a folder you'll drop your Excel exports
+   into — it can be the same folder your automatic backup uses, or a
+   separate one, your choice.
+2. Keep "Payment to be done" and "Office Master" as two tabs in one Excel
+   workbook (this is exactly how the Excel template you were given is
+   already laid out — keep "Master" alongside them in the same workbook too
+   if you like, for convenience; it isn't part of the sync either way).
+   Whenever you want to sync, export/save that workbook as `.xlsx` and put
+   it in the Drive folder from step 1, replacing the previous copy (or
+   adding a new one — the app always reads whichever file's name matches,
+   most-recently-modified first).
+3. In the app: **Sync from Google Sheets → Choose import folder** (top of
+   the screen) → sign in to Google if asked → pick the folder from step 1.
+4. **Add Source** → give it a name (e.g. "Payment to be done"), set
+   **File name** to match the *start* of your workbook's actual file name in
+   Drive — check the file's name in Drive and use that (or just the first
+   word or two of it; it only needs to match the start, so it still matches
+   a later copy Drive saves as "... (1).xlsx"), set **Tab inside that file**
+   to `Payment to be done`, and set **Syncs into** to **Requisitions**. Save.
+5. **Add Source** again → same file name, **Tab inside that file** set to
    `Office Master`, **Syncs into** set to **Expenses**. Save.
-5. From then on, tap **Sync now** on either card whenever you've added new
-   rows — it only pulls in rows it hasn't seen before (matched by date, site,
+6. From then on: drop an updated copy of the workbook into the Drive folder,
+   come back to **Sync from Google Sheets**, and tap **Sync now** on either
+   card (or use "Sync all ... sources" once you have two or more of the same
+   kind). It only pulls in rows it hasn't seen before (matched by date, site,
    name and amount together, not by the sheet having its own reference
-   number, so re-syncing the same sheet repeatedly is safe).
+   number, so re-syncing the same file repeatedly is safe).
 
-**A known issue on that same "Sync from Google Sheets" screen, found while
-building this — not something you did wrong:** the "Set up automatic sync
-(advanced) → Step 1 — name each site and paste its folder" wizard (for
-pulling many *separate* site workbooks out of Drive folders automatically)
-generates a script that doesn't actually use the folder names/links you type
-in — a pre-existing gap in the app, unrelated to this update. You don't need
-that wizard for this workflow: the plain single-spreadsheet setup above (copy
-the script once, paste it as-is, no folders to fill in) works correctly today
-and is exactly what steps 1–5 use. If multi-site folder scanning is ever
-needed, that's a separate fix.
+**If you set this up before v6.12** (the old Apps Script version): your
+sources will show as "Not working" until you edit each one — tap the pencil,
+fill in **File name** (and **Tab inside that file**, if needed), and Save.
+The Web app URL field is gone; nothing else about the setup changes.
+
+## Optional: one-click move between "Payment to be done" and "Master"
+
+Once a row is paid, you can move it out of "Payment to be done" and into
+"Master" with one click, instead of copying it across by hand — and send a
+row back the other way if a settled payment needs correcting. This lives
+entirely inside the Google Sheet (a small menu Apps Script adds), separate
+from the app's own sync.
+
+**Why this isn't automatic (no button, just happens the moment you type a
+payment date):** the app only reads "Payment to be done" when you tap Sync.
+If a row got moved out to Master the instant you typed the date — before
+you'd had a chance to sync — the app would never see it, and that payment
+would silently never show up in Requisitions/Payment Register at all. So the
+move only ever happens when **you** trigger it, which should be **after**
+you've already synced that batch of payments into the app.
+
+**Setup (one-time, or whenever you update the script below):**
+
+1. Open the same Google Sheet, **Extensions → Apps Script** (the same project
+   you already deployed for the sync).
+2. Select everything in the code editor, delete it, and paste in the
+   script below — it includes everything the sync needs (unchanged) plus the
+   two new menu commands.
+3. Save (Ctrl+S / Cmd+S). **No redeploy needed** — the sync's Web app URL
+   keeps working exactly as before, since the part it uses (`doGet`) hasn't
+   changed. The menu commands run directly from the sheet, not through that
+   URL.
+4. Close and reopen the Google Sheet in your browser (or just refresh the
+   page). You should see a new **ERP Tools** menu appear next to Help.
+   First time only: it may ask you to authorize again — same as before,
+   click through **Advanced → Go to (project) → Allow**.
+
+```javascript
+function doGet(e) {
+  var out = { ok: true, sheet: "", rows: [] };
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var wanted = (e && e.parameter && e.parameter.sheet) || "";
+    var sh = wanted ? ss.getSheetByName(wanted) : ss.getSheets()[0];
+    if (!sh) throw new Error("Sheet not found: " + wanted);
+    out.sheet = sh.getName();
+    var values = sh.getDataRange().getDisplayValues();
+    if (values.length > 1) {
+      var headers = values[0].map(function (h) { return String(h).trim(); });
+      for (var i = 1; i < values.length; i++) {
+        var row = values[i];
+        if (row.join("").trim() === "") continue;
+        var obj = {};
+        for (var c = 0; c < headers.length; c++) {
+          if (headers[c]) obj[headers[c]] = row[c];
+        }
+        out.rows.push(obj);
+      }
+    }
+  } catch (err) {
+    out.ok = false;
+    out.error = String(err);
+  }
+  var json = JSON.stringify(out);
+  var cb = e && e.parameter && e.parameter.callback;
+  if (cb) {
+    return ContentService.createTextOutput(cb + "(" + json + ")")
+      .setMimeType(ContentService.MimeType.JAVASCRIPT);
+  }
+  return ContentService.createTextOutput(json)
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu("ERP Tools")
+    .addItem("Move paid rows to Master", "movePaidRowsToMaster")
+    .addItem("Send selected row(s) back to Payment to be done", "sendSelectedRowsBack")
+    .addToUi();
+}
+
+function looksPaid_(val) {
+  if (val instanceof Date) return true;
+  if (typeof val !== "string") return false;
+  var s = val.trim();
+  if (!s) return false;
+  if (/^(done|paid|yes|y|complete|completed|settled)$/i.test(s)) return true;
+  return /^\d{1,4}[-\/]\d{1,2}[-\/]\d{1,4}$/.test(s);
+}
+
+function movePaidRowsToMaster() {
+  var ui = SpreadsheetApp.getUi();
+  var resp = ui.alert(
+    "Move paid rows to Master",
+    "Have you already opened the app and tapped Sync since entering these payments? " +
+    "If not, cancel this and sync first — otherwise a payment could be moved out " +
+    "of \"Payment to be done\" before the app ever gets to read it.",
+    ui.ButtonSet.YES_NO
+  );
+  if (resp !== ui.Button.YES) return;
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var src = ss.getSheetByName("Payment to be done");
+  var dst = ss.getSheetByName("Master");
+  if (!src || !dst) {
+    ui.alert("Could not find both \"Payment to be done\" and \"Master\" tabs — check the tab names match exactly.");
+    return;
+  }
+  var data = src.getDataRange().getValues();
+  if (data.length < 2) { ui.alert("No rows to move."); return; }
+  var headers = data[0];
+  var col = {};
+  headers.forEach(function (h, i) { col[String(h).trim()] = i; });
+  var required = ["Date", "Site", "Category", "Sub-Category", "Name", "Amount", "Description", "Payment Status"];
+  for (var r = 0; r < required.length; r++) {
+    if (!(required[r] in col)) {
+      ui.alert("\"Payment to be done\" is missing the \"" + required[r] + "\" column — check the header row hasn't been changed.");
+      return;
+    }
+  }
+  var rowsToDelete = [];
+  var moved = 0;
+  for (var i = 1; i < data.length; i++) {
+    var row = data[i];
+    if (row.join("").toString().trim() === "") continue;
+    var status = row[col["Payment Status"]];
+    if (!looksPaid_(status)) continue;
+    dst.appendRow([
+      "",
+      row[col["Date"]],
+      row[col["Site"]],
+      row[col["Category"]],
+      row[col["Sub-Category"]],
+      row[col["Name"]],
+      row[col["Amount"]],
+      row[col["Description"]],
+      status
+    ]);
+    rowsToDelete.push(i + 1);
+    moved++;
+  }
+  rowsToDelete.sort(function (a, b) { return b - a; });
+  rowsToDelete.forEach(function (rowNum) { src.deleteRow(rowNum); });
+  ui.alert(moved + " paid row(s) moved to Master." +
+    (moved > 0 ? " Ref No. was left blank — copy it in from Requisitions → Export to Excel if you want one." : ""));
+}
+
+function sendSelectedRowsBack() {
+  var ui = SpreadsheetApp.getUi();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var master = ss.getSheetByName("Master");
+  var dst = ss.getSheetByName("Payment to be done");
+  if (!master || !dst) {
+    ui.alert("Could not find both \"Master\" and \"Payment to be done\" tabs.");
+    return;
+  }
+  var sel = ss.getActiveRange();
+  if (!sel || sel.getSheet().getName() !== "Master") {
+    ui.alert("Select the row(s) on the Master tab you want to send back first, then run this again.");
+    return;
+  }
+  var startRow = sel.getRow();
+  if (startRow === 1) {
+    ui.alert("That selection includes the header row — select only the data row(s) you want to move.");
+    return;
+  }
+  var resp = ui.alert(
+    "Send back to Payment to be done",
+    "This moves the selected row(s) out of Master and into Payment to be done for editing. " +
+    "If this payment is already showing as paid in the app, this will NOT change that — " +
+    "fix it directly in the app's Requisitions tab instead. Continue?",
+    ui.ButtonSet.YES_NO
+  );
+  if (resp !== ui.Button.YES) return;
+
+  var numRows = sel.getNumRows();
+  var values = master.getRange(startRow, 1, numRows, master.getLastColumn()).getValues();
+  var headers = master.getRange(1, 1, 1, master.getLastColumn()).getValues()[0];
+  var col = {};
+  headers.forEach(function (h, i) { col[String(h).trim()] = i; });
+
+  var moved = 0;
+  values.forEach(function (row) {
+    if (row.join("").toString().trim() === "") return;
+    dst.appendRow([
+      row[col["Date"]],
+      row[col["Site"]],
+      row[col["Category"]],
+      row[col["Sub-Category"]],
+      row[col["Name"]],
+      "",
+      row[col["Amount"]],
+      row[col["Description"]],
+      "",
+      "",
+      ""
+    ]);
+    moved++;
+  });
+  master.deleteRows(startRow, numRows);
+  ui.alert(moved + " row(s) sent back to \"Payment to be done\". Payment Status was cleared, so it shows as Pending again until you re-enter the payment date.");
+}
+```
+
+**Using it:**
+
+- **Move paid rows to Master:** ERP Tools → **Move paid rows to Master**.
+  Confirm you've already synced, and it moves every row in "Payment to be
+  done" that has a Payment Status/date filled in over to Master, removing it
+  from "Payment to be done" — no more of that copy-paste at month end. Ref
+  No. is left blank on the moved row, same as a manual copy would be — fill
+  it in from Requisitions → Export to Excel if you want one (see the Excel
+  template's Read Me tab).
+- **Send a row back for correction:** click the row number(s) on **Master**
+  to select them, then ERP Tools → **Send selected row(s) back to Payment to
+  be done**. Payment Status is cleared, so it comes back as an ordinary
+  Pending row ready to edit and re-enter a payment date for later.
+- **Important limitation:** if that payment was already synced into the app
+  as a paid Requisition *before* you sent it back, this does **not** touch
+  that existing app record — re-syncing the corrected row will either be
+  silently skipped (if it still looks like the same payment) or come in as a
+  second, duplicate entry (if you changed the amount/date/description).
+  Fix an already-synced payment directly in the app's own Requisitions tab
+  instead — editing an existing Requisition there already works today and is
+  the reliable way to correct something that's already made it into the app.
 
 ## Payroll: fixed salaries and attendance-based pay
 

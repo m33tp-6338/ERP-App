@@ -51,7 +51,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.11";
+const APP_VERSION = "6.12";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -65,6 +65,13 @@ const GOOGLE_DRIVE_PICKER_API_KEY = "AIzaSyABzgqparoHG9wfLMV6QBsvviEoUW_uhyU";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.12", date:"2026-09-02", title:"Sync from Google Sheets replaced with Drive folder import", items:[
+    "The Apps Script / Web app URL sync is gone - it depended on you deploying and hosting your own script, which kept failing in ways neither of us could see or fix reliably",
+    "In its place: Sync from Google Sheets now reads Excel files straight out of a Google Drive folder you choose, using the same sign-in already proven reliable for Drive backup - no deployment, no URL to paste, no \"Anyone\" access setting",
+    "Choose your import folder once, then add a source for each file (and, if one file has more than one tab - like your template's Payment to be done and Office Master - pick the tab too)",
+    "Drop an updated .xlsx into that folder and tap Sync now to pull the latest rows in, same preview and duplicate protection as before",
+    "Existing sync sources set up the old way will show as not working until you edit them to add a file name - a one-time fix, described in README.md",
+  ]},
   { v:"6.11", date:"2026-09-02", title:"Drive backup: folder picker now works", items:[
     "Settings & Backup → Choose backup folder now actually opens Google's folder browser instead of showing \"not set up yet\" - the missing one-time API key is in place",
     "Also fixed the \"Payment to be done\" sync guidance (README.md) - it wrongly said to stop keeping a separate Master sheet by hand; Master is unaffected and unrelated to that sync",
@@ -1039,34 +1046,6 @@ const DEFAULT_LISTS = { sites:[], categories:[], subCategories:{}, types:["House
   utilityTypes:["Electricity","Water","Internet","Mobile","Gas","Municipal Tax"],
   companies:["Own Use","For Machinery"] };
 
-function jsonpFetch(url, timeoutMs){
-  return new Promise((resolve, reject) => {
-    const cb = "erpcb_" + Math.random().toString(36).slice(2, 10);
-    const script = document.createElement("script");
-    let done = false;
-    const cleanup = () => {
-      try { delete window[cb]; } catch(e) { window[cb] = undefined; }
-      if (script.parentNode) script.parentNode.removeChild(script);
-    };
-    const timer = setTimeout(() => {
-      if (done) return;
-      done = true; cleanup();
-      reject(new Error("The sheet did not respond. Check the web app URL and that access is set to Anyone."));
-    }, timeoutMs || 25000);
-    window[cb] = (data) => {
-      if (done) return;
-      done = true; clearTimeout(timer); cleanup(); resolve(data);
-    };
-    script.onerror = () => {
-      if (done) return;
-      done = true; clearTimeout(timer); cleanup();
-      reject(new Error("Could not reach the sheet. Check your internet connection and the URL."));
-    };
-    script.src = url + (url.indexOf("?") >= 0 ? "&" : "?") + "callback=" + cb + "&t=" + Date.now();
-    document.body.appendChild(script);
-  });
-}
-
 function collectAllData(){
   return {
     vendors: loadKey("erp:vendors", []),
@@ -1175,6 +1154,56 @@ async function driveApiFetch(url, token, options){
     throw err;
   }
   return res;
+}
+
+// Reads one Excel file straight out of a Google Drive folder via the Drive
+// API — no Apps Script, no deployed URL, no "Anyone" access setting to get
+// wrong. Uses the same OAuth connection already proven reliable for Drive
+// backup. filenameHint is matched case-insensitively against the start of
+// each file's name in the folder (so "Payment to be done.xlsx",
+// "Payment to be done (1).xlsx", etc. all match "Payment to be done").
+// tabHint picks which tab inside that file to read — the app's own Excel
+// template keeps "Payment to be done" and "Office Master" as two tabs in
+// ONE workbook, so both sync sources point at the same file but need
+// different tabs. When tabHint is blank, the first tab that isn't named
+// "Read Me" is used (falling back to the very first tab).
+async function driveReadImportFile(folderId, filenameHint, token, tabHint){
+  if (!folderId) throw new Error("Choose an import folder first.");
+  const hint = String(filenameHint || "").trim().toLowerCase();
+  if (!hint) throw new Error("This source has no file name to look for.");
+  const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
+  const listRes = await driveApiFetch(
+    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,modifiedTime)&pageSize=200&orderBy=modifiedTime desc`,
+    token
+  );
+  const listData = await listRes.json();
+  const files = listData.files || [];
+  const match = files.find(f => String(f.name || "").toLowerCase().startsWith(hint))
+    || files.find(f => String(f.name || "").toLowerCase().indexOf(hint) >= 0);
+  if (!match) {
+    throw new Error(`No file starting with "${filenameHint}" found in the import folder — check the file is there and named right.`);
+  }
+  const fileRes = await driveApiFetch(
+    `https://www.googleapis.com/drive/v3/files/${match.id}?alt=media`, token
+  );
+  const buf = await fileRes.arrayBuffer();
+  let wb;
+  try {
+    wb = XLSX.read(buf, { type: "array", cellDates: false });
+  } catch (e) {
+    throw new Error(`"${match.name}" doesn't look like a valid Excel file.`);
+  }
+  if (!wb.SheetNames.length) throw new Error(`"${match.name}" has no sheets.`);
+  const wantedTab = String(tabHint || "").trim().toLowerCase();
+  let sheetName = wantedTab && wb.SheetNames.find(n => n.toLowerCase() === wantedTab);
+  if (!sheetName && wantedTab) sheetName = wb.SheetNames.find(n => n.toLowerCase().indexOf(wantedTab) >= 0);
+  if (!sheetName && wantedTab) {
+    throw new Error(`"${match.name}" has no tab named "${tabHint}" — found: ${wb.SheetNames.join(", ")}.`);
+  }
+  if (!sheetName) sheetName = wb.SheetNames.find(n => n.toLowerCase() !== "read me") || wb.SheetNames[0];
+  const ws = wb.Sheets[sheetName];
+  const rows = XLSX.utils.sheet_to_json(ws, { defval: "", raw: false });
+  return { ok: true, sheet: sheetName, rows, fileName: match.name, modifiedTime: match.modifiedTime };
 }
 function payloadCounts(d){
   const c = d.counts || {};
@@ -1904,6 +1933,8 @@ function ERPApp(){
   const [driveFileId, setDriveFileId] = useState(() => loadKey("erp:driveFileId", ""));
   const [driveFolderId, setDriveFolderId] = useState(() => loadKey("erp:driveFolderId", ""));
   const [driveFolderName, setDriveFolderName] = useState(() => loadKey("erp:driveFolderName", ""));
+  const [driveImportFolderId, setDriveImportFolderId] = useState(() => loadKey("erp:driveImportFolderId", ""));
+  const [driveImportFolderName, setDriveImportFolderName] = useState(() => loadKey("erp:driveImportFolderName", ""));
   const [driveSyncing, setDriveSyncing] = useState(false);
   const [driveLastSynced, setDriveLastSynced] = useState(() => loadKey("erp:driveLastSynced", null));
   const [driveError, setDriveError] = useState("");
@@ -2195,6 +2226,50 @@ function ERPApp(){
     }
   }, [driveGetFreshToken, driveFileId, driveSyncNow, showToast]);
 
+  // Separate folder from the backup one — this is where the user drops the
+  // Excel files (Payment to be done / Office Master) they want the app to
+  // read via Sync from Google Sheets. Reuses the exact same Picker + OAuth
+  // token flow as the backup folder, just points a different, independent
+  // folder id/name at a different purpose. No file gets moved here — this
+  // folder is read-only from the app's point of view.
+  const driveChooseImportFolder = useCallback(async () => {
+    if (!GOOGLE_DRIVE_PICKER_API_KEY || GOOGLE_DRIVE_PICKER_API_KEY.indexOf("PASTE_YOUR") === 0) {
+      showToast("The folder picker isn't set up in this copy of the app yet — see README.md", "error");
+      return;
+    }
+    try {
+      const token = await driveGetFreshToken(true); // interactive — must run from this tap
+      await loadPickerLibrary();
+      await new Promise((resolve) => {
+        const view = new google.picker.DocsView(google.picker.ViewId.FOLDERS)
+          .setSelectFolderEnabled(true)
+          .setIncludeFolders(true)
+          .setMimeTypes("application/vnd.google-apps.folder");
+        const picker = new google.picker.PickerBuilder()
+          .addView(view)
+          .setOAuthToken(token)
+          .setDeveloperKey(GOOGLE_DRIVE_PICKER_API_KEY)
+          .setOrigin(window.location.protocol + "//" + window.location.host)
+          .setTitle("Choose the folder your Excel files are dropped into")
+          .setCallback((data) => {
+            if (data.action === google.picker.Action.PICKED && data.docs && data.docs[0]) {
+              const folder = data.docs[0];
+              setDriveImportFolderId(folder.id); saveKey("erp:driveImportFolderId", folder.id);
+              setDriveImportFolderName(folder.name || ""); saveKey("erp:driveImportFolderName", folder.name || "");
+              showToast(`Import folder set to ${folder.name || "the chosen folder"}`);
+              resolve();
+            } else if (data.action === google.picker.Action.CANCEL) {
+              resolve();
+            }
+          })
+          .build();
+        picker.setVisible(true);
+      });
+    } catch (e) {
+      showToast("Could not open the folder picker — try again", "error");
+    }
+  }, [driveGetFreshToken, showToast]);
+
   const connectDrive = useCallback(async () => {
     if (!GOOGLE_DRIVE_CLIENT_ID || GOOGLE_DRIVE_CLIENT_ID.indexOf("PASTE_YOUR") === 0) {
       showToast("Google Drive isn't set up in this copy of the app yet — see README.md", "error");
@@ -2433,7 +2508,8 @@ function ERPApp(){
     applyRestoredData: applyPayload, openExistingDataFile,
     driveConnected, driveEmail, driveSyncing, driveLastSynced, driveError,
     driveFolderId, driveFolderName,
-    connectDrive, disconnectDrive, driveSyncNow, driveChooseFolder,
+    driveImportFolderId, driveImportFolderName, driveChooseImportFolder,
+    connectDrive, disconnectDrive, driveSyncNow, driveChooseFolder, driveGetFreshToken,
   };
 
   return (
@@ -2480,7 +2556,7 @@ function ERPApp(){
         {tab==="payroll" && <PayrollTab vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} attendance={attendance} setAttendance={setAttendance} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
         {tab==="statement" && <MonthlyStatementTab reqs={reqs} expenses={expenses} cashTxns={cashTxns} cards={cards} showToast={showToast} goTo={navigate} />}
         {tab==="sitesummary" && <SiteSummaryTab reqs={reqs} expenses={expenses} cashTxns={cashTxns} cards={cards} diesel={diesel} utilities={utilities} machines={machines} vendors={vendors} showToast={showToast} goTo={navigate} />}
-        {tab==="sheets" && <SheetSyncTab sheets={sheets} setSheets={setSheets} reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} expenses={expenses} setExpenses={setExpenses} recurring={recurring} setRecurring={setRecurring} />}
+        {tab==="sheets" && <SheetSyncTab sheets={sheets} setSheets={setSheets} reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} expenses={expenses} setExpenses={setExpenses} recurring={recurring} setRecurring={setRecurring} sync={syncProps} />}
         {tab==="expenses" && <ExpensesTab expenses={expenses} setExpenses={setExpenses} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
         {tab==="receivables" && <ReceivablesTab reqs={reqs} setReqs={setReqs} showToast={showToast} goTo={navigate} />}
         {tab==="payments" && <PaymentRegisterTab reqs={reqs} setReqs={setReqs} vendors={vendors} expenses={expenses} setExpenses={setExpenses} cashTxns={cashTxns} cards={cards} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} />}
@@ -8871,62 +8947,24 @@ function SiteSummaryTab({ reqs, expenses, cashTxns, cards, diesel, utilities, ma
 
 const FREQUENCIES = ["Monthly","Quarterly","Half-Yearly","Yearly","One-time"];
 
-const APPS_SCRIPT_CODE = "function doGet(e) {\n  var out = { ok: true, sheet: \"\", rows: [] };\n  try {\n    var ss = SpreadsheetApp.getActiveSpreadsheet();\n    var wanted = (e && e.parameter && e.parameter.sheet) || \"\";\n    var sh = wanted ? ss.getSheetByName(wanted) : ss.getSheets()[0];\n    if (!sh) throw new Error(\"Sheet not found: \" + wanted);\n    out.sheet = sh.getName();\n    var values = sh.getDataRange().getDisplayValues();\n    if (values.length > 1) {\n      var headers = values[0].map(function (h) { return String(h).trim(); });\n      for (var i = 1; i < values.length; i++) {\n        var row = values[i];\n        if (row.join(\"\").trim() === \"\") continue;\n        var obj = {};\n        for (var c = 0; c < headers.length; c++) {\n          if (headers[c]) obj[headers[c]] = row[c];\n        }\n        out.rows.push(obj);\n      }\n    }\n  } catch (err) {\n    out.ok = false;\n    out.error = String(err);\n  }\n  var json = JSON.stringify(out);\n  var cb = e && e.parameter && e.parameter.callback;\n  if (cb) {\n    return ContentService.createTextOutput(cb + \"(\" + json + \")\")\n      .setMimeType(ContentService.MimeType.JAVASCRIPT);\n  }\n  return ContentService.createTextOutput(json)\n    .setMimeType(ContentService.MimeType.JSON);\n}";
-
 function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, lists, setLists, showToast, goTo,
-  expenses, setExpenses, recurring, setRecurring }){
+  expenses, setExpenses, recurring, setRecurring, sync }){
+  const { driveConnected, connectDrive, driveGetFreshToken,
+    driveImportFolderId, driveImportFolderName, driveChooseImportFolder } = sync;
   const [editing, setEditing] = useState(null);
   const [busy, setBusy] = useState("");
   const [preview, setPreview] = useState(null);
-  const [showSetup, setShowSetup] = useState(false);
-  const [folderRows, setFolderRows] = useState([{ site:"", link:"" }, { site:"", link:"" }]);
 
-  function extractId(raw){
-    const t = (raw || "").trim();
-    if (!t) return "";
-    const m = t.match(/\/folders\/([A-Za-z0-9_-]{10,})/);
-    if (m) return m[1];
-    const q = t.match(/[?&]id=([A-Za-z0-9_-]{10,})/);
-    if (q) return q[1];
-    if (/^[A-Za-z0-9_-]{20,}$/.test(t)) return t;      // they pasted just the ID
-    return "";
-  }
-  const folderIds = useMemo(() => folderRows.map(r => extractId(r.link)), [folderRows]);
-  const readyRows = useMemo(
-    () => folderRows.map((r, i) => ({ site: (r.site||"").trim(), id: folderIds[i] }))
-                    .filter(r => r.id && r.site),
-    [folderRows, folderIds]);
-
-  const readyScript = useMemo(() => {
-    if (!readyRows.length) return APPS_SCRIPT_CODE;
-    const esc = (t) => String(t).replace(/\\/g, "").replace(/"/g, "'");
-    const block = 'var FOLDERS = [\n' +
-      readyRows.map(r => '  { site: "' + esc(r.site) + '", id: "' + r.id + '" }').join(',\n') +
-      '\n];';
-    return APPS_SCRIPT_CODE.replace(/var FOLDERS = \[[\s\S]*?\];/, block);
-  }, [readyRows]);
-
-  function urlProblem(url){
-    const u = (url || "").trim();
-    if (!u) return "Paste the Web app URL here.";
-    if (/drive\.google\.com/.test(u)) {
-      return "That is a Drive folder link, not the Web app URL. The Web app URL is what Apps Script gives you at the very end of Deploy, and it starts with script.google.com. If this feels like too much, use Import from Excel instead — no setup at all.";
-    }
-    if (/docs\.google\.com/.test(u)) {
-      return "That is a link to the sheet itself. The app needs the Web app URL from Apps Script, starting with script.google.com — or skip all this and use Import from Excel.";
-    }
-    if (!/^https:\/\/script\.google\.com\//.test(u)) {
-      return "The Web app URL should start with https://script.google.com/";
-    }
-    if (!/\/exec/.test(u)) {
-      return "That looks like the editor link. You need the deployment URL, which ends in /exec.";
-    }
+  function fileNameProblem(fileName){
+    const f = (fileName || "").trim();
+    if (!f) return "Enter the file name to look for in the import folder.";
+    if (/[\\/]/.test(f)) return "Just the file name — not a path or a link.";
     return "";
   }
 
   function saveSheet(sh){
     if (!sh.name.trim()) return showToast("Give this a name first", "error");
-    if (urlProblem(sh.url)) return showToast("Check the URL — see the note under the box", "error");
+    if (fileNameProblem(sh.fileName)) return showToast("Check the file name — see the note under the box", "error");
     const exists = sheets.some(x => x.id === sh.id);
     setSheets(exists ? sheets.map(x => x.id===sh.id ? sh : x) : [...sheets, sh]);
     setEditing(null);
@@ -8954,8 +8992,21 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
     return Object.values(map);
   }
 
+  async function importToken(){
+    if (!driveImportFolderId) throw new Error("Choose your import folder first (button above).");
+    let token;
+    try {
+      token = await driveGetFreshToken(!driveConnected);
+    } catch (err) {
+      throw new Error("Could not connect to Google Drive — " + (err.message || String(err)));
+    }
+    if (!token) throw new Error("Could not connect to Google Drive.");
+    return token;
+  }
+
   async function syncSheets(list){
-    if (list.length === 0) { showToast("Add your Drive folder first", "error"); return; }
+    if (list.length === 0) { showToast("Add a source first", "error"); return; }
+    if (!driveImportFolderId) { showToast("Choose your import folder first", "error"); return; }
     const collected = [];
     const failures = [];
     const fileReport = [];
@@ -8963,13 +9014,18 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
     const seenFiles = [];
     const notes = [];
     const statusById = {};
+    let token;
+    try {
+      token = await importToken();
+    } catch (err) {
+      showToast(err.message || String(err), "error");
+      return;
+    }
     for (const sh of list) {
       setBusy(sh.name);
       try {
-        let url = sh.url.trim();
-        if (sh.tab && sh.tab.trim()) url += (url.indexOf("?")>=0 ? "&" : "?") + "sheet=" + encodeURIComponent(sh.tab.trim());
-        const data = await jsonpFetch(url, 25000);
-        if (!data || data.ok === false) throw new Error((data && data.error) || "The script reported an error");
+        const data = await driveReadImportFile(driveImportFolderId, sh.fileName, token, sh.tab);
+        if (!data || data.ok === false) throw new Error((data && data.error) || "The file could not be read");
         (data.rows || []).forEach(r => collected.push({ row:r, source: r.__folder || r.__file || sh.name }));
         if (data.files) fileReport.push(...data.files);
         if (data.skipped && data.skipped.length) skippedFiles.push(...data.skipped);
@@ -9095,10 +9151,10 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
   async function testConnection(sh){
     setBusy(sh.name);
     try {
-      let url = sh.url.trim();
-      if (sh.tab && sh.tab.trim()) url += (url.indexOf("?")>=0 ? "&" : "?") + "sheet=" + encodeURIComponent(sh.tab.trim());
-      const data = await jsonpFetch(url, 25000);
-      if (!data || data.ok === false) throw new Error((data && data.error) || "The script reported an error");
+      if (!driveImportFolderId) throw new Error("Choose your import folder first (button above).");
+      const token = await importToken();
+      const data = await driveReadImportFile(driveImportFolderId, sh.fileName, token, sh.tab);
+      if (!data || data.ok === false) throw new Error((data && data.error) || "The file could not be read");
       const rowCount = (data.rows || []).length;
       setSheets(sheets.map(x => x.id === sh.id ? {
         ...x,
@@ -9204,221 +9260,6 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
     setSheets(sheets.map(x => (preview.list || []).some(l => l.id === x.id) ? { ...x, lastSync: stamp } : x));
     showToast(`${added.length} requisition(s) brought in${recurringUpdates.length ? ` · ${recurringUpdates.length} Rent & EMI item(s) updated` : ""}`);
     setPreview(null);
-  }
-
-  /* ---------- setup guide ---------- */
-  if (showSetup) {
-    return (
-      <div>
-        <button onClick={()=>setShowSetup(false)}
-          style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
-          <Icon name="close" size={16} /> Back
-        </button>
-
-        <div style={{ background:SURFACE, borderRadius:16, padding:20, marginBottom:16, border:`1px solid ${SAND}` }}>
-          <SectionLabel>Setting this up from your phone</SectionLabel>
-          <p style={{ fontSize:13, color:MUTED, lineHeight:1.7 }}>
-            One script covers both site folders, so you do this once. Allow about twenty minutes.
-            Paste your folder links below and the script comes out ready — nothing to edit by hand.
-          </p>
-          <div style={{ background:"#EEF0FE", border:`1.5px solid #3F6CA8`, borderRadius:12, padding:14, marginTop:14, fontSize:13, color:INK, lineHeight:1.6 }}>
-            <strong>Excel files work, with one extra step.</strong> Google Sheets are read directly.
-            Excel files must be converted first, so you have to switch on the Drive API service in
-            Apps Script — it is step 3 below, and skipping it is why a sync comes back empty.
-          </div>
-
-          <div style={{ background:"#FDECEE", border:`1.5px solid ${RED}`, borderRadius:12, padding:14, marginTop:14, fontSize:13, color:INK, lineHeight:1.6 }}>
-            <strong>Keep backups elsewhere.</strong> Only give it folders holding site sheets. It cannot
-            read .json files at all and skips anything named "backup" or "ERP-Data", but a separate
-            folder is the real protection.
-          </div>
-        </div>
-
-        <div style={{ background:SURFACE, borderRadius:16, padding:20, marginBottom:16, border:`1px solid ${SAND}` }}>
-          <SectionLabel>Step 1 — name each site and paste its folder</SectionLabel>
-          <p style={{ fontSize:13, color:MUTED, lineHeight:1.6, marginBottom:14 }}>
-            Type the site name <strong>exactly as you use it in the app</strong> — that is what gets
-            written into the Site column, so it must match your existing entries. Then get the folder
-            link: <strong>Drive app</strong> → open that site's folder → <strong>three dots</strong> →
-            <strong> Copy link</strong>.
-          </p>
-
-          {folderRows.map((row, i) => (
-            <div key={i} style={{ background:"#F1F4F9", borderRadius:14, padding:14, marginBottom:12 }}>
-              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
-                <span style={{ fontSize:12, fontWeight:700, color:AMBER, textTransform:"uppercase", letterSpacing:0.4 }}>
-                  Site {i+1}
-                </span>
-                {folderRows.length > 1 && (
-                  <button onClick={()=>setFolderRows(folderRows.filter((_,x)=>x!==i))}
-                    style={{ background:"none", border:"none", cursor:"pointer", padding:4 }}>
-                    <Icon name="close" size={14} color={MUTED} />
-                  </button>
-                )}
-              </div>
-
-              <Field label="Site name">
-                <input style={inputStyle} value={row.site}
-                  onChange={e=>{ const n=[...folderRows]; n[i]={...n[i], site:e.target.value}; setFolderRows(n); }}
-                  placeholder="e.g. Bhopal Plant" />
-              </Field>
-
-              <Field label="Drive folder link">
-                <textarea style={{...inputStyle, resize:"vertical", fontSize:13}} rows={2} value={row.link}
-                  onChange={e=>{ const n=[...folderRows]; n[i]={...n[i], link:e.target.value}; setFolderRows(n); }}
-                  placeholder="https://drive.google.com/drive/folders/..." />
-                {row.link && !folderIds[i] && (
-                  <div style={{ fontSize:13, fontWeight:600, color:RED, marginTop:6, lineHeight:1.5 }}>
-                    That is not a folder link — it should contain <span style={{fontFamily:"monospace"}}>/folders/</span>.
-                    Make sure you copied the folder, not a sheet inside it.
-                  </div>
-                )}
-                {folderIds[i] && !row.site.trim() && (
-                  <div style={{ fontSize:13, fontWeight:600, color:AMBER, marginTop:6 }}>
-                    Folder recognised — now add the site name above.
-                  </div>
-                )}
-                {folderIds[i] && row.site.trim() && (
-                  <div style={{ fontSize:13, fontWeight:600, color:GREEN, marginTop:6 }}>
-                    Ready — rows from here will be tagged {row.site.trim()}
-                  </div>
-                )}
-              </Field>
-            </div>
-          ))}
-
-          <button onClick={()=>setFolderRows([...folderRows, { site:"", link:"" }])}
-            style={{ fontSize:13, fontWeight:700, color:AMBER, background:"none", border:"none", cursor:"pointer", padding:0 }}>
-            + Add another site
-          </button>
-
-          {readyRows.length > 0 && (
-            <div style={{ background:"#E6F7F2", border:`1px solid ${GREEN}`, borderRadius:12, padding:12, marginTop:14, fontSize:13, color:INK, lineHeight:1.55 }}>
-              {readyRows.length} site{readyRows.length===1?"":"s"} ready: {readyRows.map(r=>r.site).join(", ")}.
-              The script below is filled in — just copy it.
-            </div>
-          )}
-        </div>
-
-        <div style={{ background:SURFACE, borderRadius:16, padding:20, marginBottom:16, border:`1px solid ${SAND}` }}>
-          <SectionLabel>Step 2 — create and publish</SectionLabel>
-          <ol style={{ fontSize:14, color:INK, lineHeight:1.95, paddingLeft:20, margin:0 }}>
-            <li>Copy the script below.</li>
-            <li>In Chrome, open <strong>script.google.com</strong>.</li>
-            <li>the Chrome <strong>three dots</strong> menu → tick <strong>Desktop site</strong>. The page reloads wider —
-                this step matters, the buttons are unreachable otherwise.</li>
-            <li>Turn your phone sideways.</li>
-            <li>Tap <strong>New project</strong>.</li>
-            <li>Tap in the code area, select all, delete, then paste the script.</li>
-            <li><strong>If your site files are Excel (.xlsx), do this or nothing will be read:</strong>
-                in the left sidebar find <strong>Services</strong>, click the <strong>+</strong>, choose
-                <strong> Drive API</strong>, click <strong>Add</strong>. Excel files have to be converted
-                before they can be read, and this permits that.</li>
-            <li>Tap <strong>Deploy</strong> (top right) → <strong>New deployment</strong>.</li>
-            <li>Tap the gear beside "Select type" → <strong>Web app</strong>.</li>
-            <li>Execute as: <strong>Me</strong>. Who has access: <strong>Anyone</strong>.</li>
-            <li>Tap <strong>Deploy</strong> → <strong>Authorize access</strong> → choose your Google account.</li>
-            <li>On "Google hasn't verified this app", tap <strong>Advanced</strong> →
-                <strong> Go to (project name)</strong> → <strong>Allow</strong>. Normal for your own scripts.</li>
-            <li>Copy the <strong>Web app URL</strong> shown at the end.</li>
-            <li>Come back here → <strong>Add Folder Link</strong> → paste it → Save.</li>
-          </ol>
-          <div style={{ background:"#F1F4F9", borderRadius:12, padding:12, marginTop:14, fontSize:13, color:MUTED, lineHeight:1.6 }}>
-            All your sites arrive through that one link, so you add just <strong>one</strong> entry in the app.
-            Each row is tagged with the site name you typed above, used when a row has no Site of its own.
-          </div>
-        </div>
-
-        <div style={{ background:SURFACE, borderRadius:16, padding:20, marginBottom:16, border:`1px solid ${SAND}` }}>
-          <SectionLabel>The script{readyRows.length ? " — ready to paste" : ""}</SectionLabel>
-
-          <div style={{ background:"#EEF0FE", border:`1px solid #3F6CA8`, borderRadius:12, padding:12, marginBottom:12, fontSize:13, color:INK, lineHeight:1.6 }}>
-            The Copy button often fails on a phone, because a page opened from a file is not allowed to
-            touch the clipboard. If it does, use <strong>Select All</strong> below, then tap
-            <strong> Copy</strong> in the bar your phone pops up. That always works.
-          </div>
-
-          <textarea
-            id="erp-script-box"
-            value={readyScript}
-            onChange={()=>{}}
-            spellCheck={false}
-            onFocus={(e)=>e.target.setSelectionRange(0, 0)}
-            style={{ width:"100%", height:220, borderRadius:12, border:`2px solid ${SAND}`,
-              padding:12, fontSize:11, lineHeight:1.5, color:INK, background:"#F1F4F9",
-              fontFamily:"ui-monospace, SFMono-Regular, Menlo, monospace",
-              whiteSpace:"pre", overflowWrap:"normal", overflowX:"auto", resize:"vertical" }} />
-
-          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginTop:10 }}>
-            <button onClick={()=>{
-                const el = document.getElementById("erp-script-box");
-                if (!el) return;
-                el.focus();
-                el.select();
-                el.setSelectionRange(0, (readyScript||"").length);
-                showToast("Selected — now tap Copy");
-              }}
-              style={{ borderRadius:16, padding:"14px 10px", fontSize:15, fontWeight:700,
-                background:AMBER, color:"#fff", border:"none", cursor:"pointer" }}>
-              Select All
-            </button>
-            <button onClick={()=>copyText(readyScript, "Script", showToast)}
-              style={{ borderRadius:16, padding:"14px 10px", fontSize:15, fontWeight:700,
-                background:INK, color:"#fff", border:"none", cursor:"pointer" }}>
-              Try Copy
-            </button>
-          </div>
-
-          <div style={{ marginTop:10 }}>
-            <button onClick={()=>{ downloadText(readyScript, "ERP_Sheet_Script.txt"); showToast("Saved to Downloads"); }}
-              style={{ width:"100%", borderRadius:16, padding:"14px 10px", fontSize:15, fontWeight:600,
-                background:SAND, color:INK, border:"none", cursor:"pointer" }}>
-              Save script as a file instead
-            </button>
-            <div style={{ fontSize:12, color:MUTED, marginTop:8, lineHeight:1.6 }}>
-              Saves to Downloads. Open it with any notes or text app, select all there and copy —
-              useful if this page will not let you select.
-            </div>
-          </div>
-
-          {!readyRows.length && (
-            <div style={{ fontSize:12, color:AMBER, fontWeight:600, marginTop:12, lineHeight:1.5 }}>
-              Fill in the site names and folder links above first, otherwise you will have to edit the
-              script by hand in Apps Script.
-            </div>
-          )}
-        </div>
-
-        <div style={{ background:SURFACE, borderRadius:16, padding:20, marginBottom:16, border:`1px solid ${SAND}` }}>
-          <SectionLabel>If pasting into Apps Script misbehaves</SectionLabel>
-          <p style={{ fontSize:13, color:MUTED, lineHeight:1.7 }}>
-            The Apps Script editor is a code editor, and on a phone it fights you — it auto-inserts
-            brackets and quotes as you paste, which corrupts the script.
-          </p>
-          <ol style={{ fontSize:14, color:INK, lineHeight:1.95, paddingLeft:20, margin:"10px 0 0" }}>
-            <li>Make sure <strong>Desktop site</strong> is ticked in the Chrome three-dots menu.</li>
-            <li>Tap inside the code area, then <strong>select everything already there and delete it</strong> —
-                paste on top of existing code is what usually breaks.</li>
-            <li>Long-press in the empty editor → <strong>Paste</strong>.</li>
-            <li>Check the first line reads <span style={{fontFamily:"monospace"}}>/** ---- YOUR SITES ----</span>
-                and the last character is a single <span style={{fontFamily:"monospace"}}>&#125;</span>.</li>
-            <li>If extra brackets appeared at the end, delete them until it matches.</li>
-          </ol>
-          <div style={{ background:"#F1F4F9", borderRadius:12, padding:12, marginTop:12, fontSize:13, color:MUTED, lineHeight:1.6 }}>
-            Still fighting it? This whole page is optional. The Excel route on the previous screen gets
-            the same data in with none of this.
-          </div>
-        </div>
-
-        <div style={{ background:"#EEF0FE", border:`1px solid ${AMBER}`, borderRadius:16, padding:16, fontSize:13, color:INK, lineHeight:1.6 }}>
-          <strong>"Who has access: Anyone" sounds risky.</strong> It means anyone holding that exact long
-          URL can read the sheets in those folders — nothing can be written or changed, and no other
-          folder is reachable. The folder IDs are fixed inside the script, so the link cannot be edited
-          to point somewhere else. Treat it like a password; if it leaks, deploy a new version in Apps
-          Script and the old link stops working.
-        </div>
-      </div>
-    );
   }
 
   /* ---------- preview ---------- */
@@ -9579,29 +9420,28 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
           <Icon name="close" size={16} /> Cancel
         </button>
         <div style={{ background:SURFACE, borderRadius:20, padding:20, border:`1px solid ${SAND}`, boxShadow:SHADOW }}>
-          <SectionLabel>Connected folder</SectionLabel>
-          <Field label="Name" required hint="A label for you, e.g. Site Requisitions">
+          <SectionLabel>Import source</SectionLabel>
+          <Field label="Name" required hint="A label for you, e.g. Payment to be done">
             <input style={inputStyle} value={editing.name}
-              onChange={e=>setEditing({...editing, name:e.target.value})} placeholder="e.g. Site Requisitions" />
+              onChange={e=>setEditing({...editing, name:e.target.value})} placeholder="e.g. Payment to be done" />
           </Field>
-          <Field label="Web app URL" required hint="Ends in /exec — Apps Script gives you this at the end of Deploy">
-            <textarea style={{...inputStyle, resize:"vertical", fontSize:13,
-                borderColor: editing.url && urlProblem(editing.url) ? RED : SAND}} rows={3} value={editing.url}
-              onChange={e=>setEditing({...editing, url:e.target.value})}
-              placeholder="https://script.google.com/macros/s/..../exec" />
-            {editing.url && urlProblem(editing.url) && (
+          <Field label="File name" required hint='The Excel file to look for in your import folder — matches the start of the file name, so "Payment to be done" also matches "Payment to be done.xlsx" or "Payment to be done (1).xlsx"'>
+            <input style={inputStyle} value={editing.fileName || ""}
+              onChange={e=>setEditing({...editing, fileName:e.target.value})}
+              placeholder="e.g. Payment to be done" />
+            {editing.fileName && fileNameProblem(editing.fileName) && (
               <div style={{ background:"#FDECEE", border:`1px solid ${RED}`, borderRadius:12, padding:12, marginTop:8,
                 fontSize:13, color:INK, lineHeight:1.55 }}>
-                {urlProblem(editing.url)}
+                {fileNameProblem(editing.fileName)}
               </div>
             )}
-            {editing.url && !urlProblem(editing.url) && (
+            {editing.fileName && !fileNameProblem(editing.fileName) && (
               <div style={{ fontSize:13, fontWeight:600, color:GREEN, marginTop:8 }}>Looks right</div>
             )}
           </Field>
-          <Field label="Tab name inside each sheet" hint="Leave blank to use the first tab of every sheet">
+          <Field label="Tab inside that file" hint={"Only needed if the file has more than one tab and the data you want isn't on the first one — e.g. your Excel template keeps \"Payment to be done\" and \"Office Master\" as two tabs in the same file, so this source and your Office Master source would point at the same file name with different tabs. Leave blank to use the first tab."}>
             <input style={inputStyle} value={editing.tab || ""}
-              onChange={e=>setEditing({...editing, tab:e.target.value})} placeholder="e.g. Requisitions" />
+              onChange={e=>setEditing({...editing, tab:e.target.value})} placeholder="e.g. Office Master" />
           </Field>
           <Field label="Syncs into" hint={editing.kind === "expenses"
               ? "Rows land in Expenses — use this for a sheet like Office Master (Date, Expense Type, Paid By, Amount, ...)."
@@ -9612,11 +9452,11 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
               <option value="expenses">Expenses (Office Master)</option>
             </select>
           </Field>
-          <BigButton icon="check" label="Save Folder" onClick={()=>saveSheet(editing)} tone="green" full
-            disabled={!editing.name.trim() || !!urlProblem(editing.url)} />
-          {(!editing.name.trim() || !!urlProblem(editing.url)) && (
+          <BigButton icon="check" label="Save Source" onClick={()=>saveSheet(editing)} tone="green" full
+            disabled={!editing.name.trim() || !!fileNameProblem(editing.fileName)} />
+          {(!editing.name.trim() || !!fileNameProblem(editing.fileName)) && (
             <div style={{ fontSize:12, color:MUTED, marginTop:8, textAlign:"center", lineHeight:1.5 }}>
-              Save becomes active once the name and URL are both correct.
+              Save becomes active once the name and file name are both correct.
             </div>
           )}
         </div>
@@ -9638,6 +9478,39 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
         </div>
       )}
 
+      <div style={{ background:SURFACE, borderRadius:16, padding:16, marginBottom:14,
+        border:`2px solid ${driveImportFolderId ? GREEN : SAND}` }}>
+        <SectionLabel>Import folder</SectionLabel>
+        {!driveConnected ? (
+          <React.Fragment>
+            <p style={{ fontSize:13, color:MUTED, lineHeight:1.6, marginBottom:12 }}>
+              Connect Google Drive once, then choose the folder you drop your Excel files into. No
+              Apps Script, no deployment, no URL to paste — this reuses the same sign-in as Drive backup.
+            </p>
+            <BigButton icon="check" label="Connect Google Drive" onClick={connectDrive} tone="green" full />
+          </React.Fragment>
+        ) : driveImportFolderId ? (
+          <React.Fragment>
+            <p style={{ fontSize:13, color:INK, lineHeight:1.6, marginBottom:10 }}>
+              Reading from <strong>{driveImportFolderName || "your chosen folder"}</strong>. Drop your
+              Excel files there — the file name for each source below must match what's in the folder.
+            </p>
+            <button onClick={driveChooseImportFolder}
+              style={{ fontSize:13, fontWeight:700, color:AMBER, background:"none", border:"none", cursor:"pointer", padding:0 }}>
+              Change folder
+            </button>
+          </React.Fragment>
+        ) : (
+          <React.Fragment>
+            <p style={{ fontSize:13, color:MUTED, lineHeight:1.6, marginBottom:12 }}>
+              Choose the Drive folder your Excel files (e.g. Payment to be done, Office Master) get
+              dropped into. The app reads straight from there — nothing else to set up.
+            </p>
+            <BigButton icon="check" label="Choose import folder" onClick={driveChooseImportFolder} tone="green" full />
+          </React.Fragment>
+        )}
+      </div>
+
       {sheets.length > 0 && (() => {
         const active = sheets.filter(x => x.status === "active").length;
         const failed = sheets.filter(x => x.status === "failed").length;
@@ -9650,12 +9523,12 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
             <span style={{ width:12, height:12, borderRadius:"50%", background:tone, flexShrink:0 }} />
             <div style={{ flex:1 }}>
               <div style={{ fontSize:14, fontWeight:700, color:INK }}>
-                {failed ? `${failed} connection${failed===1?"":"s"} not working`
+                {failed ? `${failed} source${failed===1?"":"s"} not working`
                   : untested === sheets.length ? "Status unknown"
-                  : `${active} of ${sheets.length} connection${sheets.length===1?"":"s"} active`}
+                  : `${active} of ${sheets.length} source${sheets.length===1?"":"s"} active`}
               </div>
               <div style={{ fontSize:12, color:MUTED, marginTop:2 }}>
-                {untested ? "Tap Check status to test without importing anything." : "Green means the link works and rows are available."}
+                {untested ? "Tap Check status to test without importing anything." : "Green means the file was found and rows are available."}
               </div>
             </div>
           </div>
@@ -9688,9 +9561,10 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
           <div style={{ background:SURFACE, borderRadius:20, padding:20, border:`1px solid ${SAND}`, boxShadow:SHADOW }}>
             <SectionLabel>Automatic sync — optional</SectionLabel>
             <p style={{ fontSize:13, color:MUTED, lineHeight:1.7 }}>
-              A one-time Google Apps Script that pulls every site sheet with one tap. It is genuinely
-              fiddly on a phone and needs about twenty minutes. Worth it if you are doing this weekly
-              across both sites — not worth it otherwise. Nothing here is required.
+              Choose your import folder above, then add a source below for each Excel file (or tab)
+              you want the app to read. From then on, dropping an updated file into that folder and
+              tapping Sync now pulls the latest rows in — no Apps Script, no deployment, nothing to
+              re-do each time. Nothing here is required — Import from Excel above still works any time.
             </p>
           </div>
         </div>
@@ -9744,8 +9618,8 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
                 {st === "empty" && (
                   <div style={{ marginTop:8, fontSize:12, color:INK, lineHeight:1.55, background:"#EEF0FE",
                     borderRadius:12, padding:"10px 12px" }}>
-                    The link works but returned nothing. Usually the Drive API service is not switched on
-                    in Apps Script, so Excel files cannot be read — or the folders hold no sheets yet.
+                    The file was found but no rows came out of it. Check the first row of that tab is
+                    the column headings, and that there is at least one data row below it.
                   </div>
                 )}
 
@@ -9797,9 +9671,8 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
               onClick={()=>syncSheets(group)} tone="green" full disabled={!!busy} />
           );
         })}
-        <BigButton icon="plus" label="Add Folder"
-          onClick={()=>setEditing({ id: uid(), name:"Site Sheets", url:"", tab:"", kind:"requisitions", lastSync:null })} tone="amber" full />
-        <BigButton icon="settings" label="Set up automatic sync (advanced)" onClick={()=>setShowSetup(true)} tone="ink" full />
+        <BigButton icon="plus" label="Add Source"
+          onClick={()=>setEditing({ id: uid(), name:"", fileName:"", tab:"", kind:"requisitions", lastSync:null })} tone="amber" full />
       </div>
     </div>
   );
