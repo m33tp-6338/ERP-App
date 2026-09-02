@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.20";
+const APP_VERSION = "6.21";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -66,6 +66,12 @@ const GOOGLE_DRIVE_PICKER_API_KEY = "AIzaSyABzgqparoHG9wfLMV6QBsvviEoUW_uhyU";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.21", date:"2026-09-02", title:"\"Choose file\" now also lets you pick a live Google Sheet, not just uploaded Excel files", items:[
+    "Until now, the picker only showed real .xlsx/.xls files, so if your actual working file is a Google Sheet you keep live in Drive (never downloaded), it simply didn't appear as pickable - it wasn't a bug in reading it, the picker was filtering it out entirely",
+    "Fixed: the picker now shows both real Excel files and native Google Sheets, and Sync now reads a picked Google Sheet correctly (Google converts it to Excel format behind the scenes each time you sync - you don't have to do that step yourself anymore)",
+    "One limit to know about: Google caps this conversion at 10MB per file - if your sheet is unusually large, this is the one case where it could still fail; if that happens, say so and it can be worked around",
+    "If a source you already set up is pointed at a real .xlsx file, nothing changes for it - this only adds a second option, it doesn't take anything away",
+  ]},
   { v:"6.20", date:"2026-09-02", title:"Fixed: a synced file inside a shared company folder could say \"File not found\"", items:[
     "If your Excel file lives inside a Google Shared Drive (a company/team-shared folder structure, e.g. one shared with you rather than fully owned by your account) - a very likely shape for PW -> ERP -> PR - the app could wrongly say \"File not found\" on Sync now even though the file was picked correctly and definitely exists",
     "This was a real gap in how the app was asking Google for the file, not anything wrong with your setup or the file itself - fixed so files in a Shared Drive are read the same as any other file",
@@ -1201,20 +1207,36 @@ async function driveApiFetch(url, token, options){
   return res;
 }
 
-// Reads one Excel file straight out of Google Drive by its file ID — no
-// Apps Script, no deployed URL, no "Anyone" access setting, and (as of
-// v6.17) no folder-searching or filename-matching either. The file is
-// chosen once, per source, through Google's own file picker (see
-// driveChooseSourceFile in the App component) — picking a file through the
-// Picker is itself what grants this app access to it, which sidesteps the
-// whole earlier question of whether folder-level access extends to files
-// placed in it afterward. Re-saving/replacing the SAME Drive file (same
-// file ID) keeps working automatically on every sync; only creating a
-// brand-new file (a genuinely different ID, e.g. Drive auto-naming a
-// "(1)" copy instead of overwriting) requires picking again in that
-// source's settings. tabHint picks which tab inside the file to read —
-// exact match first, then partial, else an explicit error naming the tabs
-// that do exist. When blank, the first tab that isn't "Read Me" is used.
+// Reads one Excel file (or, as of v6.21, one native Google Sheet — see
+// below) straight out of Google Drive by its file ID — no Apps Script, no
+// deployed URL, no "Anyone" access setting, and (as of v6.17) no
+// folder-searching or filename-matching either. The file is chosen once,
+// per source, through Google's own file picker (see driveChooseSourceFile
+// in the App component) — picking a file through the Picker is itself what
+// grants this app access to it, which sidesteps the whole earlier question
+// of whether folder-level access extends to files placed in it afterward.
+// Re-saving/replacing the SAME Drive file (same file ID) keeps working
+// automatically on every sync; only creating a brand-new file (a genuinely
+// different ID, e.g. Drive auto-naming a "(1)" copy instead of overwriting)
+// requires picking again in that source's settings. tabHint picks which tab
+// inside the file to read — exact match first, then partial, else an
+// explicit error naming the tabs that do exist. When blank, the first tab
+// that isn't "Read Me" is used.
+//
+// v6.21: a picked file can now be EITHER a real uploaded .xlsx/.xls, OR a
+// native Google Sheet kept live in Drive (never downloaded/exported by the
+// user) — driveChooseSourceFile's picker now shows both. A native Sheet has
+// no raw file bytes to download via `?alt=media` (that only works for
+// actual binary files) — it has to be asked to export a converted copy
+// instead, via Drive's files.export endpoint. That's a materially different
+// API call (a different path, a required mimeType query param, a 10MB
+// exported-size cap per Google's own docs, and — confirmed against Drive's
+// REST reference — it does NOT document/accept supportsAllDrives at all,
+// unlike files.get, so that parameter is deliberately left off this one
+// call). Which path to use is decided by the file's real mimeType, read
+// from the metadata call below — not by guessing from the file name/
+// extension, which is exactly what native Sheets don't reliably have.
+const GOOGLE_SHEET_MIME = "application/vnd.google-apps.spreadsheet";
 async function driveReadFileById(fileId, token, tabHint){
   if (!fileId) throw new Error("No file has been chosen for this source yet — edit it and tap Choose file.");
   // supportsAllDrives=true matters specifically when the picked file lives
@@ -1228,21 +1250,33 @@ async function driveReadFileById(fileId, token, tabHint){
   // and has no effect on an ordinary My Drive file; it's required for a
   // Shared Drive one. See: developers.google.com/workspace/drive/api/guides/handle-errors
   const metaRes = await driveApiFetch(
-    `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,trashed,modifiedTime&supportsAllDrives=true`, token
+    `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,trashed,modifiedTime,mimeType&supportsAllDrives=true`, token
   );
   const meta = await metaRes.json();
   if (meta.trashed) {
     throw new Error(`"${meta.name || "This file"}" has been deleted (moved to Trash) in Google Drive — edit this source and choose the file again.`);
   }
+  const isGoogleSheet = meta.mimeType === GOOGLE_SHEET_MIME;
+  if (!isGoogleSheet && String(meta.mimeType || "").indexOf("application/vnd.google-apps.") === 0) {
+    // Some other native Google type (Doc, Slide, Form, ...) — shouldn't be
+    // reachable through the picker's own filter, but a clear error here
+    // beats a confusing failure if it ever is.
+    throw new Error(`"${meta.name}" is a Google file that isn't a spreadsheet — pick a Google Sheet or an Excel file instead.`);
+  }
   const fileRes = await driveApiFetch(
-    `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`, token
+    isGoogleSheet
+      ? `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`
+      : `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`,
+    token
   );
   const buf = await fileRes.arrayBuffer();
   let wb;
   try {
     wb = XLSX.read(buf, { type: "array", cellDates: false });
   } catch (e) {
-    throw new Error(`"${meta.name}" doesn't look like a valid Excel file — if this was picked as a Google Sheet rather than an uploaded .xlsx, export it to Excel first and pick that copy instead.`);
+    throw new Error(isGoogleSheet
+      ? `"${meta.name}" could not be read back after Google converted it to Excel format — this is usually temporary, try Sync now again.`
+      : `"${meta.name}" doesn't look like a valid Excel file — if it's actually a Google Sheet, edit this source and pick it again (the picker now supports Google Sheets directly).`);
   }
   if (!wb.SheetNames.length) throw new Error(`"${meta.name}" has no sheets.`);
   const wantedTab = String(tabHint || "").trim().toLowerCase();
@@ -2413,8 +2447,8 @@ function ERPApp(){
   // file — the more reliable, textbook way to use the narrow drive.file
   // scope, and it sidesteps the whole "does folder access reach files
   // dropped into it afterward" question the folder-based approach depended
-  // on. Filtered to real Excel files only (not native Google Sheets, which
-  // this app can't read directly — see driveReadFileById). Returns
+  // on. As of v6.21, filtered to real .xlsx/.xls files AND native Google
+  // Sheets — driveReadFileById now reads both. Returns
   // {id, name} on pick, or null on cancel/error; the caller (SheetSyncTab's
   // source-editing form) applies it to just that one source, so this
   // doesn't touch any shared/global state the way the two folder pickers do.
@@ -2440,10 +2474,17 @@ function ERPApp(){
       const token = await driveGetFreshToken(true); // interactive — must run from this tap
       await loadPickerLibrary();
       return await new Promise((resolve) => {
+        // v6.21: the mimeTypes filter now lists native Google Sheets
+        // (application/vnd.google-apps.spreadsheet) alongside real .xlsx/
+        // .xls files, so both kinds show up as selectable here. Without a
+        // native Sheet's mimeType in this list, ViewId.SPREADSHEETS still
+        // shows it in the picker's browse tree but greys it out as
+        // unselectable — this is what was silently blocking Meet's actual
+        // working file, which is a live Google Sheet, not an uploaded copy.
         const view = new google.picker.DocsView(google.picker.ViewId.SPREADSHEETS)
           .setIncludeFolders(true)
           .setSelectFolderEnabled(false)
-          .setMimeTypes("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel");
+          .setMimeTypes("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,application/vnd.google-apps.spreadsheet");
         if (driveImportFolderId) view.setParent(driveImportFolderId);
         const picker = new google.picker.PickerBuilder()
           .addView(view)
@@ -2451,8 +2492,8 @@ function ERPApp(){
           .setDeveloperKey(GOOGLE_DRIVE_PICKER_API_KEY)
           .setOrigin(window.location.protocol + "//" + window.location.host)
           .setTitle(driveImportFolderId
-            ? `Choose the Excel file for this source (starting in ${driveImportFolderName || "your folder"})`
-            : "Choose the Excel file for this source")
+            ? `Choose the Excel file or Google Sheet for this source (starting in ${driveImportFolderName || "your folder"})`
+            : "Choose the Excel file or Google Sheet for this source")
           .setCallback((data) => {
             if (data.action === google.picker.Action.PICKED && data.docs && data.docs[0]) {
               const f = data.docs[0];
@@ -9557,7 +9598,7 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
   // will have a fileName but no fileId; it's kept (not deleted) so its
   // history/settings aren't lost, but it needs the file re-picked once.
   function sourceProblem(sh){
-    if (!sh.fileId) return "Choose the Excel file for this source.";
+    if (!sh.fileId) return "Choose the Excel file or Google Sheet for this source.";
     return "";
   }
 
@@ -9573,7 +9614,7 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
 
   function saveSheet(sh){
     if (!sh.name.trim()) return showToast("Give this a name first", "error");
-    if (sourceProblem(sh)) return showToast("Choose the Excel file for this source first", "error");
+    if (sourceProblem(sh)) return showToast("Choose the Excel file or Google Sheet for this source first", "error");
     const exists = sheets.some(x => x.id === sh.id);
     setSheets(exists ? sheets.map(x => x.id===sh.id ? sh : x) : [...sheets, sh]);
     setEditing(null);
@@ -9778,7 +9819,7 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
             <input style={inputStyle} value={editing.name}
               onChange={e=>setEditing({...editing, name:e.target.value})} placeholder="e.g. Payment to be done" />
           </Field>
-          <Field label="Excel file" required hint="Pick the actual file in Drive, once. Re-saving/replacing that same file later is picked up automatically on the next sync — you only need to pick again here if you create a genuinely new file (a different copy) instead of overwriting this one.">
+          <Field label="Excel file or Google Sheet" required hint="Pick the actual file in Drive, once — a live Google Sheet or an uploaded .xlsx/.xls both work. Re-saving/replacing that same file later is picked up automatically on the next sync — you only need to pick again here if you create a genuinely new file (a different copy) instead of overwriting this one.">
             <button onClick={pickFileForEditing} disabled={pickingFile}
               style={{ width:"100%", textAlign:"left", padding:"12px 14px", borderRadius:12,
                 background: editing.fileId ? "#E6F7F2" : SAND, border:`1.5px solid ${editing.fileId ? GREEN : SAND}`,
@@ -9833,9 +9874,10 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
         <div style={{ background:SURFACE, borderRadius:16, padding:16, marginBottom:14, border:`2px solid ${SAND}` }}>
           <SectionLabel>Connect Google Drive</SectionLabel>
           <p style={{ fontSize:13, color:MUTED, lineHeight:1.6, marginBottom:12 }}>
-            Each source below reads one Excel file you pick directly from your Drive — no folder to
-            set up first, no file name to type and match. Connect once, then Add Source below and
-            choose the file when prompted. This reuses the same sign-in as Drive backup.
+            Each source below reads one Excel file (or a live Google Sheet) you pick directly from
+            your Drive — no folder to set up first, no file name to type and match. Connect once,
+            then Add Source below and choose the file when prompted. This reuses the same sign-in
+            as Drive backup.
           </p>
           <BigButton icon="check" label="Connect Google Drive" onClick={connectDrive} tone="green" full />
         </div>

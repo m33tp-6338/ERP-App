@@ -209,7 +209,7 @@ exactly as invisible to it as before.
 - **Optional PIN lock** exists under Settings if you want to lock the app on the
   phone — off by default.
 - If the app is ever updated (a new `index.html`), bump `CACHE_NAME` in `sw.js`
-  (currently `v20`) so installed phones pick up the new version instead of a
+  (currently `v21`) so installed phones pick up the new version instead of a
   cached old one — and **re-upload all three of `index.html`, `sw.js`, and
   `README.md` together, every time**, even if only one of them actually
   changed. Uploading just `index.html` leaves the live site serving an old
@@ -418,16 +418,32 @@ import folder plus a typed file name the app searched for, and v6.16 added
 searching inside subfolders. All of that is gone as of v6.17; if your setup
 predates it, see the note at the bottom of this section.)*
 
+**As of v6.21, you can pick either a real uploaded `.xlsx`/`.xls` file OR a
+live Google Sheet** — whichever your actual workbook is, both now show up in
+**Choose file** and both sync correctly. If your working copy is a Google
+Sheet you never download (edited directly in Sheets, not uploaded from
+Excel), you no longer need to manually export it to `.xlsx` first — just
+pick the Sheet itself and re-save it (the normal auto-save Sheets already
+does) before each sync. Behind the scenes the app asks Google to convert it
+to Excel format each time it reads it, which is subject to Google's own
+10MB cap on that conversion — plenty for a normal ledger workbook, but worth
+knowing if yours is unusually large. Versions before v6.21 only showed real
+`.xlsx`/`.xls` files in the picker, so a Google Sheet wouldn't even appear
+as a choice.
+
 **Setup — you need two or three sync sources (Master is optional, per the
 "safety net" note above). No import folder to set up first.**
 
 1. Keep "Payment to be done", "Master" and "Office Master" as tabs in one
-   Excel workbook (this is exactly how the Excel template you were given is
-   already laid out). Whenever you want to sync, export/save that workbook
-   as `.xlsx` to Google Drive — anywhere in your Drive is fine, since you'll
-   pick the file directly. **Re-save/replace that same file each time**
-   (Google Drive keeps the same file, updated) rather than creating a
-   brand-new file each time — see the note below on why that matters.
+   workbook (this is exactly how the Excel template you were given is
+   already laid out) — either a real `.xlsx` file in Google Drive, or a live
+   Google Sheet, both work as of v6.21. If you're using a real `.xlsx`,
+   export/save it to Google Drive whenever you want to sync — anywhere in
+   your Drive is fine, since you'll pick the file directly, and **re-save/
+   replace that same file each time** (Google Drive keeps the same file,
+   updated) rather than creating a brand-new file each time — see the note
+   below on why that matters. If you're using a live Google Sheet instead,
+   there's nothing to export — just keep it updated and pick it directly.
 2. In the app: **Sync from Google Sheets** → **Add Source** → give it a name
    (e.g. "Payment to be done") → tap **Choose file**, sign in to Google if
    asked, and pick your workbook from Drive. Set **Tab inside that file** to
