@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.19";
+const APP_VERSION = "6.20";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -66,6 +66,11 @@ const GOOGLE_DRIVE_PICKER_API_KEY = "AIzaSyABzgqparoHG9wfLMV6QBsvviEoUW_uhyU";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.20", date:"2026-09-02", title:"Fixed: a synced file inside a shared company folder could say \"File not found\"", items:[
+    "If your Excel file lives inside a Google Shared Drive (a company/team-shared folder structure, e.g. one shared with you rather than fully owned by your account) - a very likely shape for PW -> ERP -> PR - the app could wrongly say \"File not found\" on Sync now even though the file was picked correctly and definitely exists",
+    "This was a real gap in how the app was asking Google for the file, not anything wrong with your setup or the file itself - fixed so files in a Shared Drive are read the same as any other file",
+    "If you hit \"File not found\" on a source before this update, just tap Sync now again - no need to re-pick the file",
+  ]},
   { v:"6.19", date:"2026-09-02", title:"\"Choose file\" can now start inside a specific folder", items:[
     "New optional \"Starting folder\" in Sync from Google Sheets: set it once (e.g. your ERP folder) and every Choose file / Change tap opens straight there instead of the top of your whole Drive",
     "Fixes the picker showing every folder in your Drive when your workbook is nested a few folders deep, like PW -> ERP -> PR - point the starting folder at ERP (or PR) once and it opens right there",
@@ -1212,15 +1217,25 @@ async function driveApiFetch(url, token, options){
 // that do exist. When blank, the first tab that isn't "Read Me" is used.
 async function driveReadFileById(fileId, token, tabHint){
   if (!fileId) throw new Error("No file has been chosen for this source yet — edit it and tap Choose file.");
+  // supportsAllDrives=true matters specifically when the picked file lives
+  // inside a Google Shared Drive (a "Team Drive") rather than the user's own
+  // "My Drive" — e.g. a company-shared folder structure like PW → ERP → PR.
+  // Per Google's own Drive API docs, files.get (including its alt=media
+  // download form) defaults supportsAllDrives to false, and WILL return a
+  // plain 404 "not found" for a shared-drive file even when the app has
+  // real, valid access to it — not a 403, so it looks identical to a
+  // genuinely deleted/inaccessible file. Always including it here is safe
+  // and has no effect on an ordinary My Drive file; it's required for a
+  // Shared Drive one. See: developers.google.com/workspace/drive/api/guides/handle-errors
   const metaRes = await driveApiFetch(
-    `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,trashed,modifiedTime`, token
+    `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,trashed,modifiedTime&supportsAllDrives=true`, token
   );
   const meta = await metaRes.json();
   if (meta.trashed) {
     throw new Error(`"${meta.name || "This file"}" has been deleted (moved to Trash) in Google Drive — edit this source and choose the file again.`);
   }
   const fileRes = await driveApiFetch(
-    `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, token
+    `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`, token
   );
   const buf = await fileRes.arrayBuffer();
   let wb;

@@ -209,7 +209,7 @@ exactly as invisible to it as before.
 - **Optional PIN lock** exists under Settings if you want to lock the app on the
   phone — off by default.
 - If the app is ever updated (a new `index.html`), bump `CACHE_NAME` in `sw.js`
-  (currently `v19`) so installed phones pick up the new version instead of a
+  (currently `v20`) so installed phones pick up the new version instead of a
   cached old one — and **re-upload all three of `index.html`, `sw.js`, and
   `README.md` together, every time**, even if only one of them actually
   changed. Uploading just `index.html` leaves the live site serving an old
@@ -463,6 +463,16 @@ convenience, not a hard restriction — Google's picker still lets you browse
 elsewhere in Drive from inside it if you ever need to; picking the file
 itself is still what grants the app access, exactly as before. Tap **Clear**
 on that same card to go back to browsing your whole Drive from the top.
+
+**If your file lives in a folder that's shared with you by someone else**
+(a company/team Shared Drive is the common case — a folder structure like
+`PW → ERP → PR` that isn't fully "owned" by your own account) — versions
+before **v6.20** could wrongly say **"File not found"** on Sync now even
+after correctly picking a real, working file. That was a real gap in how
+the app was asking Google for the file (a required parameter for Shared
+Drive files was missing), not anything wrong with your setup. Fixed in
+v6.20 — if you saw this error on an older version, just update and tap
+**Sync now** again; you don't need to re-pick the file.
 
 **Why "re-save the same file" matters:** picking a file through the picker
 gives the app permission for that one specific file — not a rule like "any
