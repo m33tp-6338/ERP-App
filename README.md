@@ -318,28 +318,48 @@ know which card they belong to:
   choice is required — the app blocks the import until it's set, so a file
   can never land silently on the wrong card.
 
-## Syncing "Payment to be done" and "Office Master" from Google Sheets
+## Syncing "Payment to be done", "Master" and "Office Master" from Google Sheets
 
-This moves "Payment to be done" and "Office Master" into one Google Sheet the
-app reads directly — no more entering the same payment twice, once in the
-sheet and once in the app. **"Master" is unaffected by any of this** — see
-below.
+This moves "Payment to be done", "Master" and "Office Master" into one Excel
+workbook the app reads directly — no more entering the same payment twice,
+once in the sheet and once in the app. As of v6.14 **all three** can be
+synced, each as its own source:
+
+- **"Payment to be done" → Requisitions** — the first place a payment usually
+  appears, often still Pending (no Payment Date yet).
+- **"Master" → Requisitions** — your month-end record of Head-Office-paid
+  (non-cash) payments, once you've copied a row across and it has a Payment
+  Date. Syncing it is now **optional, not required**: if you already fill in
+  the Payment Date on "Payment to be done" itself before moving the row to
+  Master (as you told me you do), that row is already marked Paid in the app
+  the moment "Payment to be done" is re-synced — adding Master as a source
+  too is a safety net, not a second thing you have to remember to do. Add it
+  if you want the extra reassurance; skip it if one source feels like enough.
+- **"Office Master" → Expenses** — unchanged from before.
+
+**Why syncing the same row twice (once from "Payment to be done" while it's
+still Pending, later from "Master" once it's Paid) is safe:** the app matches
+an incoming row against what's already there by date + site + name + amount +
+description, not by a reference number. The **first** time a row is seen, it's
+added as a new Requisition — Pending if there's no Payment Date yet, Paid if
+there is. **Every time after that**, a matching row does one of three things,
+never more than one:
+1. If the app's existing record is still Pending and the incoming row now has
+   a Payment Date, the **existing Requisition is updated to Paid** — it does
+   not get added again as a duplicate. (This was a real bug in earlier
+   versions — a re-sync after adding a Payment Date used to be silently
+   skipped instead of updating anything. Fixed in v6.14 — see the CHANGELOG
+   in the app for the exact wording.)
+2. If the app's existing record is already Paid (or On Hold), the incoming
+   row is just skipped as "already in the app" — nothing changes.
+3. If nothing matches yet, it's added as a brand-new Requisition.
+   Either way, the sync preview screen (before you tap Import) always shows
+   you exactly what it's about to do — how many new rows, how many existing
+   ones will be marked Paid, and how many are being skipped — so you can
+   check it before committing.
 
 **How the pieces map onto the app:**
 
-- **"Master" keeps working exactly as it always has — it is not part of the
-  sync, and the app never reads it.** Master is your own manual, month-end
-  record of Head-Office-paid (non-cash) payments, kept for reconciling
-  payment dates — cash-paid items don't go in it, those stay in your separate
-  cash balance/debit record. Keep that tab in the same workbook if you like
-  (it travels along for convenience), and keep filling it in by hand, once a
-  month, the same way you always have: copy across whichever rows in
-  "Payment to be done"/"Office Master" Head Office actually paid that month.
-  Nothing here replaces it — the app's own **Payment Register** (any
-  Requisition whose Payment Status holds a date) is a *different* view: it
-  includes every paid Requisition regardless of how it was paid, cash
-  included, so it isn't a stand-in for Master's Head-Office-only, cash-
-  excluded reconciliation record.
 - **"Payment to be done"** (Date, Site, Category, Sub-Category, Name, Amount,
   Description, Payment Status, A/c No., IFSC Code) syncs straight into
   **Requisitions**, using the exact same rule already built into the app:
@@ -393,19 +413,18 @@ much simpler: the app reads Excel files straight out of a Google Drive
 folder you choose, using the exact same Google sign-in already proven
 reliable for Drive backup. There is nothing to deploy and no URL to paste.
 
-**Setup — you need one import folder and two sync sources:**
+**Setup — you need one import folder and two or three sync sources (Master is
+optional, per the "safety net" note above):**
 
 1. In Google Drive, pick (or create) a folder you'll drop your Excel exports
    into — it can be the same folder your automatic backup uses, or a
    separate one, your choice.
-2. Keep "Payment to be done" and "Office Master" as two tabs in one Excel
-   workbook (this is exactly how the Excel template you were given is
-   already laid out — keep "Master" alongside them in the same workbook too
-   if you like, for convenience; it isn't part of the sync either way).
-   Whenever you want to sync, export/save that workbook as `.xlsx` and put
-   it in the Drive folder from step 1, replacing the previous copy (or
-   adding a new one — the app always reads whichever file's name matches,
-   most-recently-modified first).
+2. Keep "Payment to be done", "Master" and "Office Master" as tabs in one
+   Excel workbook (this is exactly how the Excel template you were given is
+   already laid out). Whenever you want to sync, export/save that workbook
+   as `.xlsx` and put it in the Drive folder from step 1, replacing the
+   previous copy (or adding a new one — the app always reads whichever
+   file's name matches, most-recently-modified first).
 3. In the app: **Sync from Google Sheets → Choose import folder** (top of
    the screen) → sign in to Google if asked → pick the folder from step 1.
 4. **Add Source** → give it a name (e.g. "Payment to be done"), set
@@ -416,12 +435,17 @@ reliable for Drive backup. There is nothing to deploy and no URL to paste.
    to `Payment to be done`, and set **Syncs into** to **Requisitions**. Save.
 5. **Add Source** again → same file name, **Tab inside that file** set to
    `Office Master`, **Syncs into** set to **Expenses**. Save.
-6. From then on: drop an updated copy of the workbook into the Drive folder,
-   come back to **Sync from Google Sheets**, and tap **Sync now** on either
+6. **Optional — Add Source** a third time → same file name, **Tab inside
+   that file** set to `Master`, **Syncs into** set to **Requisitions**
+   (same option as step 4 — the dropdown now reads "Requisitions (Payment to
+   be done / Master)" to make this clear). Save. Only add this one if you
+   want the extra safety net described above; skip it if you're comfortable
+   relying on "Payment to be done" alone.
+7. From then on: drop an updated copy of the workbook into the Drive folder,
+   come back to **Sync from Google Sheets**, and tap **Sync now** on each
    card (or use "Sync all ... sources" once you have two or more of the same
-   kind). It only pulls in rows it hasn't seen before (matched by date, site,
-   name and amount together, not by the sheet having its own reference
-   number, so re-syncing the same file repeatedly is safe).
+   kind — it's fine to sync "Payment to be done" and "Master" together or in
+   any order, the update-not-duplicate logic above handles it either way).
 
 **If you set this up before v6.12** (the old Apps Script version): your
 sources will show as "Not working" until you edit each one — tap the pencil,
@@ -444,58 +468,27 @@ would silently never show up in Requisitions/Payment Register at all. So the
 move only ever happens when **you** trigger it, which should be **after**
 you've already synced that batch of payments into the app.
 
+**This menu is completely separate from how the app syncs** — the app (since
+v6.12) reads your Excel file straight out of a Google Drive folder, it does
+not call anything in this Google Sheet or its Apps Script. So this setup
+needs no deployment, no Web app URL, and nothing to connect to the app —
+it's purely a convenience menu inside the sheet itself.
+
 **Setup (one-time, or whenever you update the script below):**
 
-1. Open the same Google Sheet, **Extensions → Apps Script** (the same project
-   you already deployed for the sync).
+1. Open the Google Sheet, **Extensions → Apps Script**. (If you still have
+   an older project here from before v6.12's sync change, that's fine — this
+   replaces its contents; nothing else depends on what was there before.)
 2. Select everything in the code editor, delete it, and paste in the
-   script below — it includes everything the sync needs (unchanged) plus the
-   two new menu commands.
-3. Save (Ctrl+S / Cmd+S). **No redeploy needed** — the sync's Web app URL
-   keeps working exactly as before, since the part it uses (`doGet`) hasn't
-   changed. The menu commands run directly from the sheet, not through that
-   URL.
+   script below.
+3. Save (Ctrl+S / Cmd+S). No deployment step, no "Anyone" access setting —
+   this only ever runs from inside the sheet itself, for whoever has it open.
 4. Close and reopen the Google Sheet in your browser (or just refresh the
    page). You should see a new **ERP Tools** menu appear next to Help.
-   First time only: it may ask you to authorize again — same as before,
-   click through **Advanced → Go to (project) → Allow**.
+   First time only: it may ask you to authorize again — click through
+   **Advanced → Go to (project) → Allow**.
 
 ```javascript
-function doGet(e) {
-  var out = { ok: true, sheet: "", rows: [] };
-  try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var wanted = (e && e.parameter && e.parameter.sheet) || "";
-    var sh = wanted ? ss.getSheetByName(wanted) : ss.getSheets()[0];
-    if (!sh) throw new Error("Sheet not found: " + wanted);
-    out.sheet = sh.getName();
-    var values = sh.getDataRange().getDisplayValues();
-    if (values.length > 1) {
-      var headers = values[0].map(function (h) { return String(h).trim(); });
-      for (var i = 1; i < values.length; i++) {
-        var row = values[i];
-        if (row.join("").trim() === "") continue;
-        var obj = {};
-        for (var c = 0; c < headers.length; c++) {
-          if (headers[c]) obj[headers[c]] = row[c];
-        }
-        out.rows.push(obj);
-      }
-    }
-  } catch (err) {
-    out.ok = false;
-    out.error = String(err);
-  }
-  var json = JSON.stringify(out);
-  var cb = e && e.parameter && e.parameter.callback;
-  if (cb) {
-    return ContentService.createTextOutput(cb + "(" + json + ")")
-      .setMimeType(ContentService.MimeType.JAVASCRIPT);
-  }
-  return ContentService.createTextOutput(json)
-    .setMimeType(ContentService.MimeType.JSON);
-}
-
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu("ERP Tools")

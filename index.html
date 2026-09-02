@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.13";
+const APP_VERSION = "6.14";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -66,6 +66,12 @@ const GOOGLE_DRIVE_PICKER_API_KEY = "AIzaSyABzgqparoHG9wfLMV6QBsvviEoUW_uhyU";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.14", date:"2026-09-02", title:"Sync back on with a real fix, Master now supported, quiet status dot", items:[
+    "Sync from Google Sheets is back in the menu, with a real bug fixed: re-syncing a row after you fill in its Payment Date used to be silently skipped forever instead of marking the existing requisition Paid - it now correctly updates that same requisition instead of ignoring it or adding a duplicate",
+    "The preview screen has a new \"Already in the app - will be marked Paid\" section so you can see exactly which existing requisitions a sync is about to update, before you tap Import",
+    "Master is now a fully supported source, same as Payment to be done - add it as its own source (Requisitions), pointing at the Master tab, and it will either add a payment fresh or mark an already-synced Pending one Paid, never both",
+    "The top-right status dot no longer shows any text at all (Synced/Saved/etc.) - just a small coloured dot; tap it any time for the full detail on the Settings & Backup page, or hold your finger on it for a moment to see the same detail as a tooltip on larger screens",
+  ]},
   { v:"6.13", date:"2026-09-02", title:"Sync hidden for now, tidier top bar, real back arrows", items:[
     "Sync from Google Sheets is hidden from the menu for now, at your request - the code underneath is untouched, so it comes back with one small change whenever you want it on again",
     "The status pill top-right (Saved / Synced / Backup due) redesigned - a small tinted pill with a coloured dot and icon instead of a solid block, and it now uses the app's own green rather than a mismatched shade",
@@ -1328,29 +1334,32 @@ function friendlyTime(iso){
 
 function SaveChip({ fileHandle, needsReconnect, dirty, saving, lastSaved, onTap,
                      driveConnected, driveSyncing, driveError, driveLastSynced }){
+  // Status is colour + icon only, on purpose — no text label is ever rendered
+  // here (tapping opens Settings & Backup for the full-detail version, and the
+  // colour/icon still carries the same meaning at a glance). `label` below is
+  // used only as the button's title/aria-label for hover and screen readers,
+  // never painted on screen.
   let tone = GREEN, label = "Saved", icon = "check", spin = false;
   if (saving || driveSyncing) { tone = "#8FA0BC"; label = "Saving…"; icon = "loader"; spin = true; }
-  else if (needsReconnect) { tone = RED; label = "Reconnect"; icon = "alert"; }
-  else if (driveConnected && driveError) { tone = RED; label = "Drive sync issue"; icon = "alert"; }
-  else if (driveConnected) { tone = GREEN; label = `Synced ${friendlyTime(driveLastSynced)}`; icon = "check"; }
-  else if (!fileHandle) { tone = AMBER; label = daysSince(lastSaved) === null ? "Not backed up" : `Backup ${friendlyTime(lastSaved)}`; icon = "alert"; }
+  else if (needsReconnect) { tone = RED; label = "Reconnect needed — tap to fix"; icon = "alert"; }
+  else if (driveConnected && driveError) { tone = RED; label = "Drive sync issue — tap for details"; icon = "alert"; }
+  else if (driveConnected) { tone = GREEN; label = `Synced with Google Drive ${friendlyTime(driveLastSynced)}`; icon = "check"; }
+  else if (!fileHandle) { tone = AMBER; label = daysSince(lastSaved) === null ? "Not backed up yet — tap to set up" : `Backup ${friendlyTime(lastSaved)} — tap to set up`; icon = "alert"; }
   else if (dirty) { tone = "#8FA0BC"; label = "Saving…"; icon = "loader"; spin = true; }
 
   return (
-    <button onClick={onTap}
-      style={{ flexShrink:0, display:"flex", alignItems:"center", gap:6,
-        background:"rgba(255,255,255,0.08)", color:"#fff",
-        border:`1.5px solid ${tone}55`, borderRadius:999,
-        padding:"6px 12px 6px 10px", fontSize:11.5, fontWeight:650, letterSpacing:"-0.01em",
-        cursor:"pointer", maxWidth:150, boxShadow:"0 1px 0 rgba(255,255,255,0.06) inset",
+    <button onClick={onTap} title={label} aria-label={label}
+      style={{ flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center",
+        width:26, height:26, background:"rgba(255,255,255,0.08)", color:"#fff",
+        border:`1.5px solid ${tone}55`, borderRadius:"50%",
+        cursor:"pointer", boxShadow:"0 1px 0 rgba(255,255,255,0.06) inset",
         backdropFilter:"blur(2px)" }}>
-      <span style={{ width:14, height:14, borderRadius:"50%", background:`${tone}26`,
-        display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+      <span style={{ width:12, height:12, borderRadius:"50%", background:tone, flexShrink:0,
+        display:"flex", alignItems:"center", justifyContent:"center" }}>
         <span style={{ display:"flex", animation: spin ? "erp-spin 1s linear infinite" : "none" }}>
-          <Icon name={icon} size={9} color={tone} />
+          <Icon name={icon} size={7} color="#fff" />
         </span>
       </span>
-      <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{label}</span>
     </button>
   );
 }
@@ -1565,11 +1574,7 @@ const MENU_SECTIONS = [
     { id:"company",     label:"Company Details",     desc:"GST, PAN, CIN and more" },
   ]},
   { group:"Data", items:[
-    // "sheets" (Sync from Google Sheets) intentionally hidden from the menu for now,
-    // at the user's request (2026-09-02) - not deleted, just not shown. The route,
-    // component and its "From Excel"/"From Sheets" shortcut buttons elsewhere were
-    // left working underneath; re-add this one line to bring the menu entry back.
-    // { id:"sheets",   label:"Sync from Google Sheets", desc:"Pull requisitions from site sheets" },
+    { id:"sheets",      label:"Sync from Google Sheets", desc:"Pull requisitions from site sheets" },
     { id:"import",      label:"Import from Excel",   desc:"Bring in vendors and requisitions" },
     { id:"settings",    label:"Settings & Backup",   desc:"Data file, lists, restore" },
     { id:"changelog",   label:"What is New",         desc:"Version history and changes" },
@@ -4067,10 +4072,14 @@ function RequisitionForm({ vendors, setVendors, reqs, setReqs, expenses, setExpe
           <div style={{ fontSize:13, color:MUTED, lineHeight:1.6, marginBottom:12 }}>
             Adding several at once? Bring them in from a spreadsheet instead of typing each one.
           </div>
-          <div style={{ display:"grid", gridTemplateColumns:"1fr", gap:10 }}>
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
             <button onClick={()=>goTo("import:requisitions")}
               style={{ borderRadius:14, padding:"12px 8px", fontSize:14, fontWeight:600, background:SAND, color:INK, border:"none", cursor:"pointer" }}>
               Import from Excel
+            </button>
+            <button onClick={()=>goTo("sheets")}
+              style={{ borderRadius:14, padding:"12px 8px", fontSize:14, fontWeight:600, background:SAND, color:INK, border:"none", cursor:"pointer" }}>
+              From Google Sheets
             </button>
           </div>
           <div style={{ fontSize:12, color:MUTED, marginTop:10, lineHeight:1.55 }}>
@@ -4323,7 +4332,7 @@ function ExportTab({ reqs, setReqs, vendors, setVendors, lists, setLists, expens
 
   return (
     <div>
-      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:14 }}>
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:8, marginBottom:14 }}>
         <button onClick={()=>goTo && goTo("requisition")}
           style={{ borderRadius:14, padding:"12px 6px", fontSize:13, fontWeight:700, background:AMBER, color:"#fff", border:"none", cursor:"pointer" }}>
           New
@@ -4331,6 +4340,10 @@ function ExportTab({ reqs, setReqs, vendors, setVendors, lists, setLists, expens
         <button onClick={()=>openImport && openImport("requisitions")}
           style={{ borderRadius:14, padding:"12px 6px", fontSize:13, fontWeight:600, background:SAND, color:INK, border:"none", cursor:"pointer" }}>
           From Excel
+        </button>
+        <button onClick={()=>goTo && goTo("sheets")}
+          style={{ borderRadius:14, padding:"12px 6px", fontSize:13, fontWeight:600, background:SAND, color:INK, border:"none", cursor:"pointer" }}>
+          From Sheets
         </button>
       </div>
 
@@ -9064,7 +9077,7 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
     }
     if (collected.length === 0) {
       showToast(failures.length ? failures[0].why : "No rows could be read — see the details", "error");
-      setPreview({ toAdd:[], duplicates:[], errors:[], failures, fileReport, skippedFiles, seenFiles, notes, list });
+      setPreview({ toAdd:[], toUpdate:[], duplicates:[], errors:[], failures, fileReport, skippedFiles, seenFiles, notes, list });
       return;
     }
     buildPreview(collected, failures, list, fileReport, skippedFiles, seenFiles, notes);
@@ -9117,19 +9130,27 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
         toAdd.push({ data:out, source:c.source });
       });
 
-      setPreview({ kind, toAdd, duplicates, errors, failures, missing, map, headers, list, fileReport, skippedFiles, seenFiles, notes });
+      setPreview({ kind, toAdd, toUpdate:[], duplicates, errors, failures, missing, map, headers, list, fileReport, skippedFiles, seenFiles, notes });
       return;
     }
 
-    // Nothing already recorded gets added again. A sheet source rarely carries
-    // its own Ref No or UTR (those get assigned once a row lands in the app), so
-    // comparing on those — like importDupKey does for a one-off Excel import —
-    // would never match on a re-sync and let the same row back in every time.
-    // Match on date + site + name + amount + description instead, which is what
-    // a repeated sync of the same sheet will actually reproduce.
+    // Nothing already recorded gets added again as a fresh row. A sheet source
+    // rarely carries its own Ref No or UTR (those get assigned once a row lands
+    // in the app), so comparing on those — like importDupKey does for a one-off
+    // Excel import — would never match on a re-sync and let the same row back
+    // in every time. Match on date + site + name + amount + description instead,
+    // which is what a repeated sync of the same sheet will actually reproduce.
+    //
+    // A match isn't always "nothing to do" though: the whole point of syncing
+    // "Payment to be done" (or "Master") more than once is that a row that went
+    // out Pending the first time often comes back later with a Payment Date
+    // filled in. When that happens the matching row already in the app gets
+    // marked Paid instead of being silently skipped — see toUpdate below.
     const sheetDupKey = (r) => [dupKey(r), String(r.description||"").trim().toLowerCase()].join("|");
-    const existingKeys = new Set(reqs.map(sheetDupKey));
+    const existingByKey = new Map(reqs.map(r => [sheetDupKey(r), r]));
     const seenKeys = new Set();
+    const updatedIds = new Set();
+    const toUpdate = [];
     // A row that syncs in already paid, and whose Name matches exactly one active
     // Rent & EMI item, also settles that item — same as generating it by hand
     // would (advances the due date, counts an instalment). Skipped whenever the
@@ -9144,7 +9165,31 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
       if (!out.site) out.site = c.source;
 
       const k = sheetDupKey(out);
-      if (existingKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"already in the app" }); return; }
+      const existing = existingByKey.get(k);
+      if (existing) {
+        const canPromoteToPaid = out.paymentStatus === "Paid"
+          && existing.paymentStatus !== "Paid"
+          && existing.paymentStatus !== "On Hold"
+          && !updatedIds.has(existing.id);
+        if (canPromoteToPaid) {
+          updatedIds.add(existing.id);
+          toUpdate.push({
+            id: existing.id,
+            source: c.source,
+            existing,
+            data: out,
+            patch: {
+              paymentStatus: "Paid",
+              paymentDate: out.paymentDate || existing.paymentDate || out.date,
+              paidFromDateColumn: !!out.paidFromDateColumn,
+              paidDateAssumed: !!out.paidDateAssumed,
+            },
+          });
+        } else {
+          duplicates.push({ data:out, source:c.source, why:"already in the app" });
+        }
+        return;
+      }
       if (seenKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"repeated inside this sync" }); return; }
       seenKeys.add(k);
 
@@ -9156,7 +9201,7 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
       toAdd.push({ data:out, source:c.source });
     });
 
-    setPreview({ kind, toAdd, duplicates, errors, failures, missing, map, headers, list, fileReport, skippedFiles, seenFiles, notes });
+    setPreview({ kind, toAdd, toUpdate, duplicates, errors, failures, missing, map, headers, list, fileReport, skippedFiles, seenFiles, notes });
   }
 
   async function testConnection(sh){
@@ -9187,7 +9232,9 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
   }
 
   function applyPreview(){
-    if (!preview || preview.toAdd.length === 0) return;
+    if (!preview) return;
+    const hasUpdates = preview.toUpdate && preview.toUpdate.length > 0;
+    if (preview.toAdd.length === 0 && !hasUpdates) return;
     const stamp = new Date().toISOString();
 
     if (preview.kind === "expenses") {
@@ -9247,7 +9294,15 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
         }
       }
     });
-    setReqs([...reqs, ...added]);
+    // Rows that matched an existing Pending requisition and came back in with a
+    // Payment Date now filled in get marked Paid on that same existing record —
+    // not added again as a second row. Applied in the same setReqs call as the
+    // brand-new rows so the list only re-renders once.
+    const updatePatches = new Map((preview.toUpdate || []).map(u => [u.id, u.patch]));
+    setReqs([
+      ...reqs.map(r => updatePatches.has(r.id) ? { ...r, ...updatePatches.get(r.id) } : r),
+      ...added,
+    ]);
     if (recurringUpdates.length) {
       setRecurring(recurring.map(r => recurringUpdates.find(u => u.id === r.id) || r));
     }
@@ -9269,7 +9324,10 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
     setLists(nl);
 
     setSheets(sheets.map(x => (preview.list || []).some(l => l.id === x.id) ? { ...x, lastSync: stamp } : x));
-    showToast(`${added.length} requisition(s) brought in${recurringUpdates.length ? ` · ${recurringUpdates.length} Rent & EMI item(s) updated` : ""}`);
+    const updatedCount = updatePatches.size;
+    showToast(`${added.length} requisition(s) brought in`
+      + (updatedCount ? ` · ${updatedCount} marked Paid` : "")
+      + (recurringUpdates.length ? ` · ${recurringUpdates.length} Rent & EMI item(s) updated` : ""));
     setPreview(null);
   }
 
@@ -9285,6 +9343,9 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
         <div style={{ background:SURFACE, borderRadius:16, padding:20, marginBottom:16, border:`1px solid ${SAND}` }}>
           <SectionLabel>Check before importing</SectionLabel>
           <ReviewRow label={preview.kind === "expenses" ? "New expenses" : "New requisitions"} value={preview.toAdd.length} />
+          {preview.kind !== "expenses" && preview.toUpdate && preview.toUpdate.length > 0 && (
+            <ReviewRow label="Existing rows to mark Paid" value={preview.toUpdate.length} />
+          )}
           <ReviewRow label="Skipped as duplicates" value={preview.duplicates.length} />
           <ReviewRow label="Rows with problems" value={preview.errors.length} />
           {preview.kind !== "expenses" && preview.toAdd.some(a=>a.data.__recurringMatchId) && (
@@ -9302,7 +9363,7 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
           </div>
         )}
 
-        {preview.toAdd.length === 0 && preview.seenFiles && preview.seenFiles.length > 0 && (
+        {preview.toAdd.length === 0 && !(preview.toUpdate && preview.toUpdate.length > 0) && preview.seenFiles && preview.seenFiles.length > 0 && (
           <div style={{ background:SURFACE, borderRadius:16, padding:16, marginBottom:16, border:`1.5px solid ${RED}` }}>
             <div style={{ fontWeight:700, color:RED, fontSize:14, marginBottom:6 }}>
               Everything found in your folders ({preview.seenFiles.length})
@@ -9386,6 +9447,25 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
           </div>
         )}
 
+        {preview.toUpdate && preview.toUpdate.length > 0 && (
+          <div style={{ background:SURFACE, borderRadius:16, padding:16, marginBottom:16, border:`1.5px solid ${GREEN}` }}>
+            <div style={{ fontWeight:700, color:GREEN, fontSize:14, marginBottom:6 }}>Already in the app — will be marked Paid ({preview.toUpdate.length})</div>
+            <div style={{ fontSize:12, color:MUTED, marginBottom:10, lineHeight:1.5 }}>
+              Same date, name and amount as a requisition already here, but this row now shows a Payment
+              Date — so instead of adding a duplicate, the existing one is updated to Paid.
+            </div>
+            {preview.toUpdate.slice(0,30).map((u,i) => (
+              <div key={i} style={{ padding:"7px 0", borderTop: i? `1px solid ${SAND}`:"none", fontSize:13, color:INK }}>
+                <strong>{u.existing.name}</strong> · ₹{fmtINR(u.existing.amount)}
+                <span style={{ color:MUTED }}> · {u.existing.site || u.source}</span>
+                <span style={{ color:AMBER, fontWeight:600 }}> · Pending → Paid</span>
+                {u.patch.paymentDate && <span style={{ color:MUTED }}> · paid {fmtDate(u.patch.paymentDate)}</span>}
+              </div>
+            ))}
+            {preview.toUpdate.length > 30 && <div style={{ fontSize:12, color:MUTED, marginTop:8 }}>…and {preview.toUpdate.length-30} more</div>}
+          </div>
+        )}
+
         {preview.duplicates.length > 0 && (
           <div style={{ background:SURFACE, borderRadius:16, padding:16, marginBottom:16, border:`1.5px solid ${AMBER}` }}>
             <div style={{ fontWeight:700, color:AMBER, fontSize:14, marginBottom:6 }}>Skipped as duplicates ({preview.duplicates.length})</div>
@@ -9413,11 +9493,18 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
           </div>
         )}
 
-        <BigButton icon="check"
-          label={preview.toAdd.length
-            ? `Import ${preview.toAdd.length} ${preview.kind === "expenses" ? "Expense" : "Requisition"}(s)`
-            : "Nothing new to import"}
-          onClick={applyPreview} tone="green" full disabled={preview.toAdd.length===0} />
+        {(() => {
+          const updCount = (preview.toUpdate && preview.toUpdate.length) || 0;
+          const nothing = preview.toAdd.length === 0 && updCount === 0;
+          const parts = [];
+          if (preview.toAdd.length) parts.push(`${preview.toAdd.length} new ${preview.kind === "expenses" ? "expense" : "requisition"}(s)`);
+          if (updCount) parts.push(`${updCount} marked Paid`);
+          return (
+            <BigButton icon="check"
+              label={nothing ? "Nothing new to import" : `Import — ${parts.join(" · ")}`}
+              onClick={applyPreview} tone="green" full disabled={nothing} />
+          );
+        })()}
       </div>
     );
   }
@@ -9456,10 +9543,10 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
           </Field>
           <Field label="Syncs into" hint={editing.kind === "expenses"
               ? "Rows land in Expenses — use this for a sheet like Office Master (Date, Expense Type, Paid By, Amount, ...)."
-              : "Rows land in Requisitions — a date in Payment Status sends that row straight to the Payment Register, same as Import from Excel."}>
+              : "Rows land in Requisitions — use this both for Payment to be done and for Master. A filled-in Payment Date sends that row straight to the Payment Register. Re-syncing later, after a row that first came in Pending gets its Payment Date filled in, now updates that same requisition to Paid instead of skipping it or adding it twice — so it's safe to add both Payment to be done and Master as separate sources and sync either or both, in any order."}>
             <select style={inputStyle} value={editing.kind || "requisitions"}
               onChange={e=>setEditing({...editing, kind:e.target.value})}>
-              <option value="requisitions">Requisitions (Payment to be done)</option>
+              <option value="requisitions">Requisitions (Payment to be done / Master)</option>
               <option value="expenses">Expenses (Office Master)</option>
             </select>
           </Field>
