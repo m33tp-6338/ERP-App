@@ -43,6 +43,7 @@
   button:active { transform: scale(0.985); }
   select, input, textarea { transition: border-color .15s ease, box-shadow .15s ease; }
   select:focus, input:focus, textarea:focus { box-shadow: 0 0 0 4px rgba(79,70,229,0.12); }
+  @keyframes erp-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
@@ -51,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.12";
+const APP_VERSION = "6.13";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -65,6 +66,11 @@ const GOOGLE_DRIVE_PICKER_API_KEY = "AIzaSyABzgqparoHG9wfLMV6QBsvviEoUW_uhyU";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.13", date:"2026-09-02", title:"Sync hidden for now, tidier top bar, real back arrows", items:[
+    "Sync from Google Sheets is hidden from the menu for now, at your request - the code underneath is untouched, so it comes back with one small change whenever you want it on again",
+    "The status pill top-right (Saved / Synced / Backup due) redesigned - a small tinted pill with a coloured dot and icon instead of a solid block, and it now uses the app's own green rather than a mismatched shade",
+    "Every \"Back to ...\" button across the app now shows a left-pointing arrow instead of a cross/X - the X is kept only where it actually means Cancel or Remove, not Back",
+  ]},
   { v:"6.12", date:"2026-09-02", title:"Sync from Google Sheets replaced with Drive folder import", items:[
     "The Apps Script / Web app URL sync is gone - it depended on you deploying and hosting your own script, which kept failing in ways neither of us could see or fix reliably",
     "In its place: Sync from Google Sheets now reads Excel files straight out of a Google Drive folder you choose, using the same sign-in already proven reliable for Drive backup - no deployment, no URL to paste, no \"Anyone\" access setting",
@@ -1322,20 +1328,29 @@ function friendlyTime(iso){
 
 function SaveChip({ fileHandle, needsReconnect, dirty, saving, lastSaved, onTap,
                      driveConnected, driveSyncing, driveError, driveLastSynced }){
-  let bg = "#3C7A5A", label = "Saved";
-  if (saving || driveSyncing) { bg = MUTED; label = "Saving…"; }
-  else if (needsReconnect) { bg = RED; label = "Reconnect"; }
-  else if (driveConnected && driveError) { bg = RED; label = "Drive sync issue"; }
-  else if (driveConnected) { bg = "#3C7A5A"; label = `Synced ${friendlyTime(driveLastSynced)}`; }
-  else if (!fileHandle) { bg = AMBER; label = daysSince(lastSaved) === null ? "Not backed up" : `Backup ${friendlyTime(lastSaved)}`; }
-  else if (dirty) { bg = AMBER; label = "Saving…"; }
+  let tone = GREEN, label = "Saved", icon = "check", spin = false;
+  if (saving || driveSyncing) { tone = "#8FA0BC"; label = "Saving…"; icon = "loader"; spin = true; }
+  else if (needsReconnect) { tone = RED; label = "Reconnect"; icon = "alert"; }
+  else if (driveConnected && driveError) { tone = RED; label = "Drive sync issue"; icon = "alert"; }
+  else if (driveConnected) { tone = GREEN; label = `Synced ${friendlyTime(driveLastSynced)}`; icon = "check"; }
+  else if (!fileHandle) { tone = AMBER; label = daysSince(lastSaved) === null ? "Not backed up" : `Backup ${friendlyTime(lastSaved)}`; icon = "alert"; }
+  else if (dirty) { tone = "#8FA0BC"; label = "Saving…"; icon = "loader"; spin = true; }
 
   return (
     <button onClick={onTap}
-      style={{ flexShrink:0, background:bg, color:"#fff", border:"none", borderRadius:999,
-        padding:"7px 12px", fontSize:11, fontWeight:700, cursor:"pointer", maxWidth:120,
-        overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
-      {label}
+      style={{ flexShrink:0, display:"flex", alignItems:"center", gap:6,
+        background:"rgba(255,255,255,0.08)", color:"#fff",
+        border:`1.5px solid ${tone}55`, borderRadius:999,
+        padding:"6px 12px 6px 10px", fontSize:11.5, fontWeight:650, letterSpacing:"-0.01em",
+        cursor:"pointer", maxWidth:150, boxShadow:"0 1px 0 rgba(255,255,255,0.06) inset",
+        backdropFilter:"blur(2px)" }}>
+      <span style={{ width:14, height:14, borderRadius:"50%", background:`${tone}26`,
+        display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+        <span style={{ display:"flex", animation: spin ? "erp-spin 1s linear infinite" : "none" }}>
+          <Icon name={icon} size={9} color={tone} />
+        </span>
+      </span>
+      <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{label}</span>
     </button>
   );
 }
@@ -1550,7 +1565,11 @@ const MENU_SECTIONS = [
     { id:"company",     label:"Company Details",     desc:"GST, PAN, CIN and more" },
   ]},
   { group:"Data", items:[
-    { id:"sheets",      label:"Sync from Google Sheets", desc:"Pull requisitions from site sheets" },
+    // "sheets" (Sync from Google Sheets) intentionally hidden from the menu for now,
+    // at the user's request (2026-09-02) - not deleted, just not shown. The route,
+    // component and its "From Excel"/"From Sheets" shortcut buttons elsewhere were
+    // left working underneath; re-add this one line to bring the menu entry back.
+    // { id:"sheets",   label:"Sync from Google Sheets", desc:"Pull requisitions from site sheets" },
     { id:"import",      label:"Import from Excel",   desc:"Bring in vendors and requisitions" },
     { id:"settings",    label:"Settings & Backup",   desc:"Data file, lists, restore" },
     { id:"changelog",   label:"What is New",         desc:"Version history and changes" },
@@ -3537,7 +3556,7 @@ function VendorLedger({ vendor, reqs, setReqs, vendors, setVendors, showToast, o
   return (
     <div>
       <button onClick={onBack} style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
-        <Icon name="close" size={16} /> Back to vendors
+        <Icon name="back" size={16} /> Back to vendors
       </button>
       <div style={{ background:SURFACE, borderRadius:16, padding:20, marginBottom:16, border:`1px solid ${SAND}` }}>
         <div style={{ fontWeight:700, fontSize:18, color:INK }}>{vendor.name}</div>
@@ -4048,14 +4067,10 @@ function RequisitionForm({ vendors, setVendors, reqs, setReqs, expenses, setExpe
           <div style={{ fontSize:13, color:MUTED, lineHeight:1.6, marginBottom:12 }}>
             Adding several at once? Bring them in from a spreadsheet instead of typing each one.
           </div>
-          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+          <div style={{ display:"grid", gridTemplateColumns:"1fr", gap:10 }}>
             <button onClick={()=>goTo("import:requisitions")}
               style={{ borderRadius:14, padding:"12px 8px", fontSize:14, fontWeight:600, background:SAND, color:INK, border:"none", cursor:"pointer" }}>
               Import from Excel
-            </button>
-            <button onClick={()=>goTo("sheets")}
-              style={{ borderRadius:14, padding:"12px 8px", fontSize:14, fontWeight:600, background:SAND, color:INK, border:"none", cursor:"pointer" }}>
-              From Google Sheets
             </button>
           </div>
           <div style={{ fontSize:12, color:MUTED, marginTop:10, lineHeight:1.55 }}>
@@ -4308,7 +4323,7 @@ function ExportTab({ reqs, setReqs, vendors, setVendors, lists, setLists, expens
 
   return (
     <div>
-      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:8, marginBottom:14 }}>
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:14 }}>
         <button onClick={()=>goTo && goTo("requisition")}
           style={{ borderRadius:14, padding:"12px 6px", fontSize:13, fontWeight:700, background:AMBER, color:"#fff", border:"none", cursor:"pointer" }}>
           New
@@ -4316,10 +4331,6 @@ function ExportTab({ reqs, setReqs, vendors, setVendors, lists, setLists, expens
         <button onClick={()=>openImport && openImport("requisitions")}
           style={{ borderRadius:14, padding:"12px 6px", fontSize:13, fontWeight:600, background:SAND, color:INK, border:"none", cursor:"pointer" }}>
           From Excel
-        </button>
-        <button onClick={()=>goTo && goTo("sheets")}
-          style={{ borderRadius:14, padding:"12px 6px", fontSize:13, fontWeight:600, background:SAND, color:INK, border:"none", cursor:"pointer" }}>
-          From Sheets
         </button>
       </div>
 
@@ -4702,7 +4713,7 @@ function RecurringTab({ vendors, setVendors, recurring, setRecurring, reqs, setR
   return (
     <div>
       <button onClick={()=>goTo("dashboard")} style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
-        <Icon name="close" size={16} /> Back to dashboard
+        <Icon name="back" size={16} /> Back to dashboard
       </button>
       {missingLedgers.length > 0 && (
         <div style={{ background:"#EEF0FE", border:`1.5px solid ${AMBER}`, borderRadius:18, padding:16, marginBottom:14 }}>
@@ -5004,7 +5015,7 @@ function CommitmentDetail({ item, reqs, vendors, onBack, onEdit, onGenerate, onT
     <div>
       <button onClick={onBack}
         style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
-        <Icon name="close" size={16} /> Back to list
+        <Icon name="back" size={16} /> Back to list
       </button>
 
       <div style={{ background:GRAD_INK, borderRadius:22, padding:22, marginBottom:14, boxShadow:SHADOW_LG }}>
@@ -5619,7 +5630,7 @@ function FixedCostTab({ recurring, vendors, machines, showToast, goTo }){
     <div>
       <button onClick={()=>goTo("dashboard")}
         style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
-        <Icon name="close" size={16} /> Back to dashboard
+        <Icon name="back" size={16} /> Back to dashboard
       </button>
 
       <div style={{ background:GRAD_INK, borderRadius:22, padding:22, marginBottom:14, boxShadow:SHADOW_LG }}>
@@ -5782,7 +5793,7 @@ function ChangelogTab({ settings, setSettings, goTo }){
     <div>
       <button onClick={()=>goTo("dashboard")}
         style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
-        <Icon name="close" size={16} /> Back to dashboard
+        <Icon name="back" size={16} /> Back to dashboard
       </button>
 
       <div style={{ background:GRAD_INK, borderRadius:22, padding:22, marginBottom:16, boxShadow:SHADOW_LG }}>
@@ -5979,7 +5990,7 @@ function UtilitiesTab({ utilities, setUtilities, cards, lists, setLists, showToa
     <div>
       <button onClick={()=>goTo("dashboard")}
         style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
-        <Icon name="close" size={16} /> Back to dashboard
+        <Icon name="back" size={16} /> Back to dashboard
       </button>
 
       <div style={{ background:GRAD_INK, borderRadius:22, padding:20, marginBottom:12, boxShadow:SHADOW_LG }}>
@@ -6509,7 +6520,7 @@ function DieselTab({ machines, setMachines, diesel, setDiesel, recurring, vendor
       <div>
         <button onClick={()=>setOpenMachine(null)}
           style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
-          <Icon name="close" size={16} /> All machines
+          <Icon name="back" size={16} /> All machines
         </button>
         <div style={{ background:GRAD_INK, borderRadius:22, padding:22, marginBottom:14, boxShadow:SHADOW_LG }}>
           <div style={{ fontSize:12, fontWeight:600, color:"#8FA0BC", textTransform:"uppercase", letterSpacing:"0.06em" }}>
@@ -6578,7 +6589,7 @@ function DieselTab({ machines, setMachines, diesel, setDiesel, recurring, vendor
     <div>
       <button onClick={()=>goTo("dashboard")}
         style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
-        <Icon name="close" size={16} /> Back to dashboard
+        <Icon name="back" size={16} /> Back to dashboard
       </button>
 
       <div style={{ display:"flex", gap:8, marginBottom:14 }}>
@@ -7636,7 +7647,7 @@ function CashTab({ cards, setCards, cashTxns, setCashTxns, cashCounts, setCashCo
         <div>
           <button onClick={()=>{ setOpenCardId(null); setCardFilter("All"); }}
             style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
-            <Icon name="close" size={16} /> Back to Cash & Card
+            <Icon name="back" size={16} /> Back to Cash & Card
           </button>
           <EmptyState text="This card no longer exists." />
         </div>
@@ -7650,7 +7661,7 @@ function CashTab({ cards, setCards, cashTxns, setCashTxns, cashCounts, setCashCo
       <div>
         <button onClick={()=>{ setOpenCardId(null); setCardFilter("All"); setSelected(new Set()); }}
           style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
-          <Icon name="close" size={16} /> Back to Cash & Card
+          <Icon name="back" size={16} /> Back to Cash & Card
         </button>
 
         <div style={{ background:GRAD_INK, borderRadius:20, padding:18, boxShadow:SHADOW_LG, marginBottom:14 }}>
@@ -7719,7 +7730,7 @@ function CashTab({ cards, setCards, cashTxns, setCashTxns, cashCounts, setCashCo
     <div>
       <button onClick={()=>goTo("dashboard")}
         style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
-        <Icon name="close" size={16} /> Back to dashboard
+        <Icon name="back" size={16} /> Back to dashboard
       </button>
 
       {cards.length === 0 ? (
@@ -8123,7 +8134,7 @@ function EmployeesTab({ vendors, setVendors, reqs, setReqs, lists, setLists, sho
     <div>
       <button onClick={()=>goTo("dashboard")}
         style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
-        <Icon name="close" size={16} /> Back to dashboard
+        <Icon name="back" size={16} /> Back to dashboard
       </button>
 
       <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:14 }}>
@@ -8332,7 +8343,7 @@ function PayrollTab({ vendors, setVendors, reqs, setReqs, attendance, setAttenda
     <div>
       <button onClick={()=>goTo("dashboard")}
         style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
-        <Icon name="close" size={16} /> Back to dashboard
+        <Icon name="back" size={16} /> Back to dashboard
       </button>
 
       <div style={{ background:GRAD_INK, borderRadius:20, padding:18, marginBottom:14, boxShadow:SHADOW_LG }}>
@@ -8585,7 +8596,7 @@ function MonthlyStatementTab({ reqs, expenses, cashTxns, cards, showToast, goTo 
     <div>
       <button onClick={()=>goTo("dashboard")}
         style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
-        <Icon name="close" size={16} /> Back to dashboard
+        <Icon name="back" size={16} /> Back to dashboard
       </button>
 
       <Field label="Month">
@@ -8781,7 +8792,7 @@ function SiteSummaryTab({ reqs, expenses, cashTxns, cards, diesel, utilities, ma
         <button onClick={()=>{ setOpenSite(null); setOpenHead(null); }}
           style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600,
             color:INK, background:"none", border:"none", cursor:"pointer" }}>
-          <Icon name="close" size={16} /> All sites
+          <Icon name="back" size={16} /> All sites
         </button>
 
         <div style={{ background:GRAD_INK, borderRadius:22, padding:22, marginBottom:14, boxShadow:SHADOW_LG }}>
@@ -8896,7 +8907,7 @@ function SiteSummaryTab({ reqs, expenses, cashTxns, cards, diesel, utilities, ma
       <button onClick={()=>goTo("dashboard")}
         style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600,
           color:INK, background:"none", border:"none", cursor:"pointer" }}>
-        <Icon name="close" size={16} /> Back to dashboard
+        <Icon name="back" size={16} /> Back to dashboard
       </button>
 
       <div style={{ background:GRAD_INK, borderRadius:22, padding:22, marginBottom:14, boxShadow:SHADOW_LG }}>
@@ -9469,7 +9480,7 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
     <div>
       <button onClick={()=>goTo("dashboard")}
         style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
-        <Icon name="close" size={16} /> Back to dashboard
+        <Icon name="back" size={16} /> Back to dashboard
       </button>
 
       {busy && (
@@ -10020,7 +10031,7 @@ function ExpensesTab({ expenses, setExpenses, reqs, setReqs, lists, setLists, sh
     <div>
       <button onClick={()=>goTo("dashboard")}
         style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
-        <Icon name="close" size={16} /> Back to dashboard
+        <Icon name="back" size={16} /> Back to dashboard
       </button>
 
       <div style={{ background:SURFACE, borderRadius:16, padding:20, marginBottom:14, border:`1.5px solid ${unclaimed.length ? AMBER : SAND}` }}>
@@ -10533,7 +10544,7 @@ function ReceivablesTab({ reqs, setReqs, showToast, goTo }){
     <div>
       <button onClick={()=>goTo("dashboard")}
         style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
-        <Icon name="close" size={16} /> Back to dashboard
+        <Icon name="back" size={16} /> Back to dashboard
       </button>
 
       <div style={{ background:SURFACE, borderRadius:16, padding:20, marginBottom:14, border:`1.5px solid ${outstanding>0 ? AMBER : SAND}` }}>
@@ -10655,7 +10666,7 @@ function RequisitionDetail({ req, vendors, reqs, setReqs, expenses, setExpenses,
     <div>
       <button onClick={onBack}
         style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
-        <Icon name="close" size={16} /> Back to list
+        <Icon name="back" size={16} /> Back to list
       </button>
 
       {/* headline */}
@@ -12496,7 +12507,7 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
       <div>
         <button onClick={()=>setPreview(null)}
           style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
-          <Icon name="close" size={16} /> Back to column matching
+          <Icon name="back" size={16} /> Back to column matching
         </button>
 
         <div style={{ background:SURFACE, borderRadius:16, padding:20, marginBottom:16, border:`1px solid ${SAND}` }}>
@@ -12885,7 +12896,7 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
     <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
       <button onClick={()=>goTo("dashboard")}
         style={{ display:"flex", alignItems:"center", gap:6, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer", alignSelf:"flex-start" }}>
-        <Icon name="close" size={16} /> Back to dashboard
+        <Icon name="back" size={16} /> Back to dashboard
       </button>
 
       {focused ? (
