@@ -51,7 +51,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.2";
+const APP_VERSION = "6.10";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -65,6 +65,46 @@ const GOOGLE_DRIVE_PICKER_API_KEY = "PASTE_YOUR_GOOGLE_PICKER_API_KEY_HERE";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.10", date:"2026-09-02", title:"Payroll — fixed salaries and attendance-based pay", items:[
+    "New Payroll tab: raise this month's salary requisitions in one place instead of typing each one by hand",
+    "Every employee now has a Pay Type - Fixed (full Monthly Salary every month, e.g. top management) or Attendance-based (that month's pay worked out from days present) - set it on the employee's ledger",
+    "Attendance-based pay = Monthly Salary ÷ actual days in that month × days present, so August (31 days) and September (30 days) work out correctly on their own",
+    "Import each month's attendance from Excel (new \"Attendance\" import kind) - one row per employee per month; re-importing the same employee and month corrects it rather than duplicating",
+    "Payroll clearly flags anyone with no Monthly Salary set, or no attendance imported yet for the month, and won't let you generate their pay until that's fixed",
+    "Generating payroll for an employee a second time in the same month is blocked, with the already-raised requisition's reference number shown, so pay can't accidentally be raised twice",
+    "This page's own change log (What's New) is now kept up to date with every release, going forward, instead of falling behind",
+  ]},
+  { v:"6.9", date:"2026-09-01", title:"Fixing entries on the wrong same-named ledger", items:[
+    "Select entries on a ledger's Transaction History and Reassign to another ledger - the payment itself is untouched, only which ledger it's counted against changes",
+    "Move them onto a brand-new, properly distinct ledger (created on the spot) or any other existing one",
+    "A warning now appears when saving a ledger with a name that's already in use, so two different people don't end up sharing one history by mistake",
+    "Updates should now reach your phone reliably - a GitHub Pages setup issue was silently blocking every update since the very first install; that's fixed, so this and every future update should show up as expected",
+  ]},
+  { v:"6.8", date:"2026-09-01", title:"Smaller sync button, bank-details sharing", items:[
+    "Settings & Backup's Google Drive card now shows a compact Sync now button and the last-synced time, with the connected account's email shown right there - no more full-width button and long paragraph",
+    "Share Bank Details Only on any ledger - just name, bank, account number and IFSC, for quickly forwarding payment details without sharing everything else on file",
+  ]},
+  { v:"6.7", date:"2026-09-01", title:"Cash & Card: each card gets its own page", items:[
+    "Tapping a card (or its Entries button) now opens a dedicated page for just that card - its own balance, badges, search, sort and select-and-bulk-action tools",
+    "No more digging through every card's entries filtered in place",
+  ]},
+  { v:"6.6", date:"2026-09-01", title:"Google Sheets sync now feeds Expenses too", items:[
+    "Sync from Google Sheets can pull into Expenses as well as Requisitions, from the same or a separate sheet tab",
+    "A paid row whose name exactly matches an active Rent & EMI item now settles that item automatically - advances the due date, counts the instalment",
+    "Fixed a real bug: an unchanged sheet was being silently re-imported in full on every sync - now only genuinely new or changed rows come in",
+  ]},
+  { v:"6.5", date:"2026-08-31", title:"Google Drive backup, folder targeting", items:[
+    "Fixed Drive backup getting stuck retrying with an old, rejected sign-in instead of asking you to reconnect",
+    "Choose or change which Drive folder the backup lives in, right from Settings",
+  ]},
+  { v:"6.4", date:"2026-08-31", title:"Import to a specific Cash & Card", items:[
+    "Import now asks which card a purchase belongs to when the file has no Card column (or leaves some rows blank), so nothing lands on the wrong card or creates a stray card by mistake",
+  ]},
+  { v:"6.3", date:"2026-08-30", title:"Automatic backup to Google Drive", items:[
+    "Your data now backs itself up to Google Drive in the background - no more remembering to Save a Copy Now",
+    "Settings shows whether it's connected, the last time it synced, and lets you sync on demand",
+    "Only this app's own backup file is touched - nothing else in your Drive is read or changed",
+  ]},
   { v:"6.2", date:"2026-08-23", title:"Attachments and partner reconciliation", items:[
     "Attached expenses are listed in full, not the first twelve",
     "The date range boxes are gone - one search box now takes a date or a name, since it already understands both",
@@ -436,7 +476,12 @@ const STATUS_OPTIONS = ["Pending", "Approved", "Paid", "On Hold"];
 const STATUS_COLOR = { Pending: RED, Approved: AMBER, Paid: GREEN, "On Hold": MUTED };
 
 const emptyVendor = { id:"", name:"", ledgerType:"Vendor", gstin:"", legalName:"", tradeName:"", address:"", state:"", pan:"", category:"", bankName:"", accNo:"", ifsc:"", sites:[],
-  empCode:"", designation:"", department:"", doj:"", salary:"", phone:"", email:"", uan:"", esic:"", empStatus:"Active", dol:"", rollType:"On Roll" };
+  empCode:"", designation:"", department:"", doj:"", salary:"", phone:"", email:"", uan:"", esic:"", empStatus:"Active", dol:"", rollType:"On Roll", payType:"Fixed" };
+// "Fixed" = paid the full Monthly Salary every month, same as always.
+// "Attendance-based" = that month's pay is worked out from imported attendance -
+// Monthly Salary ÷ days in that month × days present. Every employee defaults to
+// Fixed so nothing already saved changes behaviour on its own.
+const PAY_TYPES = ["Fixed", "Attendance-based"];
 const EMP_STATUS = ["Active","On Leave","Left"];
 const ROLL_TYPES = ["On Roll","Off Roll"];
 
@@ -458,7 +503,8 @@ function warnIfDuplicateLedgerName(vendors, v){
   );
 }
 const emptyReq = {
-  coveredById:"", coveredByRef:"", dupOk:[], id:"", refNo:"", date:"", site:"", category:"", subCategory:"", vendorId:"", name:"", amount:"", description:"", paymentStatus:"Pending", accNo:"", ifsc:"", paidBy:"Company", paymentDate:"", paymentMode:"", utr:"", paidAmount:"", recovered:false, isReimbursement:false, claimId:"", exported:false, createdAt:0 };
+  coveredById:"", coveredByRef:"", dupOk:[], id:"", refNo:"", date:"", site:"", category:"", subCategory:"", vendorId:"", name:"", amount:"", description:"", paymentStatus:"Pending", accNo:"", ifsc:"", paidBy:"Company", paymentDate:"", paymentMode:"", utr:"", paidAmount:"", recovered:false, isReimbursement:false, claimId:"", exported:false, createdAt:0,
+  salaryMonth:"" }; // set only on a requisition generated from Payroll, e.g. "2026-08" - how "already generated this month" is detected without guessing from text
 const PAYMENT_MODES = ["NEFT","RTGS","IMPS","UPI","Cheque","Cash","Other"];
 
 const emptyExpense = { id:"", date:"", periodText:"", expenseType:"Site Purchase", site:"", category:"", subCategory:"",
@@ -1030,6 +1076,7 @@ function collectAllData(){
     machines: loadKey("erp:machines", []),
     diesel: loadKey("erp:diesel", []),
     utilities: loadKey("erp:utilities", []),
+    attendance: loadKey("erp:attendance", []),
     ledgerEntries: loadKey("erp:ledgerEntries", []),
     settings: loadKey("erp:settings", { gstApiKey:"" }),
     company: loadKey("erp:company", DEFAULT_COMPANY),
@@ -1465,6 +1512,7 @@ const MENU_SECTIONS = [
   { group:"Records", items:[
     { id:"vendors",     label:"Ledgers",             desc:"Parties, owners, bank details" },
     { id:"employees",   label:"Employee Master",     desc:"Staff, salaries and payment history" },
+    { id:"payroll",     label:"Payroll",             desc:"Monthly salary run — fixed and attendance-based pay" },
     { id:"recurring",   label:"Rent & EMI",          desc:"Rents, leases and instalments" },
     { id:"company",     label:"Company Details",     desc:"GST, PAN, CIN and more" },
   ]},
@@ -1810,6 +1858,7 @@ function ERPApp(){
   const [machines, setMachinesState] = useState([]);
   const [diesel, setDieselState] = useState([]);
   const [utilities, setUtilitiesState] = useState([]);
+  const [attendance, setAttendanceState] = useState([]);
   const [ledgerEntries, setLedgerEntriesState] = useState([]);
   const [settings, setSettingsState] = useState({ gstApiKey:"" });
   const [company, setCompanyState] = useState(DEFAULT_COMPANY);
@@ -1875,6 +1924,7 @@ function ERPApp(){
     if (data.machines) { setMachinesState(data.machines); saveKey("erp:machines", data.machines); }
     if (data.diesel) { setDieselState(data.diesel); saveKey("erp:diesel", data.diesel); }
     if (data.utilities) { setUtilitiesState(data.utilities); saveKey("erp:utilities", data.utilities); }
+    if (data.attendance) { setAttendanceState(data.attendance); saveKey("erp:attendance", data.attendance); }
     if (data.ledgerEntries) { setLedgerEntriesState(data.ledgerEntries); saveKey("erp:ledgerEntries", data.ledgerEntries); }
     if (data.settings) { setSettingsState(data.settings); saveKey("erp:settings", data.settings); }
     if (data.company) { setCompanyState(data.company); saveKey("erp:company", data.company); }
@@ -1898,6 +1948,7 @@ function ERPApp(){
     setMachinesState(loadKey("erp:machines", []));
     setDieselState(loadKey("erp:diesel", []));
     setUtilitiesState(loadKey("erp:utilities", []));
+    setAttendanceState(loadKey("erp:attendance", []));
     setLedgerEntriesState(loadKey("erp:ledgerEntries", []));
     setCompanyState(loadKey("erp:company", DEFAULT_COMPANY));
     setListsState(loadKey("erp:lists", DEFAULT_LISTS));
@@ -2245,6 +2296,11 @@ function ERPApp(){
     if (!saveKey("erp:utilities", next)) showToast("Could not save utility data", "error");
     markDirty();
   }, [showToast, markDirty]);
+  const setAttendance = useCallback((next) => {
+    setAttendanceState(next);
+    if (!saveKey("erp:attendance", next)) showToast("Could not save attendance data", "error");
+    markDirty();
+  }, [showToast, markDirty]);
   const setLedgerEntries = useCallback((next) => {
     setLedgerEntriesState(next);
     if (!saveKey("erp:ledgerEntries", next)) showToast("Could not save the ledger entry", "error");
@@ -2362,7 +2418,7 @@ function ERPApp(){
       }} />;
   }
 
-  const TAB_TITLES = { dashboard:"Overview", vendors:"Ledgers", requisition:"New Payment Requisition", export:"Requisitions & Export", settings:"Settings", recurring:"Rent & EMI", company:"Company Details", payments:"Payment Register", import:"Import from Excel", receivables:"Receivables", expenses:"Expenses", sheets:"Sync from Google Sheets", statement:"Monthly Statement", sitesummary:"Site Summary", employees:"Employee Master", cash:"Cash & Card", diesel:"Diesel & Machinery", utilities:"Utilities", changelog:"What is New", fixedcost:"Fixed Cost Summary" };
+  const TAB_TITLES = { dashboard:"Overview", vendors:"Ledgers", requisition:"New Payment Requisition", export:"Requisitions & Export", settings:"Settings", recurring:"Rent & EMI", company:"Company Details", payments:"Payment Register", import:"Import from Excel", receivables:"Receivables", expenses:"Expenses", sheets:"Sync from Google Sheets", statement:"Monthly Statement", sitesummary:"Site Summary", employees:"Employee Master", cash:"Cash & Card", diesel:"Diesel & Machinery", utilities:"Utilities", changelog:"What is New", fixedcost:"Fixed Cost Summary", payroll:"Payroll" };
 
   const openImport = (kind, cardId) => { setImportFocus(kind || ""); setImportCardHint(cardId || ""); setTab("import"); };
   const toPayCount = reqs.filter(r => r.paymentStatus !== "Paid" || !r.paymentDate).length;
@@ -2406,7 +2462,7 @@ function ERPApp(){
         {tab==="requisition" && <RequisitionForm vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} expenses={expenses} setExpenses={setExpenses} lists={lists} setLists={setLists} goTo={navigate} openImport={openImport} showToast={showToast} />}
         {tab==="export" && <ExportTab reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} expenses={expenses} setExpenses={setExpenses} goTo={navigate} openImport={openImport} showToast={showToast} />}
         {tab==="recurring" && <RecurringTab vendors={vendors} setVendors={setVendors} recurring={recurring} setRecurring={setRecurring} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
-        {tab==="import" && <ImportTab focusKind={importFocus} clearFocus={()=>setImportFocus("")} presetCardId={importCardHint} vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} recurring={recurring} setRecurring={setRecurring} expenses={expenses} setExpenses={setExpenses} cards={cards} setCards={setCards} cashTxns={cashTxns} setCashTxns={setCashTxns} machines={machines} setMachines={setMachines} diesel={diesel} setDiesel={setDiesel} utilities={utilities} setUtilities={setUtilities} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} />}
+        {tab==="import" && <ImportTab focusKind={importFocus} clearFocus={()=>setImportFocus("")} presetCardId={importCardHint} vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} recurring={recurring} setRecurring={setRecurring} expenses={expenses} setExpenses={setExpenses} cards={cards} setCards={setCards} cashTxns={cashTxns} setCashTxns={setCashTxns} machines={machines} setMachines={setMachines} diesel={diesel} setDiesel={setDiesel} utilities={utilities} setUtilities={setUtilities} attendance={attendance} setAttendance={setAttendance} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} />}
         {tab==="fixedcost" && <FixedCostTab recurring={recurring} vendors={vendors} machines={machines} showToast={showToast} goTo={navigate} />}
         {tab==="changelog" && <ChangelogTab settings={settings} setSettings={setSettings} goTo={navigate} />}
         {tab==="utilities" && <UtilitiesTab utilities={utilities} setUtilities={setUtilities} cards={cards}
@@ -2417,6 +2473,7 @@ function ERPApp(){
           cashCounts={cashCounts} setCashCounts={setCashCounts} vendors={vendors}
           lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
         {tab==="employees" && <EmployeesTab vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
+        {tab==="payroll" && <PayrollTab vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} attendance={attendance} setAttendance={setAttendance} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
         {tab==="statement" && <MonthlyStatementTab reqs={reqs} expenses={expenses} cashTxns={cashTxns} cards={cards} showToast={showToast} goTo={navigate} />}
         {tab==="sitesummary" && <SiteSummaryTab reqs={reqs} expenses={expenses} cashTxns={cashTxns} cards={cards} diesel={diesel} utilities={utilities} machines={machines} vendors={vendors} showToast={showToast} goTo={navigate} />}
         {tab==="sheets" && <SheetSyncTab sheets={sheets} setSheets={setSheets} reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} expenses={expenses} setExpenses={setExpenses} recurring={recurring} setRecurring={setRecurring} />}
@@ -3209,6 +3266,20 @@ function VendorForm({ vendor, lists, setLists, onCancel, onSave }){
                 })}
               </div>
             </Field>
+            <Field label="Pay Type" hint="Fixed = full Monthly Salary every month · Attendance-based = that month's pay is worked out from imported attendance">
+              <div style={{ display:"flex", gap:8 }}>
+                {PAY_TYPES.map(t => {
+                  const on = (v.payType||"Fixed") === t;
+                  return (
+                    <button key={t} type="button" onClick={()=>set("payType", t)}
+                      style={{ flex:1, borderRadius:12, padding:"11px 0", fontSize:14, fontWeight:600, cursor:"pointer",
+                        border:`2px solid ${on?AMBER:SAND}`, background:on?AMBER:SURFACE, color:on?"#fff":INK }}>
+                      {t}
+                    </button>
+                  );
+                })}
+              </div>
+            </Field>
             <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
               <Field label="Designation">
                 <input style={inputStyle} value={v.designation||""} onChange={e=>set("designation",e.target.value)} placeholder="e.g. Site Supervisor" />
@@ -3482,6 +3553,12 @@ function VendorLedger({ vendor, reqs, setReqs, vendors, setVendors, showToast, o
             <DetailRow label="Joined" value={fmtDate(vendor.doj)} />
             {vendor.dol && <DetailRow label="Left" value={fmtDate(vendor.dol)} />}
             <DetailRow label="Salary" value={vendor.salary ? `₹${fmtINR(vendor.salary)} / month` : ""} />
+            <DetailRow label="Pay Type" value={vendor.payType || "Fixed"} />
+            {(vendor.payType === "Attendance-based") && (
+              <div style={{ fontSize:12, color:MUTED, padding:"0 0 6px", lineHeight:1.5 }}>
+                Paid by attendance — each month's amount is worked out on the Payroll tab from imported days present, not the flat Salary figure above.
+              </div>
+            )}
             <DetailRow label="Phone" value={vendor.phone} copyable showToast={showToast} />
             <DetailRow label="Email" value={vendor.email} copyable showToast={showToast} />
             <DetailRow label="UAN" value={vendor.uan} copyable showToast={showToast} />
@@ -8093,6 +8170,209 @@ function EmployeesTab({ vendors, setVendors, reqs, setReqs, lists, setLists, sho
   );
 }
 
+/* ================= PAYROLL ================= */
+function PayrollTab({ vendors, setVendors, reqs, setReqs, attendance, setAttendance, lists, setLists, showToast, goTo, openImport }){
+  const [month, setMonth] = useState(todayStr().slice(0,7));
+  const [showRecords, setShowRecords] = useState(false);
+
+  const employees = useMemo(
+    () => vendors.filter(v => (v.ledgerType||"")==="Employee" && (v.empStatus||"Active")==="Active"),
+    [vendors]);
+  const fixed = employees.filter(v => (v.payType||"Fixed") !== "Attendance-based");
+  const variable = employees.filter(v => (v.payType||"Fixed") === "Attendance-based");
+
+  const monthAttendance = useMemo(
+    () => (attendance||[]).filter(a => a.month === month),
+    [attendance, month]);
+
+  const rows = useMemo(() => employees.map(v => {
+    const isVar = (v.payType||"Fixed") === "Attendance-based";
+    const att = isVar ? monthAttendance.find(a => a.vendorId === v.id) : null;
+    const noSalary = !Number(v.salary);
+    const missingAttendance = isVar && !att;
+    const amount = isVar
+      ? (att ? computeAttendancePay(v.salary, month, att.daysPresent) : 0)
+      : Number(v.salary||0);
+    const already = (reqs||[]).find(r => r.vendorId === v.id && r.salaryMonth === month);
+    const eligible = !noSalary && !missingAttendance && !already && amount > 0;
+    return { v, isVar, att, noSalary, missingAttendance, amount, already, eligible };
+  }), [employees, monthAttendance, reqs, month]);
+
+  const totalFixed = rows.filter(r=>!r.isVar).reduce((s,r)=>s+r.amount, 0);
+  const totalVar = rows.filter(r=>r.isVar && r.att).reduce((s,r)=>s+r.amount, 0);
+  const pendingAttendance = rows.filter(r=>r.missingAttendance).length;
+  const noSalaryCount = rows.filter(r=>r.noSalary).length;
+  const eligibleRows = rows.filter(r=>r.eligible);
+
+  function ensureSalaryCategory(){
+    const cats = (lists && lists.categories) || [];
+    if (!cats.includes("Salary")) addToList(lists, setLists, "category", "Salary");
+  }
+
+  function genRecord(row, base){
+    const v = row.v;
+    return {
+      ...emptyReq, id: uid(), refNo: nextRefNo(base, todayStr()), date: todayStr(),
+      site: (v.sites && v.sites.length===1) ? v.sites[0] : "",
+      category: "Salary", subCategory: "",
+      vendorId: v.id, name: v.name, amount: row.amount,
+      description: row.isVar
+        ? `Salary — ${monthLabel(month)} · ${row.att.daysPresent} of ${daysInMonth(month)} day(s) present`
+        : `Salary — ${monthLabel(month)} (fixed)`,
+      paymentStatus:"Pending", accNo: v.accNo||"", ifsc: v.ifsc||"",
+      exported:false, createdAt: Date.now(), salaryMonth: month,
+    };
+  }
+
+  function generateOne(row){
+    if (!row.eligible) return;
+    ensureSalaryCategory();
+    setReqs([...reqs, genRecord(row, reqs)]);
+    showToast(`Requisition raised for ${row.v.name} — ₹${fmtINR(row.amount)}`);
+  }
+
+  function generateAll(){
+    if (eligibleRows.length === 0) { showToast("Nothing to generate", "error"); return; }
+    const total = eligibleRows.reduce((s,r)=>s+r.amount,0);
+    if (!confirm(`Raise ${eligibleRows.length} pending requisition(s) for ${monthLabel(month)} totalling ₹${fmtINR(total)}?`)) return;
+    ensureSalaryCategory();
+    let out = [...reqs];
+    eligibleRows.forEach(row => { out = [...out, genRecord(row, out)]; });
+    setReqs(out);
+    showToast(`${eligibleRows.length} requisition(s) raised for ${monthLabel(month)}`);
+  }
+
+  function deleteAttendance(a){
+    if (!confirm(`Remove this attendance record for ${a.name}, ${monthLabel(a.month)}? Their pay for this month will show as not-yet-imported until you re-import it.`)) return;
+    setAttendance((attendance||[]).filter(x => x.id !== a.id));
+    showToast("Removed");
+  }
+
+  return (
+    <div>
+      <button onClick={()=>goTo("dashboard")}
+        style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
+        <Icon name="close" size={16} /> Back to dashboard
+      </button>
+
+      <div style={{ background:GRAD_INK, borderRadius:20, padding:18, marginBottom:14, boxShadow:SHADOW_LG }}>
+        <div style={{ fontSize:11.5, fontWeight:600, color:"#8FA0BC", textTransform:"uppercase", letterSpacing:"0.08em" }}>
+          Payroll
+        </div>
+        <div style={{ fontSize:18, fontWeight:700, color:"#fff", marginTop:4 }}>Monthly salary run</div>
+        <div style={{ fontSize:12.5, color:"#8FA0BC", marginTop:6, lineHeight:1.55 }}>
+          Fixed-pay employees (e.g. top management) get their full Monthly Salary every month. Attendance-based
+          employees are paid Monthly Salary ÷ days in that month × days present — import the month's attendance
+          from Excel first, then raise the requisitions below.
+        </div>
+      </div>
+
+      <Field label="Month">
+        <input type="month" style={{ ...inputStyle, fontWeight:700 }} value={month} onChange={e=>setMonth(e.target.value)} />
+      </Field>
+
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:14 }}>
+        <div style={{ background:SURFACE, borderRadius:20, padding:16, border:`1px solid ${SAND}`, boxShadow:SHADOW }}>
+          <div style={{ fontSize:12, fontWeight:500, color:MUTED }}>Fixed pay</div>
+          <div style={{ fontSize:20, fontWeight:700, color:INK }}>₹{fmtINR(totalFixed)}</div>
+          <div style={{ fontSize:11, color:MUTED, marginTop:2 }}>{fixed.length} employee(s)</div>
+        </div>
+        <div style={{ background:SURFACE, borderRadius:20, padding:16, border:`1px solid ${SAND}`, boxShadow:SHADOW }}>
+          <div style={{ fontSize:12, fontWeight:500, color:MUTED }}>Attendance-based</div>
+          <div style={{ fontSize:20, fontWeight:700, color:INK }}>₹{fmtINR(totalVar)}</div>
+          <div style={{ fontSize:11, color:MUTED, marginTop:2 }}>{variable.length} employee(s) · {monthAttendance.length} imported</div>
+        </div>
+      </div>
+
+      {(pendingAttendance > 0 || noSalaryCount > 0) && (
+        <div style={{ background:"#FFF7ED", border:"1px solid #FCD9A8", borderRadius:16, padding:14, marginBottom:14 }}>
+          <div style={{ display:"flex", gap:8, alignItems:"flex-start" }}>
+            <Icon name="alert" size={18} color={AMBER} />
+            <div style={{ fontSize:13, color:INK, lineHeight:1.6 }}>
+              {noSalaryCount > 0 && <div>{noSalaryCount} employee(s) have no Monthly Salary set — add it on their ledger first.</div>}
+              {pendingAttendance > 0 && <div>{pendingAttendance} attendance-based employee(s) have no attendance imported for {monthLabel(month)} yet — they're skipped until you import it.</div>}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div style={{ display:"flex", flexDirection:"column", gap:10, marginBottom:16 }}>
+        <BigButton icon="check" label={`Generate ${monthLabel(month)} payroll (${eligibleRows.length})`}
+          onClick={generateAll} tone="amber" full disabled={eligibleRows.length===0} />
+        <button onClick={()=>openImport("attendance")}
+          style={{ borderRadius:16, padding:"14px 8px", fontSize:14, fontWeight:600, background:SAND, color:INK, border:"none", cursor:"pointer" }}>
+          Import attendance from Excel
+        </button>
+      </div>
+
+      <SectionLabel>Fixed pay</SectionLabel>
+      {fixed.length === 0 ? <EmptyState text="No fixed-pay employees. Set Pay Type on the employee's ledger." /> : (
+        <div style={{ display:"flex", flexDirection:"column", gap:8, marginBottom:16 }}>
+          {rows.filter(r=>!r.isVar).map(row => <PayrollRow key={row.v.id} row={row} month={month} onGenerate={()=>generateOne(row)} />)}
+        </div>
+      )}
+
+      <SectionLabel>Attendance-based</SectionLabel>
+      {variable.length === 0 ? <EmptyState text="No attendance-based employees. Set Pay Type to Attendance-based on an employee's ledger." /> : (
+        <div style={{ display:"flex", flexDirection:"column", gap:8, marginBottom:16 }}>
+          {rows.filter(r=>r.isVar).map(row => <PayrollRow key={row.v.id} row={row} month={month} onGenerate={()=>generateOne(row)} />)}
+        </div>
+      )}
+
+      <button onClick={()=>setShowRecords(!showRecords)}
+        style={{ display:"flex", alignItems:"center", gap:6, fontSize:13, fontWeight:600, color:MUTED, background:"none", border:"none", cursor:"pointer", marginBottom:8 }}>
+        {showRecords ? "Hide" : "Show"} imported attendance records for {monthLabel(month)} ({monthAttendance.length})
+      </button>
+      {showRecords && (
+        monthAttendance.length === 0 ? <EmptyState text="No attendance imported for this month yet." /> : (
+          <div style={{ display:"flex", flexDirection:"column", gap:6, marginBottom:20 }}>
+            {monthAttendance.map(a => (
+              <div key={a.id} style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+                background:SURFACE, borderRadius:12, padding:"10px 14px", border:`1px solid ${SAND}` }}>
+                <div style={{ fontSize:13, color:INK }}>{a.name} — {a.daysPresent} day(s) present</div>
+                <button onClick={()=>deleteAttendance(a)} style={{ background:"none", border:"none", cursor:"pointer", color:RED }}>
+                  <Icon name="trash" size={16} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+function PayrollRow({ row, month, onGenerate }){
+  const { v, isVar, att, noSalary, missingAttendance, amount, already, eligible } = row;
+  return (
+    <div style={{ background:SURFACE, borderRadius:20, padding:16, border:`1px solid ${SAND}`, boxShadow:SHADOW }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:10 }}>
+        <div style={{ flex:1, minWidth:0 }}>
+          <div style={{ fontWeight:700, color:INK }}>{v.name}</div>
+          <div style={{ fontSize:12, color:MUTED, marginTop:3 }}>
+            {v.designation || "No designation set"}
+            {isVar && att ? ` · ${att.daysPresent} of ${daysInMonth(month)} day(s) present` : ""}
+          </div>
+          {noSalary && <div style={{ fontSize:12, color:RED, marginTop:4 }}>No Monthly Salary set on this ledger</div>}
+          {missingAttendance && <div style={{ fontSize:12, color:AMBER, marginTop:4 }}>Attendance not imported for {monthLabel(month)} yet</div>}
+        </div>
+        <div style={{ textAlign:"right" }}>
+          <div style={{ fontWeight:700, color:INK }}>{amount ? `₹${fmtINR(amount)}` : "—"}</div>
+          {already ? (
+            <div style={{ fontSize:11, color:GREEN, fontWeight:600, marginTop:6 }}>Already raised · {already.refNo}</div>
+          ) : (
+            <button onClick={onGenerate} disabled={!eligible}
+              style={{ marginTop:6, borderRadius:10, padding:"6px 12px", fontSize:12, fontWeight:700,
+                background: eligible ? AMBER : SAND, color: eligible ? "#fff" : MUTED, border:"none",
+                cursor: eligible ? "pointer" : "default" }}>
+              Generate
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ================= REPORTS: MONTHLY STATEMENT & SITE SUMMARY ================= */
 function monthLabel(ym){
   if (!ym) return "";
@@ -11328,6 +11608,15 @@ const EMPLOYEE_TEMPLATE = [
   { key:"bankName",    headers:["Bank Name","Bank"] },
   { key:"accNo",       headers:["A/c No.","Account No.","Account No","Account Number","Bank A/C"] },
   { key:"ifsc",        headers:["IFSC Code","IFSC"], upper:true },
+  { key:"payType",     headers:["Pay Type","PayType","Salary Type","Payment Type"] },
+];
+
+const ATTENDANCE_TEMPLATE = [
+  { key:"id",            headers:["ID","Id","Record ID","RecordID"] },
+
+  { key:"monthRaw",      headers:["Month","Salary Month","Period","Attendance Month"], required:true },
+  { key:"employeeName",  headers:["Employee","Name","Employee Name","Staff Name"], required:true },
+  { key:"daysPresent",   headers:["Days Present","Present Days","Days Worked","Attendance","Present"], number:true, required:true },
 ];
 
 const RECURRING_TEMPLATE = [
@@ -11351,7 +11640,7 @@ const RECURRING_TEMPLATE = [
 
 function downloadTemplate(kind){
   const tpl = kind === "vendors" ? VENDOR_TEMPLATE : kind === "recurring" ? RECURRING_TEMPLATE
-            : kind === "employees" ? EMPLOYEE_TEMPLATE : kind === "expenses" ? EXPENSE_TEMPLATE : kind === "cash" ? CASH_TEMPLATE : kind === "machinery" ? MACHINE_TEMPLATE : kind === "diesel" ? DIESEL_TEMPLATE : kind === "utilities" ? UTILITY_TEMPLATE : kind === "register" ? REGISTER_TEMPLATE : REQ_TEMPLATE;
+            : kind === "employees" ? EMPLOYEE_TEMPLATE : kind === "expenses" ? EXPENSE_TEMPLATE : kind === "cash" ? CASH_TEMPLATE : kind === "machinery" ? MACHINE_TEMPLATE : kind === "diesel" ? DIESEL_TEMPLATE : kind === "utilities" ? UTILITY_TEMPLATE : kind === "register" ? REGISTER_TEMPLATE : kind === "attendance" ? ATTENDANCE_TEMPLATE : REQ_TEMPLATE;
   const headers = tpl.filter(f => f.key !== "id").map(f => f.headers[0]);
   if (kind === "register") {
     const exR = ["PR-202508-0001", todayStr(), "Site A", "Materials", "Cement", "Shree Steel Traders",
@@ -11415,12 +11704,23 @@ function downloadTemplate(kind){
   if (kind === "employees") {
     const ex = ["Ramesh Kumar","EMP001","Site Supervisor","Operations","Site A","Active","On Roll",
                 "2023-04-01","",32000,"9876543210","ramesh@example.com","AAAAA0000A","100200300400","1234567890",
-                "HDFC Bank","50100123456789","HDFC0001234"];
+                "HDFC Bank","50100123456789","HDFC0001234","Fixed"];
     const wsE = XLSX.utils.aoa_to_sheet([headers, ex]);
     wsE["!cols"] = headers.map(h => ({ wch: Math.max(16, h.length + 4) }));
     const wbE = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wbE, wsE, "Employees");
     XLSX.writeFile(wbE, "Template_Employees.xlsx");
+    return;
+  }
+  if (kind === "attendance") {
+    const thisMonth = todayStr().slice(0,7);
+    const exA1 = [thisMonth, "Ramesh Kumar", 26];
+    const exA2 = [thisMonth, "Suresh Traders", 24];
+    const wsA = XLSX.utils.aoa_to_sheet([headers, exA1, exA2]);
+    wsA["!cols"] = headers.map(h => ({ wch: Math.max(16, h.length + 4) }));
+    const wbA = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wbA, wsA, "Attendance");
+    XLSX.writeFile(wbA, "Template_Attendance.xlsx");
     return;
   }
   if (kind === "recurring") {
@@ -11443,7 +11743,7 @@ function downloadTemplate(kind){
   XLSX.writeFile(wb, kind === "vendors" ? "Template_Vendors.xlsx" : "Template_Requisitions.xlsx");
 }
 
-function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, reqs, setReqs, recurring, setRecurring, expenses, setExpenses, cards, setCards, cashTxns, setCashTxns, machines, setMachines, diesel, setDiesel, utilities, setUtilities, lists, setLists, showToast, goTo }){
+function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, reqs, setReqs, recurring, setRecurring, expenses, setExpenses, cards, setCards, cashTxns, setCashTxns, machines, setMachines, diesel, setDiesel, utilities, setUtilities, attendance, setAttendance, lists, setLists, showToast, goTo }){
   const [mapping, setMapping] = useState(null);   // column-mapping step
   const [preview, setPreview] = useState(null);   // final confirm step
   const [skip, setSkip] = useState(new Set());
@@ -11480,7 +11780,7 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
         return o;
       });
 
-    const tpl = kind === "vendors" ? VENDOR_TEMPLATE : kind === "recurring" ? RECURRING_TEMPLATE : kind === "employees" ? EMPLOYEE_TEMPLATE : kind === "expenses" ? EXPENSE_TEMPLATE : kind === "cash" ? CASH_TEMPLATE : kind === "machinery" ? MACHINE_TEMPLATE : kind === "diesel" ? DIESEL_TEMPLATE : kind === "utilities" ? UTILITY_TEMPLATE : kind === "register" ? REGISTER_TEMPLATE : REQ_TEMPLATE;
+    const tpl = kind === "vendors" ? VENDOR_TEMPLATE : kind === "recurring" ? RECURRING_TEMPLATE : kind === "employees" ? EMPLOYEE_TEMPLATE : kind === "expenses" ? EXPENSE_TEMPLATE : kind === "cash" ? CASH_TEMPLATE : kind === "machinery" ? MACHINE_TEMPLATE : kind === "diesel" ? DIESEL_TEMPLATE : kind === "utilities" ? UTILITY_TEMPLATE : kind === "register" ? REGISTER_TEMPLATE : kind === "attendance" ? ATTENDANCE_TEMPLATE : REQ_TEMPLATE;
     const auto = {};
     tpl.forEach(f => {
       const hit = headers.find(h => f.headers.some(cand => normKey(cand) === normKey(h)));
@@ -11515,7 +11815,7 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
 
   function buildPreview(){
     const { kind, dataRows, map, fileName } = mapping;
-    const tpl = kind === "vendors" ? VENDOR_TEMPLATE : kind === "recurring" ? RECURRING_TEMPLATE : kind === "employees" ? EMPLOYEE_TEMPLATE : kind === "expenses" ? EXPENSE_TEMPLATE : kind === "cash" ? CASH_TEMPLATE : kind === "machinery" ? MACHINE_TEMPLATE : kind === "diesel" ? DIESEL_TEMPLATE : kind === "utilities" ? UTILITY_TEMPLATE : kind === "register" ? REGISTER_TEMPLATE : REQ_TEMPLATE;
+    const tpl = kind === "vendors" ? VENDOR_TEMPLATE : kind === "recurring" ? RECURRING_TEMPLATE : kind === "employees" ? EMPLOYEE_TEMPLATE : kind === "expenses" ? EXPENSE_TEMPLATE : kind === "cash" ? CASH_TEMPLATE : kind === "machinery" ? MACHINE_TEMPLATE : kind === "diesel" ? DIESEL_TEMPLATE : kind === "utilities" ? UTILITY_TEMPLATE : kind === "register" ? REGISTER_TEMPLATE : kind === "attendance" ? ATTENDANCE_TEMPLATE : REQ_TEMPLATE;
     const missingRequired = tpl.filter(f => f.required && !map[f.key]);
     if (missingRequired.length) {
       showToast(`Choose a column for ${missingRequired.map(f=>f.headers[0]).join(", ")}`, "error");
@@ -11778,6 +12078,11 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
           out.rollType = (rt.indexOf("off")>=0 || rt.indexOf("contract")>=0 || rt.indexOf("agency")>=0 || rt.indexOf("casual")>=0)
             ? "Off Roll" : "On Roll";
         }
+        if (out.payType) {
+          const pt = String(out.payType).toLowerCase();
+          out.payType = (pt.indexOf("attend")>=0 || pt.indexOf("variable")>=0 || pt.indexOf("daily")>=0)
+            ? "Attendance-based" : "Fixed";
+        }
         const idHit = byId(vendors, out.id);
         if (idHit) { toUpdate.push({ existing:idHit, data:out, rowNum:i+offset }); return; }
         const existing = vendors.find(v =>
@@ -11790,8 +12095,36 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
         } else {
           toAdd.push({ data:{ ...emptyVendor, ...out, ledgerType:"Employee",
             empStatus: out.empStatus || "Active", rollType: out.rollType || "On Roll",
+            payType: out.payType || "Fixed",
             sites: siteList, id: uid() }, rowNum:i+offset });
         }
+        return;
+      }
+
+      if (kind === "attendance") {
+        const empName = String(out.employeeName || "").trim();
+        delete out.employeeName;
+        out.month = parseMonthCell(out.monthRaw);
+        delete out.monthRaw;
+        if (!out.month) {
+          errors.push({ rowNum:i+offset, why:`could not read the month "${String(row[map.monthRaw]||"")}"` });
+          return;
+        }
+        const emp = vendors.find(v => String(v.name||"").trim().toLowerCase() === empName.toLowerCase());
+        if (!emp) {
+          errors.push({ rowNum:i+offset, why:`no ledger named "${empName}" — add them as an employee first` });
+          return;
+        }
+        out.vendorId = emp.id;
+        out.name = emp.name;
+        const dim = daysInMonth(out.month);
+        if (Number(out.daysPresent) > dim) {
+          errors.push({ rowNum:i+offset, why:`${out.daysPresent} days present is more than the ${dim} days ${monthLabel(out.month)} has` });
+          return;
+        }
+        const existing = (attendance||[]).find(a => a.month === out.month && a.vendorId === out.vendorId);
+        if (existing) toUpdate.push({ existing, data:out, rowNum:i+offset });
+        else toAdd.push({ data:out, rowNum:i+offset });
         return;
       }
 
@@ -11892,6 +12225,21 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
       showToast("Nothing is ticked", "error");
       return;
     }
+    if (preview.kind === "attendance") {
+      let next = [...(attendance||[])];
+      kept.toUpdate.forEach(u => {
+        next = next.map(x => x.id === u.existing.id ? { ...x, daysPresent: u.data.daysPresent } : x);
+      });
+      const added = kept.toAdd.map((a, idx) => ({
+        id: uid(), month: a.data.month, vendorId: a.data.vendorId, name: a.data.name,
+        daysPresent: a.data.daysPresent, createdAt: Date.now() + idx,
+      }));
+      setAttendance([...next, ...added]);
+      showToast(`${added.length} added, ${kept.toUpdate.length} updated`);
+      setPreview(null); setMapping(null);
+      return;
+    }
+
     if (preview.kind === "utilities") {
       let next = [...(utilities||[])];
       kept.toUpdate.forEach(u => {
@@ -12256,7 +12604,7 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
 
   /* ================= RENDER: confirm step ================= */
   if (preview) {
-    const label = preview.kind === "vendors" ? "ledger" : preview.kind === "recurring" ? "rental/installment" : preview.kind === "employees" ? "employee" : preview.kind === "expenses" ? "expense" : preview.kind === "cash" ? "cash entry" : preview.kind === "machinery" ? "machine" : preview.kind === "diesel" ? "diesel entry" : preview.kind === "utilities" ? "utility bill" : preview.kind === "register" ? "payment" : "requisition";
+    const label = preview.kind === "vendors" ? "ledger" : preview.kind === "recurring" ? "rental/installment" : preview.kind === "employees" ? "employee" : preview.kind === "expenses" ? "expense" : preview.kind === "cash" ? "cash entry" : preview.kind === "machinery" ? "machine" : preview.kind === "diesel" ? "diesel entry" : preview.kind === "utilities" ? "utility bill" : preview.kind === "register" ? "payment" : preview.kind === "attendance" ? "attendance record" : "requisition";
     // Rows with no card named in the sheet fall back to whichever card was chosen
     // on the mapping screen. Show that card's name here too, so the preview never
     // looks blank for rows that will still land on a real card.
@@ -12441,6 +12789,8 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
                     </span>
                   : preview.kind==="employees"
                   ? <span><strong>{a.data.name}</strong>{a.data.empCode?` · ${a.data.empCode}`:""}{a.data.designation?` · ${a.data.designation}`:""}{a.data.salary?` · ₹${fmtINR(a.data.salary)}`:""}</span>
+                  : preview.kind==="attendance"
+                  ? <span><strong>{a.data.name}</strong> · {monthLabel(a.data.month)} · {a.data.daysPresent} day{a.data.daysPresent===1?"":"s"} present</span>
                   : preview.kind==="recurring"
                   ? <span><strong>{a.data.name}</strong> · ₹{fmtINR(a.data.amount)} · {a.data.frequency} · due {fmtDate(a.data.nextDueDate)}
                       {a.data.payTo ? <span style={{ color:MUTED }}> · {a.data.payTo}</span> : null}
@@ -12465,7 +12815,7 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
           <div style={{ background:SURFACE, borderRadius:16, padding:16, marginBottom:16, border:`1.5px solid ${AMBER}` }}>
             <div style={{ fontWeight:700, color:AMBER, fontSize:14, marginBottom:6 }}>Already exists — will be updated ({preview.toUpdate.length})</div>
             <div style={{ fontSize:12, color:MUTED, marginBottom:10, lineHeight:1.5 }}>
-              Matched {preview.kind==="vendors" ? "on GSTIN or name" : preview.kind==="recurring" ? "on name" : preview.kind==="employees" ? "on employee code or name" : preview.kind==="machinery" ? "on registration number or name" : "on Ref No."}. Blank cells in your sheet are ignored, so nothing already saved gets wiped.
+              Matched {preview.kind==="vendors" ? "on GSTIN or name" : preview.kind==="recurring" ? "on name" : preview.kind==="employees" ? "on employee code or name" : preview.kind==="machinery" ? "on registration number or name" : preview.kind==="attendance" ? "on employee and month" : "on Ref No."}. Blank cells in your sheet are ignored, so nothing already saved gets wiped.
             </div>
             <button onClick={()=>setSkip(prev => {
                 const n = new Set(prev);
@@ -12492,7 +12842,8 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
                   {!skip.has("u"+i) && <Icon name="check" size={11} color="#fff" />}
                 </div>
                 <span>Row {u.rowNum}: <strong>{u.data.name || u.existing.name}</strong>
-                  {u.data.amount ? ` · ₹${fmtINR(u.data.amount)}` : ""}</span>
+                  {u.data.amount ? ` · ₹${fmtINR(u.data.amount)}` : ""}
+                  {preview.kind==="attendance" ? ` · ${monthLabel(u.data.month)} · ${u.data.daysPresent} day${u.data.daysPresent===1?"":"s"} present (was ${u.existing.daysPresent})` : ""}</span>
               </div>
             ))}
           </div>
@@ -12528,7 +12879,7 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
 
   /* ================= RENDER: column matching step ================= */
   if (mapping) {
-    const tpl = mapping.kind === "vendors" ? VENDOR_TEMPLATE : mapping.kind === "recurring" ? RECURRING_TEMPLATE : mapping.kind === "employees" ? EMPLOYEE_TEMPLATE : mapping.kind === "expenses" ? EXPENSE_TEMPLATE : mapping.kind === "cash" ? CASH_TEMPLATE : mapping.kind === "machinery" ? MACHINE_TEMPLATE : mapping.kind === "diesel" ? DIESEL_TEMPLATE : mapping.kind === "utilities" ? UTILITY_TEMPLATE : mapping.kind === "register" ? REGISTER_TEMPLATE : REQ_TEMPLATE;
+    const tpl = mapping.kind === "vendors" ? VENDOR_TEMPLATE : mapping.kind === "recurring" ? RECURRING_TEMPLATE : mapping.kind === "employees" ? EMPLOYEE_TEMPLATE : mapping.kind === "expenses" ? EXPENSE_TEMPLATE : mapping.kind === "cash" ? CASH_TEMPLATE : mapping.kind === "machinery" ? MACHINE_TEMPLATE : mapping.kind === "diesel" ? DIESEL_TEMPLATE : mapping.kind === "utilities" ? UTILITY_TEMPLATE : mapping.kind === "register" ? REGISTER_TEMPLATE : mapping.kind === "attendance" ? ATTENDANCE_TEMPLATE : REQ_TEMPLATE;
     const sample = mapping.dataRows[0] || {};
     return (
       <div>
@@ -12626,6 +12977,7 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
     { kind:"cash",         title:"Cash & Card",          desc:"Works with a plain cash book too - Sr. No., Date, Voucher No., Vendor, Sub-Category, Description, Debit, Credit and a running balance. Debit is money out, Credit is money in. Blank dates follow the day above, and the closing balance is checked against yours." },
     { kind:"machinery",    title:"Machinery & Vehicles", desc:"Owned, rented and instalment machines. Rented machines create an Owner ledger automatically." },
     { kind:"utilities",    title:"Utilities",            desc:"Electricity, water, internet and phone bills by month, with what was billed, what you paid, and any card charge." },
+    { kind:"attendance",   title:"Attendance",           desc:"Days present per employee per month, used to work out that month's pay for attendance-based staff (Payroll → Pay Type). One row per employee per month - the employee must already exist as a ledger, and re-importing the same employee and month updates it rather than duplicating." },
     { kind:"diesel",       title:"Diesel",               desc:"Purchases into site stock and issues to machines, in one sheet with a Type column. Machines named in the sheet are created if missing." },
   ];
   const focused = BOXES.find(x => x.kind === focusKind);
@@ -12823,6 +13175,83 @@ function excelToDateStr(v){
   }
   const parsed = new Date(str);
   return isNaN(parsed) ? "" : parsed.toISOString().slice(0,10);
+}
+
+/* ---------- month parsing, for Attendance import ----------
+   Deliberately does not lean on JS's native Date parsing for month-name text
+   ("Aug-26" parses as a bizarre wrong date in plain new Date()) - every case
+   is matched by hand so a bad guess never silently feeds into a salary figure. */
+const MONTH_NAME_MAP = {
+  jan:1, january:1, feb:2, february:2, mar:3, march:3, apr:4, april:4,
+  may:5, jun:6, june:6, jul:7, july:7, aug:8, august:8,
+  sep:9, sept:9, september:9, oct:10, october:10, nov:11, november:11, dec:12, december:12,
+};
+function excelSerialToDate(n){
+  const d = new Date(Math.round((n - 25569) * 86400 * 1000));
+  return isNaN(d) ? null : d;
+}
+function parseMonthCell(v){
+  if (v === undefined || v === null || v === "") return "";
+  if (typeof v === "number") {
+    const d = excelSerialToDate(v);
+    return d ? `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}` : "";
+  }
+  const str = String(v).trim();
+  if (!str) return "";
+
+  let m = str.match(/^(\d{4})-(\d{1,2})$/);                          // 2026-08
+  if (m) return `${m[1]}-${m[2].padStart(2,"0")}`;
+
+  if (/^\d{5}(\.\d+)?$/.test(str)) {                                  // Excel serial as text
+    const d = excelSerialToDate(Number(str));
+    if (d) return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}`;
+  }
+
+  m = str.match(/^(\d{4})-(\d{2})-(\d{2})/);                          // full ISO date
+  if (m) return `${m[1]}-${m[2]}`;
+
+  m = str.match(/^([A-Za-z]{3,9})[\s\-,\/]+(\d{2,4})$/);              // "August 2026", "Aug-26"
+  if (m) {
+    const mon = MONTH_NAME_MAP[m[1].toLowerCase()];
+    if (mon) {
+      let y = m[2];
+      if (y.length === 2) y = "20" + y;
+      return `${y}-${String(mon).padStart(2,"0")}`;
+    }
+  }
+  m = str.match(/^(\d{4})[\s\-,\/]+([A-Za-z]{3,9})$/);                // "2026 August"
+  if (m) {
+    const mon = MONTH_NAME_MAP[m[2].toLowerCase()];
+    if (mon) return `${m[1]}-${String(mon).padStart(2,"0")}`;
+  }
+  m = str.match(/^(\d{1,2})[\/\-](\d{4})$/);                          // "08/2026"
+  if (m) {
+    const mm = Number(m[1]);
+    if (mm >= 1 && mm <= 12) return `${m[2]}-${String(mm).padStart(2,"0")}`;
+  }
+  m = str.match(/^(\d{1,2})[\/\-](\d{2})$/);                          // "08/26"
+  if (m) {
+    const mm = Number(m[1]);
+    if (mm >= 1 && mm <= 12) return `20${m[2]}-${String(mm).padStart(2,"0")}`;
+  }
+  m = str.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/);       // a specific date, e.g. "1-8-2026"
+  if (m) {
+    let [, d, mo, y] = m;
+    if (y.length === 2) y = "20" + y;
+    if (Number(mo) >= 1 && Number(mo) <= 12) return `${y}-${String(mo).padStart(2,"0")}`;
+  }
+  return ""; // unrecognised - the row is flagged rather than guessed at
+}
+function daysInMonth(monthKey){
+  const m = String(monthKey||"").match(/^(\d{4})-(\d{2})$/);
+  if (!m) return 30;
+  return new Date(Number(m[1]), Number(m[2]), 0).getDate();
+}
+// Whole rupees - a payslip with paise looks like a mistake, not precision.
+function computeAttendancePay(salary, monthKey, daysPresent){
+  const dim = daysInMonth(monthKey);
+  if (!dim) return 0;
+  return Math.round((Number(salary||0) / dim) * Number(daysPresent||0));
 }
 
 function DirectPaymentForm({ f, setF, vendors, lists, setLists, onCancel, onSave }){

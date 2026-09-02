@@ -209,7 +209,7 @@ exactly as invisible to it as before.
 - **Optional PIN lock** exists under Settings if you want to lock the app on the
   phone — off by default.
 - If the app is ever updated (a new `index.html`), bump `CACHE_NAME` in `sw.js`
-  (currently `v9`) so installed phones pick up the new version instead of a
+  (currently `v10`) so installed phones pick up the new version instead of a
   cached old one, and re-upload everything to the repo.
 
 ## Settings & Backup: smaller Google Drive sync control
@@ -395,3 +395,73 @@ that wizard for this workflow: the plain single-spreadsheet setup above (copy
 the script once, paste it as-is, no folders to fill in) works correctly today
 and is exactly what steps 1–5 use. If multi-site folder scanning is ever
 needed, that's a separate fix.
+
+## Payroll: fixed salaries and attendance-based pay
+
+A new **Payroll** tab handles the two different ways staff get paid, instead
+of typing each month's salary requisition by hand:
+
+- **Fixed** — the employee gets their full **Monthly Salary** every month,
+  no matter what (typically top management / anyone on a flat salary).
+- **Attendance-based** — the employee's pay is different every month,
+  worked out from how many days they were actually present:
+
+  ```
+  that month's pay = Monthly Salary ÷ (actual number of days in that month) × days present
+  ```
+
+  So the same ₹31,000 Monthly Salary works out to a different daily rate in
+  a 31-day August than in a 30-day September — the app always uses the real
+  number of days in the specific month being paid, not a fixed 26 or 30.
+
+**Set each employee's Pay Type once.** Open Ledgers/Employees → edit the
+employee → there's now a **Pay Type** field right under Roll Type, defaulting
+to **Fixed**. Set it to **Attendance-based** for anyone whose pay depends on
+attendance. (Existing employees you haven't touched default to Fixed, so
+nobody's pay changes on its own after this update — go through your
+Attendance-based staff once and switch them over.)
+
+**Get that month's attendance into the app.** Payroll only reads attendance
+you've imported — it does not read attendance from anywhere else. From the
+Payroll tab, tap **Import attendance from Excel**, and fill in a simple sheet
+with one row per employee per month: **Month**, **Employee** (must match an
+existing employee ledger's name exactly), and **Days Present**. The Month
+column accepts pretty much any reasonable way of writing it — `August 2026`,
+`Aug-26`, `08/2026`, `2026-08`, an Excel date, and so on — the app reads it
+correctly either way, and rejects (rather than guesses at) anything it can't
+make sense of. Re-importing the same employee and month again **corrects**
+that record instead of creating a duplicate, so fixing a mis-typed
+attendance figure is just a re-import. An import row is also rejected, with
+a clear reason, if the named employee doesn't exist yet as a ledger, or if
+the days present is more than that month actually has.
+
+**Run payroll.** On the Payroll tab, pick the month (defaults to the current
+one). Fixed employees and Attendance-based employees are listed separately,
+each showing what they're due to be paid this month. Anyone with no Monthly
+Salary set on their ledger, or (for Attendance-based staff) no attendance
+imported yet for that month, is clearly flagged and skipped — fix the ledger
+or import the attendance, and they'll pick up automatically. Tap **Generate**
+on one employee, or **Generate this month's payroll** to raise a Pending
+Requisition for everyone who's ready at once — each one is tagged with the
+month it's for, so trying to generate the same employee's pay again for a
+month already generated is blocked, showing the reference number of the one
+already raised instead of risking a double payment. Generated requisitions
+show up exactly like any other Pending Requisition — Export, mark paid, etc.
+all work the same as before.
+
+**How this interacts with Google Sheets sync (see the section above):** if
+you're also syncing "Payment to be done" from Google Sheets and still typing
+salary rows into that sheet by hand (Category = "Salary"), those come in as
+ordinary Requisitions and are **not** linked to Payroll's month-tracking, so
+Payroll won't know they've already been paid and won't block a duplicate for
+that employee/month. To avoid paying someone twice, pick one path per
+employee: either generate their salary from the Payroll tab each month, or
+keep entering it by hand in the sheet — not both for the same person.
+
+**One thing worth knowing:** the Fixed Cost Summary / Site Summary's
+"Salaries & wages" figure still adds up every active employee's flat
+Monthly Salary figure, same as before this update — including
+Attendance-based staff, at their full salary. Treat that figure as a
+**budgeted ceiling assuming full attendance**, not the actual amount paid
+out that month; the real, attendance-adjusted total is what the Payroll tab
+shows for the month you've selected there.
