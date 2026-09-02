@@ -209,7 +209,7 @@ exactly as invisible to it as before.
 - **Optional PIN lock** exists under Settings if you want to lock the app on the
   phone — off by default.
 - If the app is ever updated (a new `index.html`), bump `CACHE_NAME` in `sw.js`
-  (currently `v17`) so installed phones pick up the new version instead of a
+  (currently `v19`) so installed phones pick up the new version instead of a
   cached old one — and **re-upload all three of `index.html`, `sw.js`, and
   `README.md` together, every time**, even if only one of them actually
   changed. Uploading just `index.html` leaves the live site serving an old
@@ -451,6 +451,18 @@ predates it, see the note at the bottom of this section.)*
    file** (a different file, a different name) instead of overwriting the
    old one — for example if you ever start a fresh workbook for a new year.
    In that case, edit the source, tap **Change**, and pick the new file.
+
+**If your workbook is nested a few folders deep** (e.g. a Drive layout like
+`PW → ERP → PR`), Google's file picker otherwise opens at the very top of
+your whole Drive, forcing you to click through every folder to find it. As
+of v6.19, **Sync from Google Sheets** has an optional **"Starting folder"**
+card near the top: tap it once, pick the folder your workbook actually
+lives in (e.g. `ERP`, or `PR` directly), and every **Choose file**/**Change**
+tap after that opens straight there instead of your Drive's root. This is a
+convenience, not a hard restriction — Google's picker still lets you browse
+elsewhere in Drive from inside it if you ever need to; picking the file
+itself is still what grants the app access, exactly as before. Tap **Clear**
+on that same card to go back to browsing your whole Drive from the top.
 
 **Why "re-save the same file" matters:** picking a file through the picker
 gives the app permission for that one specific file — not a rule like "any

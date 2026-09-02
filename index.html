@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.18";
+const APP_VERSION = "6.19";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -66,6 +66,11 @@ const GOOGLE_DRIVE_PICKER_API_KEY = "AIzaSyABzgqparoHG9wfLMV6QBsvviEoUW_uhyU";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.19", date:"2026-09-02", title:"\"Choose file\" can now start inside a specific folder", items:[
+    "New optional \"Starting folder\" in Sync from Google Sheets: set it once (e.g. your ERP folder) and every Choose file / Change tap opens straight there instead of the top of your whole Drive",
+    "Fixes the picker showing every folder in your Drive when your workbook is nested a few folders deep, like PW -> ERP -> PR - point the starting folder at ERP (or PR) once and it opens right there",
+    "It's a shortcut, not a hard restriction - you can still browse elsewhere in Drive from inside the picker if you ever need to; picking the file itself is still what grants the app access, same as before",
+  ]},
   { v:"6.18", date:"2026-09-02", title:"Sync from Google Sheets now runs automatically when you open the app", items:[
     "Every source with a file already picked is now checked quietly the moment you open the app - no more opening Sync from Google Sheets and tapping Sync now yourself every time",
     "If it finds anything new, you'll see a green banner on the Overview screen - \"Synced from Google Sheets - N rows ready to review\" - tap it to see the same preview screen as always and decide whether to Import",
@@ -2331,12 +2336,18 @@ function ERPApp(){
     }
   }, [driveGetFreshToken, driveFileId, driveSyncNow, showToast]);
 
-  // Separate folder from the backup one — this is where the user drops the
-  // Excel files (Payment to be done / Office Master) they want the app to
-  // read via Sync from Google Sheets. Reuses the exact same Picker + OAuth
-  // token flow as the backup folder, just points a different, independent
-  // folder id/name at a different purpose. No file gets moved here — this
-  // folder is read-only from the app's point of view.
+  // As of v6.19: this is no longer "the folder the app scans for files" (that
+  // whole mechanism was retired in v6.17 — see driveReadFileById). It's now
+  // just a starting point for the file picker below (driveChooseSourceFile):
+  // when set, that picker opens straight inside this folder instead of
+  // dropping the user at the root of their entire Drive, so someone whose
+  // real file lives a couple of folders deep (e.g. PW → ERP → PR) doesn't
+  // have to hunt through every folder in their account to find it. Google's
+  // Picker only treats this as a *starting* folder, not a hard boundary —
+  // the user can still navigate elsewhere in Drive from inside the picker if
+  // they ever need to (see the README note on this). Reuses the exact same
+  // Picker + OAuth token flow as the backup folder, just points a different,
+  // independent folder id/name at a different purpose.
   const driveChooseImportFolder = useCallback(async () => {
     if (!GOOGLE_DRIVE_PICKER_API_KEY || GOOGLE_DRIVE_PICKER_API_KEY.indexOf("PASTE_YOUR") === 0) {
       showToast("The folder picker isn't set up in this copy of the app yet — see README.md", "error");
@@ -2355,13 +2366,13 @@ function ERPApp(){
           .setOAuthToken(token)
           .setDeveloperKey(GOOGLE_DRIVE_PICKER_API_KEY)
           .setOrigin(window.location.protocol + "//" + window.location.host)
-          .setTitle("Choose the folder your Excel files are dropped into")
+          .setTitle("Choose the folder \"Choose file\" should start inside")
           .setCallback((data) => {
             if (data.action === google.picker.Action.PICKED && data.docs && data.docs[0]) {
               const folder = data.docs[0];
               setDriveImportFolderId(folder.id); saveKey("erp:driveImportFolderId", folder.id);
               setDriveImportFolderName(folder.name || ""); saveKey("erp:driveImportFolderName", folder.name || "");
-              showToast(`Import folder set to ${folder.name || "the chosen folder"}`);
+              showToast(`"Choose file" will now start inside ${folder.name || "that folder"}`);
               resolve();
             } else if (data.action === google.picker.Action.CANCEL) {
               resolve();
@@ -2375,6 +2386,12 @@ function ERPApp(){
     }
   }, [driveGetFreshToken, showToast]);
 
+  const clearDriveImportFolder = useCallback(() => {
+    setDriveImportFolderId(""); saveKey("erp:driveImportFolderId", "");
+    setDriveImportFolderName(""); saveKey("erp:driveImportFolderName", "");
+    showToast(`"Choose file" will browse all of Drive again`);
+  }, [showToast]);
+
   // Lets a "Sync from Google Sheets" source point at one specific Drive file,
   // chosen by hand, instead of a folder + typed file-name guess. Picking a
   // file through Google's own picker is itself the access grant for that
@@ -2386,6 +2403,19 @@ function ERPApp(){
   // {id, name} on pick, or null on cancel/error; the caller (SheetSyncTab's
   // source-editing form) applies it to just that one source, so this
   // doesn't touch any shared/global state the way the two folder pickers do.
+  //
+  // v6.19: if a starting folder has been set (driveImportFolderId, via the
+  // "Starting folder" control in Sync from Google Sheets), the picker opens
+  // inside that folder via DocsView.setParent() instead of at the root of
+  // the whole Drive account — this is what actually fixes "the picker shows
+  // every folder in my Drive" for a real-world layout like PW → ERP → PR:
+  // set the starting folder to ERP (or PR) once, and every "Choose file"/
+  // "Change" tap after that opens right there. Per Google's own reference
+  // docs, setParent only sets the *initial* folder shown — it's a shortcut,
+  // not a hard boundary, so the user can still browse elsewhere in Drive
+  // from inside the picker if they ever need to; it isn't a permissions
+  // restriction (drive.file scope + picking the file itself is still what
+  // actually grants access, exactly as before).
   const driveChooseSourceFile = useCallback(async () => {
     if (!GOOGLE_DRIVE_PICKER_API_KEY || GOOGLE_DRIVE_PICKER_API_KEY.indexOf("PASTE_YOUR") === 0) {
       showToast("The file picker isn't set up in this copy of the app yet — see README.md", "error");
@@ -2399,12 +2429,15 @@ function ERPApp(){
           .setIncludeFolders(true)
           .setSelectFolderEnabled(false)
           .setMimeTypes("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel");
+        if (driveImportFolderId) view.setParent(driveImportFolderId);
         const picker = new google.picker.PickerBuilder()
           .addView(view)
           .setOAuthToken(token)
           .setDeveloperKey(GOOGLE_DRIVE_PICKER_API_KEY)
           .setOrigin(window.location.protocol + "//" + window.location.host)
-          .setTitle("Choose the Excel file for this source")
+          .setTitle(driveImportFolderId
+            ? `Choose the Excel file for this source (starting in ${driveImportFolderName || "your folder"})`
+            : "Choose the Excel file for this source")
           .setCallback((data) => {
             if (data.action === google.picker.Action.PICKED && data.docs && data.docs[0]) {
               const f = data.docs[0];
@@ -2420,7 +2453,7 @@ function ERPApp(){
       showToast("Could not open the file picker — try again", "error");
       return null;
     }
-  }, [driveGetFreshToken, showToast]);
+  }, [driveGetFreshToken, showToast, driveImportFolderId, driveImportFolderName]);
 
   const connectDrive = useCallback(async () => {
     if (!GOOGLE_DRIVE_CLIENT_ID || GOOGLE_DRIVE_CLIENT_ID.indexOf("PASTE_YOUR") === 0) {
@@ -3048,7 +3081,7 @@ function ERPApp(){
     applyRestoredData: applyPayload, openExistingDataFile,
     driveConnected, driveEmail, driveSyncing, driveLastSynced, driveError,
     driveFolderId, driveFolderName,
-    driveImportFolderId, driveImportFolderName, driveChooseImportFolder, driveChooseSourceFile,
+    driveImportFolderId, driveImportFolderName, driveChooseImportFolder, clearDriveImportFolder, driveChooseSourceFile,
     connectDrive, disconnectDrive, driveSyncNow, driveChooseFolder, driveGetFreshToken,
     sheetPreviewQueue,
   };
@@ -9491,7 +9524,8 @@ const FREQUENCIES = ["Monthly","Quarterly","Half-Yearly","Yearly","One-time"];
 
 function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, lists, setLists, showToast, goTo,
   expenses, setExpenses, recurring, setRecurring, sync, busy, previewQueue, syncSheets, testConnection, applyPreview, dismissPreview }){
-  const { driveConnected, connectDrive, driveChooseSourceFile } = sync;
+  const { driveConnected, connectDrive, driveChooseSourceFile,
+    driveImportFolderId, driveImportFolderName, driveChooseImportFolder, clearDriveImportFolder } = sync;
   const [editing, setEditing] = useState(null);
   const [pickingFile, setPickingFile] = useState(false);
   // syncSheets/testConnection/applyPreview and the busy/preview state all
@@ -9789,6 +9823,34 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
             choose the file when prompted. This reuses the same sign-in as Drive backup.
           </p>
           <BigButton icon="check" label="Connect Google Drive" onClick={connectDrive} tone="green" full />
+        </div>
+      )}
+
+      {driveConnected && (
+        <div style={{ background:SURFACE, borderRadius:16, padding:16, marginBottom:14, border:`1px solid ${SAND}` }}>
+          <SectionLabel>Starting folder for "Choose file" (optional)</SectionLabel>
+          <p style={{ fontSize:13, color:MUTED, lineHeight:1.6, marginBottom:12 }}>
+            If your workbook is nested a few folders deep (e.g. PW → ERP → PR), set that folder here
+            once — every "Choose file" / "Change" tap below then opens straight there instead of at
+            the top of your whole Drive. It's just a shortcut, not a restriction — you can still
+            browse elsewhere in Drive from inside the picker if you ever need to.
+          </p>
+          {driveImportFolderId ? (
+            <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10, padding:"10px 12px",
+              borderRadius:12, background:"#E6F7F2", border:`1px solid ${GREEN}` }}>
+              <Icon name="check" size={15} color={GREEN} />
+              <span style={{ fontSize:13, fontWeight:600, color:INK, flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                Starts in: {driveImportFolderName || "chosen folder"}
+              </span>
+            </div>
+          ) : null}
+          <div style={{ display:"grid", gridTemplateColumns: driveImportFolderId ? "1fr 1fr" : "1fr", gap:8 }}>
+            <BigButton icon="download" label={driveImportFolderId ? "Change" : "Set a starting folder"}
+              onClick={driveChooseImportFolder} tone="amber" full />
+            {driveImportFolderId && (
+              <BigButton icon="close" label="Clear" onClick={clearDriveImportFolder} tone="amber" full />
+            )}
+          </div>
         </div>
       )}
 
