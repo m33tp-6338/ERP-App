@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.15";
+const APP_VERSION = "6.16";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -66,6 +66,12 @@ const GOOGLE_DRIVE_PICKER_API_KEY = "AIzaSyABzgqparoHG9wfLMV6QBsvviEoUW_uhyU";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.16", date:"2026-09-02", title:"Sync now looks inside subfolders too", items:[
+    "Sync from Google Sheets used to only look directly inside the import folder you chose - a workbook kept in a subfolder (e.g. an \"ERP\" folder with the actual file a level or two inside it) would never be found, even with the exact right name",
+    "It now searches the chosen folder AND every subfolder inside it automatically - nothing to reorganise, no need to move the file to the top level",
+    "If a file with a matching name exists in more than one place, the most recently modified copy is used, same rule as before",
+    "The \"no file found\" error also now names which subfolder each visible file is actually sitting in, when it lists what it can see",
+  ]},
   { v:"6.15", date:"2026-09-02", title:"Sync error now says exactly what it found", items:[
     "\"No file starting with ... found\" used to look the same whether the import folder was genuinely empty to the app or had files that just didn't match the name you typed - two very different problems",
     "That error now says which of the two it is: either \"0 files found in this folder\" (check you're in the right folder, or the right Google account), or the actual list of file names the app can see there, so you can compare them straight against what you typed",
@@ -1172,28 +1178,61 @@ async function driveApiFetch(url, token, options){
   return res;
 }
 
-// Reads one Excel file straight out of a Google Drive folder via the Drive
-// API — no Apps Script, no deployed URL, no "Anyone" access setting to get
-// wrong. Uses the same OAuth connection already proven reliable for Drive
-// backup. filenameHint is matched case-insensitively against the start of
-// each file's name in the folder (so "Payment to be done.xlsx",
-// "Payment to be done (1).xlsx", etc. all match "Payment to be done").
-// tabHint picks which tab inside that file to read — the app's own Excel
-// template keeps "Payment to be done" and "Office Master" as two tabs in
-// ONE workbook, so both sync sources point at the same file but need
-// different tabs. When tabHint is blank, the first tab that isn't named
-// "Read Me" is used (falling back to the very first tab).
+// Walks the chosen import folder AND every subfolder underneath it (breadth-
+// first, capped so a huge/unexpected Drive structure can't hang the app),
+// collecting every non-folder file it finds. Users organise Drive their own
+// way — e.g. keeping the workbook inside a dated or project subfolder rather
+// than loose in the top-level folder — so only ever looking at the top level
+// meant a perfectly real file would still come back "not found." Each file
+// carries the subfolder path it was found in, purely for the error message
+// below; matching itself doesn't care how deep a file sits.
+async function driveListFilesRecursive(rootFolderId, token){
+  const MAX_DEPTH = 6;      // generous for any real folder structure
+  const MAX_FOLDERS = 60;   // hard stop so a huge/misused folder can't run away
+  const files = [];
+  const queue = [{ id: rootFolderId, depth: 0, path: "" }];
+  let visited = 0;
+  while (queue.length && visited < MAX_FOLDERS) {
+    const { id, depth, path } = queue.shift();
+    visited++;
+    const q = encodeURIComponent(`'${id}' in parents and trashed = false`);
+    const res = await driveApiFetch(
+      `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,modifiedTime,mimeType)&pageSize=200&orderBy=modifiedTime desc`,
+      token
+    );
+    const data = await res.json();
+    (data.files || []).forEach(f => {
+      if (f.mimeType === "application/vnd.google-apps.folder") {
+        if (depth < MAX_DEPTH) queue.push({ id: f.id, depth: depth + 1, path: path ? `${path}/${f.name}` : f.name });
+      } else {
+        files.push({ id: f.id, name: f.name, modifiedTime: f.modifiedTime, path });
+      }
+    });
+  }
+  // Combining per-folder results (each already newest-first on its own)
+  // needs one final global sort so "most recently modified" still means
+  // the same thing across the whole tree, not just within one folder.
+  files.sort((a, b) => String(b.modifiedTime||"").localeCompare(String(a.modifiedTime||"")));
+  return files;
+}
+
+// Reads one Excel file straight out of a Google Drive folder (and its
+// subfolders — see driveListFilesRecursive above) via the Drive API — no
+// Apps Script, no deployed URL, no "Anyone" access setting to get wrong.
+// Uses the same OAuth connection already proven reliable for Drive backup.
+// filenameHint is matched case-insensitively against the start of each
+// file's name (so "Payment to be done.xlsx", "Payment to be done (1).xlsx",
+// etc. all match "Payment to be done"). tabHint picks which tab inside that
+// file to read — the app's own Excel template keeps "Payment to be done"
+// and "Office Master" as two tabs in ONE workbook, so both sync sources
+// point at the same file but need different tabs. When tabHint is blank,
+// the first tab that isn't named "Read Me" is used (falling back to the
+// very first tab).
 async function driveReadImportFile(folderId, filenameHint, token, tabHint){
   if (!folderId) throw new Error("Choose an import folder first.");
   const hint = String(filenameHint || "").trim().toLowerCase();
   if (!hint) throw new Error("This source has no file name to look for.");
-  const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
-  const listRes = await driveApiFetch(
-    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,modifiedTime)&pageSize=200&orderBy=modifiedTime desc`,
-    token
-  );
-  const listData = await listRes.json();
-  const files = listData.files || [];
+  const files = await driveListFilesRecursive(folderId, token);
   const match = files.find(f => String(f.name || "").toLowerCase().startsWith(hint))
     || files.find(f => String(f.name || "").toLowerCase().indexOf(hint) >= 0);
   if (!match) {
@@ -1203,10 +1242,10 @@ async function driveReadImportFile(folderId, filenameHint, token, tabHint){
     // problems with very different fixes. Naming exactly what (if anything)
     // was actually seen turns a guessing game into a one-glance diagnosis.
     if (files.length === 0) {
-      throw new Error(`The import folder looks empty to the app — 0 files found in it. Either the file isn't in this exact folder (check for subfolders, or that you picked the right one), or it's on a different Google account than the one you signed in with here.`);
+      throw new Error(`The import folder — and every subfolder inside it — looks empty to the app, 0 files found. Either you picked the wrong top-level folder, or it's on a different Google account than the one you signed in with here.`);
     }
-    const seen = files.slice(0, 8).map(f => f.name).join(", ") + (files.length > 8 ? `, and ${files.length - 8} more` : "");
-    throw new Error(`No file starting with "${filenameHint}" found. The app can see ${files.length} file(s) in this folder: ${seen}. Check the File name field matches the start of one of those exactly.`);
+    const seen = files.slice(0, 8).map(f => f.path ? `${f.name} (in ${f.path})` : f.name).join(", ") + (files.length > 8 ? `, and ${files.length - 8} more` : "");
+    throw new Error(`No file starting with "${filenameHint}" found, even checking subfolders. The app can see ${files.length} file(s): ${seen}. Check the File name field matches the start of one of those exactly.`);
   }
   const fileRes = await driveApiFetch(
     `https://www.googleapis.com/drive/v3/files/${match.id}?alt=media`, token
