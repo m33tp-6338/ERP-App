@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.16";
+const APP_VERSION = "6.18";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -66,6 +66,19 @@ const GOOGLE_DRIVE_PICKER_API_KEY = "AIzaSyABzgqparoHG9wfLMV6QBsvviEoUW_uhyU";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.18", date:"2026-09-02", title:"Sync from Google Sheets now runs automatically when you open the app", items:[
+    "Every source with a file already picked is now checked quietly the moment you open the app - no more opening Sync from Google Sheets and tapping Sync now yourself every time",
+    "If it finds anything new, you'll see a green banner on the Overview screen - \"Synced from Google Sheets - N rows ready to review\" - tap it to see the same preview screen as always and decide whether to Import",
+    "Nothing is ever added automatically - the preview and the Import tap are still required, exactly as before, this just saves you the trip to fetch the data in the first place",
+    "If nothing new is found, or Drive isn't reachable, it stays completely silent - no error popups from a background check you didn't ask for; a source's Check status card still shows the real reason if something's wrong",
+    "Also re-checks after the app has been sitting in the background for a while and you come back to it (at most once every 20 minutes), so leaving the app open overnight still catches the next morning's sync",
+  ]},
+  { v:"6.17", date:"2026-09-02", title:"Sync now picks the file directly, no folder or typed name", items:[
+    "Each Sync from Google Sheets source now has you pick the actual Excel file straight from Drive, once - no more choosing a folder and typing a file name for the app to search for",
+    "This is more reliable: picking a file through Google's own picker is what grants the app access to it, so there's no more \"the app can't see what's in this folder\" guesswork - it's pointed straight at the exact file",
+    "Re-saving/replacing that same file in Drive keeps working automatically on every sync after this - you only need to pick again if you create a genuinely new file instead of overwriting the old one",
+    "A source set up under an older version keeps its settings but needs its file picked once - it shows a clear \"No file chosen yet\" instead of a confusing error",
+  ]},
   { v:"6.16", date:"2026-09-02", title:"Sync now looks inside subfolders too", items:[
     "Sync from Google Sheets used to only look directly inside the import folder you chose - a workbook kept in a subfolder (e.g. an \"ERP\" folder with the actual file a level or two inside it) would never be found, even with the exact right name",
     "It now searches the chosen folder AND every subfolder inside it automatically - nothing to reorganise, no need to move the file to the top level",
@@ -1178,96 +1191,50 @@ async function driveApiFetch(url, token, options){
   return res;
 }
 
-// Walks the chosen import folder AND every subfolder underneath it (breadth-
-// first, capped so a huge/unexpected Drive structure can't hang the app),
-// collecting every non-folder file it finds. Users organise Drive their own
-// way — e.g. keeping the workbook inside a dated or project subfolder rather
-// than loose in the top-level folder — so only ever looking at the top level
-// meant a perfectly real file would still come back "not found." Each file
-// carries the subfolder path it was found in, purely for the error message
-// below; matching itself doesn't care how deep a file sits.
-async function driveListFilesRecursive(rootFolderId, token){
-  const MAX_DEPTH = 6;      // generous for any real folder structure
-  const MAX_FOLDERS = 60;   // hard stop so a huge/misused folder can't run away
-  const files = [];
-  const queue = [{ id: rootFolderId, depth: 0, path: "" }];
-  let visited = 0;
-  while (queue.length && visited < MAX_FOLDERS) {
-    const { id, depth, path } = queue.shift();
-    visited++;
-    const q = encodeURIComponent(`'${id}' in parents and trashed = false`);
-    const res = await driveApiFetch(
-      `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,modifiedTime,mimeType)&pageSize=200&orderBy=modifiedTime desc`,
-      token
-    );
-    const data = await res.json();
-    (data.files || []).forEach(f => {
-      if (f.mimeType === "application/vnd.google-apps.folder") {
-        if (depth < MAX_DEPTH) queue.push({ id: f.id, depth: depth + 1, path: path ? `${path}/${f.name}` : f.name });
-      } else {
-        files.push({ id: f.id, name: f.name, modifiedTime: f.modifiedTime, path });
-      }
-    });
-  }
-  // Combining per-folder results (each already newest-first on its own)
-  // needs one final global sort so "most recently modified" still means
-  // the same thing across the whole tree, not just within one folder.
-  files.sort((a, b) => String(b.modifiedTime||"").localeCompare(String(a.modifiedTime||"")));
-  return files;
-}
-
-// Reads one Excel file straight out of a Google Drive folder (and its
-// subfolders — see driveListFilesRecursive above) via the Drive API — no
-// Apps Script, no deployed URL, no "Anyone" access setting to get wrong.
-// Uses the same OAuth connection already proven reliable for Drive backup.
-// filenameHint is matched case-insensitively against the start of each
-// file's name (so "Payment to be done.xlsx", "Payment to be done (1).xlsx",
-// etc. all match "Payment to be done"). tabHint picks which tab inside that
-// file to read — the app's own Excel template keeps "Payment to be done"
-// and "Office Master" as two tabs in ONE workbook, so both sync sources
-// point at the same file but need different tabs. When tabHint is blank,
-// the first tab that isn't named "Read Me" is used (falling back to the
-// very first tab).
-async function driveReadImportFile(folderId, filenameHint, token, tabHint){
-  if (!folderId) throw new Error("Choose an import folder first.");
-  const hint = String(filenameHint || "").trim().toLowerCase();
-  if (!hint) throw new Error("This source has no file name to look for.");
-  const files = await driveListFilesRecursive(folderId, token);
-  const match = files.find(f => String(f.name || "").toLowerCase().startsWith(hint))
-    || files.find(f => String(f.name || "").toLowerCase().indexOf(hint) >= 0);
-  if (!match) {
-    // This error used to just say "not found," which looks identical whether
-    // the folder is genuinely empty (from the app's point of view) or has
-    // files that just don't match the name typed in — two very different
-    // problems with very different fixes. Naming exactly what (if anything)
-    // was actually seen turns a guessing game into a one-glance diagnosis.
-    if (files.length === 0) {
-      throw new Error(`The import folder — and every subfolder inside it — looks empty to the app, 0 files found. Either you picked the wrong top-level folder, or it's on a different Google account than the one you signed in with here.`);
-    }
-    const seen = files.slice(0, 8).map(f => f.path ? `${f.name} (in ${f.path})` : f.name).join(", ") + (files.length > 8 ? `, and ${files.length - 8} more` : "");
-    throw new Error(`No file starting with "${filenameHint}" found, even checking subfolders. The app can see ${files.length} file(s): ${seen}. Check the File name field matches the start of one of those exactly.`);
+// Reads one Excel file straight out of Google Drive by its file ID — no
+// Apps Script, no deployed URL, no "Anyone" access setting, and (as of
+// v6.17) no folder-searching or filename-matching either. The file is
+// chosen once, per source, through Google's own file picker (see
+// driveChooseSourceFile in the App component) — picking a file through the
+// Picker is itself what grants this app access to it, which sidesteps the
+// whole earlier question of whether folder-level access extends to files
+// placed in it afterward. Re-saving/replacing the SAME Drive file (same
+// file ID) keeps working automatically on every sync; only creating a
+// brand-new file (a genuinely different ID, e.g. Drive auto-naming a
+// "(1)" copy instead of overwriting) requires picking again in that
+// source's settings. tabHint picks which tab inside the file to read —
+// exact match first, then partial, else an explicit error naming the tabs
+// that do exist. When blank, the first tab that isn't "Read Me" is used.
+async function driveReadFileById(fileId, token, tabHint){
+  if (!fileId) throw new Error("No file has been chosen for this source yet — edit it and tap Choose file.");
+  const metaRes = await driveApiFetch(
+    `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,trashed,modifiedTime`, token
+  );
+  const meta = await metaRes.json();
+  if (meta.trashed) {
+    throw new Error(`"${meta.name || "This file"}" has been deleted (moved to Trash) in Google Drive — edit this source and choose the file again.`);
   }
   const fileRes = await driveApiFetch(
-    `https://www.googleapis.com/drive/v3/files/${match.id}?alt=media`, token
+    `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, token
   );
   const buf = await fileRes.arrayBuffer();
   let wb;
   try {
     wb = XLSX.read(buf, { type: "array", cellDates: false });
   } catch (e) {
-    throw new Error(`"${match.name}" doesn't look like a valid Excel file.`);
+    throw new Error(`"${meta.name}" doesn't look like a valid Excel file — if this was picked as a Google Sheet rather than an uploaded .xlsx, export it to Excel first and pick that copy instead.`);
   }
-  if (!wb.SheetNames.length) throw new Error(`"${match.name}" has no sheets.`);
+  if (!wb.SheetNames.length) throw new Error(`"${meta.name}" has no sheets.`);
   const wantedTab = String(tabHint || "").trim().toLowerCase();
   let sheetName = wantedTab && wb.SheetNames.find(n => n.toLowerCase() === wantedTab);
   if (!sheetName && wantedTab) sheetName = wb.SheetNames.find(n => n.toLowerCase().indexOf(wantedTab) >= 0);
   if (!sheetName && wantedTab) {
-    throw new Error(`"${match.name}" has no tab named "${tabHint}" — found: ${wb.SheetNames.join(", ")}.`);
+    throw new Error(`"${meta.name}" has no tab named "${tabHint}" — found: ${wb.SheetNames.join(", ")}.`);
   }
   if (!sheetName) sheetName = wb.SheetNames.find(n => n.toLowerCase() !== "read me") || wb.SheetNames[0];
   const ws = wb.Sheets[sheetName];
   const rows = XLSX.utils.sheet_to_json(ws, { defval: "", raw: false });
-  return { ok: true, sheet: sheetName, rows, fileName: match.name, modifiedTime: match.modifiedTime };
+  return { ok: true, sheet: sheetName, rows, fileName: meta.name, modifiedTime: meta.modifiedTime };
 }
 function payloadCounts(d){
   const c = d.counts || {};
@@ -1460,6 +1427,31 @@ function BackupBanner({ sync, goToSettings }){
       <div style={{ flex:1 }}>
         <div style={{ fontSize:13, fontWeight:600, color:INK, lineHeight:1.45 }}>{text}</div>
         <div style={{ fontSize:13, fontWeight:700, color, marginTop:6 }}>{action} →</div>
+      </div>
+    </button>
+  );
+}
+// Shown the moment there's something a background sync check already found
+// and built a preview for (see runAutoSheetSync in ERPApp) — nothing is ever
+// imported without the user tapping into Sync from Google Sheets and hitting
+// Import themselves; this is just letting them know it's ready to look at.
+function SyncReadyBanner({ sync, goToSync }){
+  if (!sync) return null;
+  const q = sync.sheetPreviewQueue || [];
+  if (!q.length) return null;
+  const totalNew = q.reduce((sum, p) => sum + (p.toAdd ? p.toAdd.length : 0) + (p.toUpdate ? p.toUpdate.length : 0), 0);
+  if (!totalNew) return null;
+  return (
+    <button onClick={goToSync}
+      style={{ width:"100%", textAlign:"left", display:"flex", alignItems:"flex-start", gap:10,
+        borderRadius:16, padding:16, marginBottom:16, background:"#E6F7F2", border:`1.5px solid ${GREEN}`, cursor:"pointer" }}>
+      <Icon name="check" color={GREEN} />
+      <div style={{ flex:1 }}>
+        <div style={{ fontSize:13, fontWeight:600, color:INK, lineHeight:1.45 }}>
+          Synced from Google Sheets — {totalNew} row{totalNew===1?"":"s"} ready to review
+          {q.length > 1 ? ` across ${q.length} sources` : ""}.
+        </div>
+        <div style={{ fontSize:13, fontWeight:700, color:GREEN, marginTop:6 }}>Review & import →</div>
       </div>
     </button>
   );
@@ -1953,6 +1945,25 @@ function ReviewRow({ label, value }){
   );
 }
 
+// Used by both a manual "Sync now"/"Check status" tap and the automatic
+// on-open sync check (see runAutoSheetSync in ERPApp) — kept at module
+// level, not inside SheetSyncTab, since both call sites need it and it has
+// no dependency on component state.
+function siteStatsFrom(data){
+  const map = {};
+  (data.files || []).forEach(f => {
+    const k = f.folder || "Unnamed";
+    if (!map[k]) map[k] = { site:k, files:0, rows:0 };
+    map[k].files += 1;
+    map[k].rows += Number(f.rows || 0);
+  });
+  (data.seen || []).forEach(f => {
+    const k = f.site || "Unnamed";
+    if (!map[k]) map[k] = { site:k, files:0, rows:0 };
+  });
+  return Object.values(map);
+}
+
 /* ================= APP ================= */
 function ERPApp(){
   const [tab, setTab] = useState("dashboard");
@@ -2017,6 +2028,24 @@ function ERPApp(){
   const driveTokenRef = React.useRef(null);       // { access_token, expires_at }
   const driveTokenClientRef = React.useRef(null);
   const driveSyncingRef = React.useRef(false);     // guards against overlapping sync calls
+
+  // --- Sync from Google Sheets state (used by SheetSyncTab and by the
+  // automatic on-open check — see runAutoSheetSync further down) ---
+  const [sheetSyncBusy, setSheetSyncBusy] = useState("");
+  const [sheetPreviewQueue, setSheetPreviewQueue] = useState([]); // one queued preview per kind ("requisitions"/"expenses") waiting to be reviewed
+  const autoSyncRanRef = React.useRef(false);
+  const lastAutoSyncAtRef = React.useRef(0);
+  // Always-current mirror of `sheets`, kept in sync by the effect right
+  // below. runAutoSheetSync can call syncSheets twice back-to-back
+  // (Requisitions sources, then Expenses sources) inside the same async
+  // run, only one microtask apart — too fast for a React re-render to land
+  // in between. If syncSheets read the closed-over `sheets` state directly,
+  // the second call's status-merge would overwrite the first call's update
+  // with a stale copy (a lost-update race). Reading/writing this ref
+  // instead — updated synchronously right after each setSheets — keeps
+  // both calls correct regardless of render timing.
+  const sheetsRef = React.useRef(sheets);
+  useEffect(() => { sheetsRef.current = sheets; }, [sheets]);
 
   const showToast = useCallback((message, type="ok") => {
     setToast({ message, type });
@@ -2346,6 +2375,53 @@ function ERPApp(){
     }
   }, [driveGetFreshToken, showToast]);
 
+  // Lets a "Sync from Google Sheets" source point at one specific Drive file,
+  // chosen by hand, instead of a folder + typed file-name guess. Picking a
+  // file through Google's own picker is itself the access grant for that
+  // file — the more reliable, textbook way to use the narrow drive.file
+  // scope, and it sidesteps the whole "does folder access reach files
+  // dropped into it afterward" question the folder-based approach depended
+  // on. Filtered to real Excel files only (not native Google Sheets, which
+  // this app can't read directly — see driveReadFileById). Returns
+  // {id, name} on pick, or null on cancel/error; the caller (SheetSyncTab's
+  // source-editing form) applies it to just that one source, so this
+  // doesn't touch any shared/global state the way the two folder pickers do.
+  const driveChooseSourceFile = useCallback(async () => {
+    if (!GOOGLE_DRIVE_PICKER_API_KEY || GOOGLE_DRIVE_PICKER_API_KEY.indexOf("PASTE_YOUR") === 0) {
+      showToast("The file picker isn't set up in this copy of the app yet — see README.md", "error");
+      return null;
+    }
+    try {
+      const token = await driveGetFreshToken(true); // interactive — must run from this tap
+      await loadPickerLibrary();
+      return await new Promise((resolve) => {
+        const view = new google.picker.DocsView(google.picker.ViewId.SPREADSHEETS)
+          .setIncludeFolders(true)
+          .setSelectFolderEnabled(false)
+          .setMimeTypes("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel");
+        const picker = new google.picker.PickerBuilder()
+          .addView(view)
+          .setOAuthToken(token)
+          .setDeveloperKey(GOOGLE_DRIVE_PICKER_API_KEY)
+          .setOrigin(window.location.protocol + "//" + window.location.host)
+          .setTitle("Choose the Excel file for this source")
+          .setCallback((data) => {
+            if (data.action === google.picker.Action.PICKED && data.docs && data.docs[0]) {
+              const f = data.docs[0];
+              resolve({ id: f.id, name: f.name || "" });
+            } else if (data.action === google.picker.Action.CANCEL) {
+              resolve(null);
+            }
+          })
+          .build();
+        picker.setVisible(true);
+      });
+    } catch (e) {
+      showToast("Could not open the file picker — try again", "error");
+      return null;
+    }
+  }, [driveGetFreshToken, showToast]);
+
   const connectDrive = useCallback(async () => {
     if (!GOOGLE_DRIVE_CLIENT_ID || GOOGLE_DRIVE_CLIENT_ID.indexOf("PASTE_YOUR") === 0) {
       showToast("Google Drive isn't set up in this copy of the app yet — see README.md", "error");
@@ -2482,6 +2558,394 @@ function ERPApp(){
     markDirty();
   }, [showToast, markDirty]);
 
+  // --- Sync from Google Sheets: shared logic ---
+  // Lifted up from SheetSyncTab (rather than kept as local state/functions
+  // there) specifically so an automatic check can run the exact same code
+  // the moment the app opens, without that tab needing to be mounted —
+  // see runAutoSheetSync below. SheetSyncTab receives syncSheets,
+  // testConnection, applyPreview, sheetPreviewQueue and sheetSyncBusy as
+  // props and uses them exactly as it used to use its own local versions.
+  const importToken = useCallback(async () => {
+    let token;
+    try {
+      token = await driveGetFreshToken(!driveConnected);
+    } catch (err) {
+      throw new Error("Could not connect to Google Drive — " + (err.message || String(err)));
+    }
+    if (!token) throw new Error("Could not connect to Google Drive.");
+    return token;
+  }, [driveGetFreshToken, driveConnected]);
+
+  const buildPreview = useCallback((collected, failures, list, fileReport, skippedFiles, seenFiles, notes, silent) => {
+    const kind = (list[0] && list[0].kind) || "requisitions";
+    const tpl = kind === "expenses" ? EXPENSE_TEMPLATE : REQ_TEMPLATE;
+    const headers = [...new Set(collected.flatMap(c => Object.keys(c.row)))]
+      .filter(h => h !== "__file" && h !== "__folder");
+    const map = autoMapHeaders(headers, tpl);
+    const missing = tpl.filter(f => f.required && !map[f.key]);
+    const toAdd = [], duplicates = [], errors = [];
+
+    // Queues (rather than replaces) the result — an automatic check can find
+    // both a Requisitions source and an Expenses source ready at once, and
+    // each gets its own turn in the preview screen. A fresh check for a kind
+    // replaces whatever was still queued for that same kind, so the queue
+    // never shows stale data. When silent (the automatic check, not a tap
+    // on Sync now/Sync all), nothing is queued unless there's actually
+    // something worth the user's attention — no interruption for "nothing
+    // new".
+    function queueResult(entry){
+      const hasSomethingToReview = entry.toAdd.length > 0 || (entry.toUpdate && entry.toUpdate.length > 0);
+      if (silent && !hasSomethingToReview) return;
+      setSheetPreviewQueue(q => [...q.filter(p => p.kind !== kind), entry]);
+    }
+
+    if (kind === "expenses") {
+      // Mirrors ImportTab's own "expenses" row handling (see ImportTab.buildPreview),
+      // kept as its own copy here since this tab intentionally stays append-only —
+      // simpler than the update-merge logic Import from Excel supports.
+      const etypes = (lists && lists.expenseTypes) ? lists.expenseTypes : DEFAULT_LISTS.expenseTypes;
+      const existingKeys = new Set((expenses||[]).map(e =>
+        [e.date || e.periodText, String(e.paidBy||"").toLowerCase(), Number(e.amount||0),
+         String(e.description||"").toLowerCase(), String(e.subCategory||"").toLowerCase()].join("|")));
+      const seenKeys = new Set();
+
+      collected.forEach((c, i) => {
+        const { out, problems } = mapRowGeneric(c.row, tpl, map);
+        if (problems.length) { errors.push({ source:c.source, rowNum:i+2, why:`missing ${problems.join(", ")}` }); return; }
+
+        const raw = String(out.dateRaw || "").trim();
+        delete out.dateRaw;
+        const parsedDate = excelToDateStr(raw);
+        out.date = parsedDate || "";
+        out.periodText = parsedDate ? "" : raw;
+
+        if (!out.expenseType || !etypes.includes(out.expenseType)) {
+          const t = String(out.expenseType||"").toLowerCase();
+          out.expenseType = t.indexOf("travel")>=0 ? "Travel"
+            : t.indexOf("office")>=0 ? "Office"
+            : (t.indexOf("purchase")>=0 || t.indexOf("site")>=0) ? "Site Purchase"
+            : (out.expenseType || etypes[0] || "Site Purchase");
+        }
+        if (out.paidDate && !String(out.settledTo||"").trim()) out.settledTo = out.paidBy || "";
+        if (!out.site) out.site = c.source;
+
+        const k = [out.date || out.periodText, String(out.paidBy||"").toLowerCase(), Number(out.amount||0),
+                   String(out.description||"").toLowerCase(), String(out.subCategory||"").toLowerCase()].join("|");
+        if (existingKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"already in the app" }); return; }
+        if (seenKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"repeated inside this sync" }); return; }
+        seenKeys.add(k);
+        toAdd.push({ data:out, source:c.source });
+      });
+
+      queueResult({ kind, toAdd, toUpdate:[], duplicates, errors, failures, missing, map, headers, list, fileReport, skippedFiles, seenFiles, notes });
+      return;
+    }
+
+    // Nothing already recorded gets added again as a fresh row. A sheet source
+    // rarely carries its own Ref No or UTR (those get assigned once a row lands
+    // in the app), so comparing on those — like importDupKey does for a one-off
+    // Excel import — would never match on a re-sync and let the same row back
+    // in every time. Match on date + site + name + amount + description instead,
+    // which is what a repeated sync of the same sheet will actually reproduce.
+    //
+    // A match isn't always "nothing to do" though: the whole point of syncing
+    // "Payment to be done" (or "Master") more than once is that a row that went
+    // out Pending the first time often comes back later with a Payment Date
+    // filled in. When that happens the matching row already in the app gets
+    // marked Paid instead of being silently skipped — see toUpdate below.
+    const sheetDupKey = (r) => [dupKey(r), String(r.description||"").trim().toLowerCase()].join("|");
+    const existingByKey = new Map(reqs.map(r => [sheetDupKey(r), r]));
+    const seenKeys = new Set();
+    const updatedIds = new Set();
+    const toUpdate = [];
+    // A row that syncs in already paid, and whose Name matches exactly one active
+    // Rent & EMI item, also settles that item — same as generating it by hand
+    // would (advances the due date, counts an instalment). Skipped whenever the
+    // name is ambiguous or matches nothing, so this never guesses wrong.
+    const activeRecurring = (recurring||[]).filter(r => r.active !== false);
+
+    collected.forEach((c, i) => {
+      const { out, problems } = mapRowGeneric(c.row, tpl, map);
+      if (problems.length) { errors.push({ source:c.source, rowNum:i+2, why:`missing ${problems.join(", ")}` }); return; }
+
+      settleRequisitionDates(out);
+      if (!out.site) out.site = c.source;
+
+      const k = sheetDupKey(out);
+      const existing = existingByKey.get(k);
+      if (existing) {
+        const canPromoteToPaid = out.paymentStatus === "Paid"
+          && existing.paymentStatus !== "Paid"
+          && existing.paymentStatus !== "On Hold"
+          && !updatedIds.has(existing.id);
+        if (canPromoteToPaid) {
+          updatedIds.add(existing.id);
+          toUpdate.push({
+            id: existing.id,
+            source: c.source,
+            existing,
+            data: out,
+            patch: {
+              paymentStatus: "Paid",
+              paymentDate: out.paymentDate || existing.paymentDate || out.date,
+              paidFromDateColumn: !!out.paidFromDateColumn,
+              paidDateAssumed: !!out.paidDateAssumed,
+            },
+          });
+        } else {
+          duplicates.push({ data:out, source:c.source, why:"already in the app" });
+        }
+        return;
+      }
+      if (seenKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"repeated inside this sync" }); return; }
+      seenKeys.add(k);
+
+      if (out.paymentStatus === "Paid") {
+        const nameMatches = activeRecurring.filter(r =>
+          String(r.name||"").trim().toLowerCase() === String(out.name||"").trim().toLowerCase());
+        if (nameMatches.length === 1) out.__recurringMatchId = nameMatches[0].id;
+      }
+      toAdd.push({ data:out, source:c.source });
+    });
+
+    queueResult({ kind, toAdd, toUpdate, duplicates, errors, failures, missing, map, headers, list, fileReport, skippedFiles, seenFiles, notes });
+  }, [lists, expenses, reqs, recurring]);
+
+  const syncSheets = useCallback(async (list, opts) => {
+    const silent = !!(opts && opts.silent);
+    if (list.length === 0) { if (!silent) showToast("Add a source first", "error"); return; }
+    const collected = [];
+    const failures = [];
+    const fileReport = [];
+    const skippedFiles = [];
+    const seenFiles = [];
+    const notes = [];
+    const statusById = {};
+    let token;
+    try {
+      token = await importToken();
+    } catch (err) {
+      if (!silent) showToast(err.message || String(err), "error");
+      return;
+    }
+    for (const sh of list) {
+      setSheetSyncBusy(sh.name);
+      try {
+        const data = await driveReadFileById(sh.fileId, token, sh.tab);
+        if (!data || data.ok === false) throw new Error((data && data.error) || "The file could not be read");
+        (data.rows || []).forEach(r => collected.push({ row:r, source: r.__folder || r.__file || sh.name }));
+        if (data.files) fileReport.push(...data.files);
+        if (data.skipped && data.skipped.length) skippedFiles.push(...data.skipped);
+        if (data.seen) seenFiles.push(...data.seen);
+        if (data.notes) notes.push(...data.notes);
+        statusById[sh.id] = {
+          status: (data.rows || []).length > 0 ? "active" : "empty",
+          lastCheck: new Date().toISOString(),
+          lastError: "",
+          siteStats: siteStatsFrom(data),
+          rowCount: (data.rows || []).length,
+        };
+      } catch (err) {
+        failures.push({ name: sh.name, why: err.message || String(err) });
+        statusById[sh.id] = {
+          status: "failed",
+          lastCheck: new Date().toISOString(),
+          lastError: err.message || String(err),
+        };
+      }
+    }
+    setSheetSyncBusy("");
+    if (Object.keys(statusById).length) {
+      const merged = sheetsRef.current.map(x => statusById[x.id] ? { ...x, ...statusById[x.id] } : x);
+      sheetsRef.current = merged; // update synchronously — see the comment on sheetsRef above
+      setSheets(merged);
+    }
+    if (collected.length === 0) {
+      const kind = (list[0] && list[0].kind) || "requisitions";
+      if (!silent) {
+        showToast(failures.length ? failures[0].why : "No rows could be read — see the details", "error");
+        setSheetPreviewQueue(q => [...q.filter(p => p.kind !== kind),
+          { kind, toAdd:[], toUpdate:[], duplicates:[], errors:[], failures, fileReport, skippedFiles, seenFiles, notes, list }]);
+      }
+      return;
+    }
+    buildPreview(collected, failures, list, fileReport, skippedFiles, seenFiles, notes, silent);
+  }, [importToken, sheets, setSheets, showToast, buildPreview]);
+
+  const testConnection = useCallback(async (sh) => {
+    setSheetSyncBusy(sh.name);
+    try {
+      const token = await importToken();
+      const data = await driveReadFileById(sh.fileId, token, sh.tab);
+      if (!data || data.ok === false) throw new Error((data && data.error) || "The file could not be read");
+      const rowCount = (data.rows || []).length;
+      // Uses sheetsRef (not the closed-over sheets state) for the same reason
+      // syncSheets does — see the comment on sheetsRef above: two "Check
+      // status" taps close together (or one running while an auto-sync is
+      // mid-flight) shouldn't let one call's update overwrite the other's.
+      let merged = sheetsRef.current.map(x => x.id === sh.id ? {
+        ...x,
+        status: rowCount > 0 ? "active" : "empty",
+        lastCheck: new Date().toISOString(),
+        lastError: "",
+        siteStats: siteStatsFrom(data),
+        rowCount,
+      } : x);
+      sheetsRef.current = merged;
+      setSheets(merged);
+      showToast(rowCount > 0 ? `Connected — ${rowCount} row(s) available` : "Connected, but no rows found", rowCount > 0 ? "ok" : "error");
+    } catch (err) {
+      let merged = sheetsRef.current.map(x => x.id === sh.id ? {
+        ...x, status:"failed", lastCheck:new Date().toISOString(), lastError: err.message || String(err),
+      } : x);
+      sheetsRef.current = merged;
+      setSheets(merged);
+      showToast("Not connected — see the reason on the card", "error");
+    } finally {
+      setSheetSyncBusy("");
+    }
+  }, [importToken, sheets, setSheets, showToast]);
+
+  const applyPreview = useCallback(() => {
+    const preview = sheetPreviewQueue[0];
+    if (!preview) return;
+    const hasUpdates = preview.toUpdate && preview.toUpdate.length > 0;
+    if (preview.toAdd.length === 0 && !hasUpdates) return;
+    const stamp = new Date().toISOString();
+
+    if (preview.kind === "expenses") {
+      const added = preview.toAdd.map((a, idx) => ({
+        ...emptyExpense, ...a.data, id: uid(), claimId:"", claimRef:"", createdAt: Date.now() + idx,
+      }));
+      setExpenses([...(expenses||[]), ...added]);
+
+      const L = lists || DEFAULT_LISTS;
+      const nl = { ...L, sites:[...(L.sites||[])], categories:[...(L.categories||[])],
+                   expenseTypes:[...(L.expenseTypes||DEFAULT_LISTS.expenseTypes)], people:[...(L.people||[])] };
+      added.forEach(d => {
+        if (d.site && !nl.sites.includes(d.site)) nl.sites.push(d.site);
+        if (d.category && !nl.categories.includes(d.category)) nl.categories.push(d.category);
+        if (d.expenseType && !nl.expenseTypes.includes(d.expenseType)) nl.expenseTypes.push(d.expenseType);
+        if (d.paidBy && !nl.people.includes(d.paidBy)) nl.people.push(d.paidBy);
+      });
+      nl.sites.sort(); nl.categories.sort(); nl.people.sort();
+      setLists(nl);
+
+      setSheets(sheets.map(x => (preview.list || []).some(l => l.id === x.id) ? { ...x, lastSync: stamp } : x));
+      showToast(`${added.length} expense(s) brought in`);
+      setSheetPreviewQueue(q => q.slice(1));
+      return;
+    }
+
+    const added = [];
+    const recurringUpdates = [];
+    preview.toAdd.forEach((a, idx) => {
+      const d = { ...a.data };
+      const recurMatchId = d.__recurringMatchId;
+      delete d.__recurringMatchId;
+      const vend = vendors.find(v => String(v.name||"").trim().toLowerCase() === String(d.name).trim().toLowerCase());
+      added.push({
+        ...emptyReq, ...d,
+        id: uid(),
+        refNo: d.refNo || nextRefNo([...reqs, ...added], d.date),
+        vendorId: vend ? vend.id : "",
+        accNo: d.accNo || (vend ? vend.accNo : ""),
+        ifsc: d.ifsc || (vend ? vend.ifsc : ""),
+        site: d.site || a.source,
+        exported: false,
+        createdAt: Date.now() + idx,
+        recurringId: recurMatchId || "",
+      });
+      if (recurMatchId) {
+        const item = (recurring||[]).find(r => r.id === recurMatchId);
+        if (item && !recurringUpdates.some(u => u.id === item.id)) {
+          const upd = { ...item };
+          if (item.frequency === "One-time") upd.active = false;
+          else upd.nextDueDate = addInterval(item.nextDueDate, item.frequency);
+          if (isInstalment(item) && item.installmentsPaid !== "") {
+            upd.installmentsPaid = (Number(item.installmentsPaid)||0) + 1;
+            if (Number(item.totalInstallments) && upd.installmentsPaid >= Number(item.totalInstallments)) upd.active = false;
+          }
+          recurringUpdates.push(upd);
+        }
+      }
+    });
+    // Rows that matched an existing Pending requisition and came back in with a
+    // Payment Date now filled in get marked Paid on that same existing record —
+    // not added again as a second row. Applied in the same setReqs call as the
+    // brand-new rows so the list only re-renders once.
+    const updatePatches = new Map((preview.toUpdate || []).map(u => [u.id, u.patch]));
+    setReqs([
+      ...reqs.map(r => updatePatches.has(r.id) ? { ...r, ...updatePatches.get(r.id) } : r),
+      ...added,
+    ]);
+    if (recurringUpdates.length) {
+      setRecurring(recurring.map(r => recurringUpdates.find(u => u.id === r.id) || r));
+    }
+
+    const promoted = promoteSalaryLedgers(vendors, added);
+    if (promoted) setVendors(promoted.vendors);
+
+    const L = lists || DEFAULT_LISTS;
+    const nl = { ...L, sites:[...(L.sites||[])], categories:[...(L.categories||[])], subCategories:{...(L.subCategories||{})} };
+    added.forEach(d => {
+      if (d.site && !nl.sites.includes(d.site)) nl.sites.push(d.site);
+      if (d.category && !nl.categories.includes(d.category)) nl.categories.push(d.category);
+      if (d.category && d.subCategory) {
+        const cur = nl.subCategories[d.category] || [];
+        if (!cur.includes(d.subCategory)) nl.subCategories[d.category] = [...cur, d.subCategory].sort();
+      }
+    });
+    nl.sites.sort(); nl.categories.sort();
+    setLists(nl);
+
+    setSheets(sheets.map(x => (preview.list || []).some(l => l.id === x.id) ? { ...x, lastSync: stamp } : x));
+    const updatedCount = updatePatches.size;
+    showToast(`${added.length} requisition(s) brought in`
+      + (updatedCount ? ` · ${updatedCount} marked Paid` : "")
+      + (recurringUpdates.length ? ` · ${recurringUpdates.length} Rent & EMI item(s) updated` : ""));
+    setSheetPreviewQueue(q => q.slice(1));
+  }, [sheetPreviewQueue, expenses, setExpenses, lists, setLists, sheets, setSheets, showToast, reqs, setReqs, vendors, setVendors, recurring, setRecurring]);
+
+  // Runs syncSheets() silently (no toasts, no interrupting whatever tab the
+  // user is on) for every source that already has a file picked, grouped by
+  // kind exactly like "Sync all ... sources" does. Only ever surfaces
+  // anything via SyncReadyBanner/the queued preview when there's actually
+  // something worth reviewing — see the "silent" handling in buildPreview.
+  const runAutoSheetSync = useCallback(async () => {
+    if (!driveConnected || sheetSyncBusy) return;
+    const ready = sheets.filter(sh => sh.fileId);
+    if (!ready.length) return;
+    lastAutoSyncAtRef.current = Date.now();
+    for (const k of ["requisitions", "expenses"]) {
+      const group = ready.filter(sh => (sh.kind||"requisitions") === k);
+      if (group.length) await syncSheets(group, { silent: true });
+    }
+  }, [driveConnected, sheetSyncBusy, sheets, syncSheets]);
+
+  // Fires once, the moment the app has finished loading — this is the "on
+  // app open" auto-sync the user asked for. A second, throttled check (at
+  // most once every 20 minutes) catches the case where the app was kept
+  // open in the background and only just brought back to the foreground,
+  // which for a phone PWA is effectively also "opening the app" again.
+  useEffect(() => {
+    if (!loaded || autoSyncRanRef.current) return;
+    autoSyncRanRef.current = true;
+    lastAutoSyncAtRef.current = Date.now();
+    runAutoSheetSync();
+  }, [loaded, runAutoSheetSync]);
+
+  useEffect(() => {
+    if (!driveConnected) return;
+    function onVisAutoSync(){
+      if (document.hidden) return;
+      if (Date.now() - lastAutoSyncAtRef.current < 20 * 60 * 1000) return;
+      runAutoSheetSync();
+    }
+    document.addEventListener("visibilitychange", onVisAutoSync);
+    return () => document.removeEventListener("visibilitychange", onVisAutoSync);
+  }, [driveConnected, runAutoSheetSync]);
+
   // connect (or change) the data file — must be called from a user tap
   const connectDataFile = useCallback(async () => {
     if (!FS_SUPPORTED) { showToast("This browser can't auto-save to a file — use Save a Copy instead", "error"); return; }
@@ -2584,8 +3048,9 @@ function ERPApp(){
     applyRestoredData: applyPayload, openExistingDataFile,
     driveConnected, driveEmail, driveSyncing, driveLastSynced, driveError,
     driveFolderId, driveFolderName,
-    driveImportFolderId, driveImportFolderName, driveChooseImportFolder,
+    driveImportFolderId, driveImportFolderName, driveChooseImportFolder, driveChooseSourceFile,
     connectDrive, disconnectDrive, driveSyncNow, driveChooseFolder, driveGetFreshToken,
+    sheetPreviewQueue,
   };
 
   return (
@@ -2632,7 +3097,7 @@ function ERPApp(){
         {tab==="payroll" && <PayrollTab vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} attendance={attendance} setAttendance={setAttendance} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
         {tab==="statement" && <MonthlyStatementTab reqs={reqs} expenses={expenses} cashTxns={cashTxns} cards={cards} showToast={showToast} goTo={navigate} />}
         {tab==="sitesummary" && <SiteSummaryTab reqs={reqs} expenses={expenses} cashTxns={cashTxns} cards={cards} diesel={diesel} utilities={utilities} machines={machines} vendors={vendors} showToast={showToast} goTo={navigate} />}
-        {tab==="sheets" && <SheetSyncTab sheets={sheets} setSheets={setSheets} reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} expenses={expenses} setExpenses={setExpenses} recurring={recurring} setRecurring={setRecurring} sync={syncProps} />}
+        {tab==="sheets" && <SheetSyncTab sheets={sheets} setSheets={setSheets} reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} expenses={expenses} setExpenses={setExpenses} recurring={recurring} setRecurring={setRecurring} sync={syncProps} busy={sheetSyncBusy} previewQueue={sheetPreviewQueue} syncSheets={syncSheets} testConnection={testConnection} applyPreview={applyPreview} dismissPreview={()=>setSheetPreviewQueue(q=>q.slice(1))} />}
         {tab==="expenses" && <ExpensesTab expenses={expenses} setExpenses={setExpenses} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
         {tab==="receivables" && <ReceivablesTab reqs={reqs} setReqs={setReqs} showToast={showToast} goTo={navigate} />}
         {tab==="payments" && <PaymentRegisterTab reqs={reqs} setReqs={setReqs} vendors={vendors} expenses={expenses} setExpenses={setExpenses} cashTxns={cashTxns} cards={cards} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} />}
@@ -2809,6 +3274,7 @@ function Dashboard({ vendors, reqs, setReqs, recurring, setRecurring, expenses, 
   return (
     <div>
       <BackupBanner sync={sync} goToSettings={()=>goTo("settings")} />
+      <SyncReadyBanner sync={sync} goToSync={()=>goTo("sheets")} />
 
       {vendors.length === 0 && reqs.length === 0 && (
         <div style={{ background:SURFACE, borderRadius:20, padding:20, marginBottom:14, border:`1.5px solid ${AMBER}`, boxShadow:SHADOW }}>
@@ -9024,23 +9490,41 @@ function SiteSummaryTab({ reqs, expenses, cashTxns, cards, diesel, utilities, ma
 const FREQUENCIES = ["Monthly","Quarterly","Half-Yearly","Yearly","One-time"];
 
 function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, lists, setLists, showToast, goTo,
-  expenses, setExpenses, recurring, setRecurring, sync }){
-  const { driveConnected, connectDrive, driveGetFreshToken,
-    driveImportFolderId, driveImportFolderName, driveChooseImportFolder } = sync;
+  expenses, setExpenses, recurring, setRecurring, sync, busy, previewQueue, syncSheets, testConnection, applyPreview, dismissPreview }){
+  const { driveConnected, connectDrive, driveChooseSourceFile } = sync;
   const [editing, setEditing] = useState(null);
-  const [busy, setBusy] = useState("");
-  const [preview, setPreview] = useState(null);
+  const [pickingFile, setPickingFile] = useState(false);
+  // syncSheets/testConnection/applyPreview and the busy/preview state all
+  // live in ERPApp now (not here) so the automatic on-open sync check can
+  // run the exact same code without this tab being mounted — see
+  // runAutoSheetSync in ERPApp. previewQueue holds one queued preview per
+  // kind (Requisitions / Expenses); this tab always shows whichever is
+  // first in line.
+  const preview = (previewQueue && previewQueue[0]) || null;
 
-  function fileNameProblem(fileName){
-    const f = (fileName || "").trim();
-    if (!f) return "Enter the file name to look for in the import folder.";
-    if (/[\\/]/.test(f)) return "Just the file name — not a path or a link.";
+  // A source is only ever "ready" once a specific Drive file has been picked
+  // for it (fileId) — the old typed-filename-hint approach is retired as of
+  // v6.17 (see driveReadFileById). A source saved under an older version
+  // will have a fileName but no fileId; it's kept (not deleted) so its
+  // history/settings aren't lost, but it needs the file re-picked once.
+  function sourceProblem(sh){
+    if (!sh.fileId) return "Choose the Excel file for this source.";
     return "";
+  }
+
+  async function pickFileForEditing(){
+    setPickingFile(true);
+    try {
+      const picked = await driveChooseSourceFile();
+      if (picked) setEditing(e => e ? { ...e, fileId: picked.id, fileName: picked.name } : e);
+    } finally {
+      setPickingFile(false);
+    }
   }
 
   function saveSheet(sh){
     if (!sh.name.trim()) return showToast("Give this a name first", "error");
-    if (fileNameProblem(sh.fileName)) return showToast("Check the file name — see the note under the box", "error");
+    if (sourceProblem(sh)) return showToast("Choose the Excel file for this source first", "error");
     const exists = sheets.some(x => x.id === sh.id);
     setSheets(exists ? sheets.map(x => x.id===sh.id ? sh : x) : [...sheets, sh]);
     setEditing(null);
@@ -9053,341 +9537,11 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
     showToast("Removed");
   }
 
-  function siteStatsFrom(data){
-    const map = {};
-    (data.files || []).forEach(f => {
-      const k = f.folder || "Unnamed";
-      if (!map[k]) map[k] = { site:k, files:0, rows:0 };
-      map[k].files += 1;
-      map[k].rows += Number(f.rows || 0);
-    });
-    (data.seen || []).forEach(f => {
-      const k = f.site || "Unnamed";
-      if (!map[k]) map[k] = { site:k, files:0, rows:0 };
-    });
-    return Object.values(map);
-  }
-
-  async function importToken(){
-    if (!driveImportFolderId) throw new Error("Choose your import folder first (button above).");
-    let token;
-    try {
-      token = await driveGetFreshToken(!driveConnected);
-    } catch (err) {
-      throw new Error("Could not connect to Google Drive — " + (err.message || String(err)));
-    }
-    if (!token) throw new Error("Could not connect to Google Drive.");
-    return token;
-  }
-
-  async function syncSheets(list){
-    if (list.length === 0) { showToast("Add a source first", "error"); return; }
-    if (!driveImportFolderId) { showToast("Choose your import folder first", "error"); return; }
-    const collected = [];
-    const failures = [];
-    const fileReport = [];
-    const skippedFiles = [];
-    const seenFiles = [];
-    const notes = [];
-    const statusById = {};
-    let token;
-    try {
-      token = await importToken();
-    } catch (err) {
-      showToast(err.message || String(err), "error");
-      return;
-    }
-    for (const sh of list) {
-      setBusy(sh.name);
-      try {
-        const data = await driveReadImportFile(driveImportFolderId, sh.fileName, token, sh.tab);
-        if (!data || data.ok === false) throw new Error((data && data.error) || "The file could not be read");
-        (data.rows || []).forEach(r => collected.push({ row:r, source: r.__folder || r.__file || sh.name }));
-        if (data.files) fileReport.push(...data.files);
-        if (data.skipped && data.skipped.length) skippedFiles.push(...data.skipped);
-        if (data.seen) seenFiles.push(...data.seen);
-        if (data.notes) notes.push(...data.notes);
-        statusById[sh.id] = {
-          status: (data.rows || []).length > 0 ? "active" : "empty",
-          lastCheck: new Date().toISOString(),
-          lastError: "",
-          siteStats: siteStatsFrom(data),
-          rowCount: (data.rows || []).length,
-        };
-      } catch (err) {
-        failures.push({ name: sh.name, why: err.message || String(err) });
-        statusById[sh.id] = {
-          status: "failed",
-          lastCheck: new Date().toISOString(),
-          lastError: err.message || String(err),
-        };
-      }
-    }
-    setBusy("");
-    if (Object.keys(statusById).length) {
-      setSheets(sheets.map(x => statusById[x.id] ? { ...x, ...statusById[x.id] } : x));
-    }
-    if (collected.length === 0) {
-      showToast(failures.length ? failures[0].why : "No rows could be read — see the details", "error");
-      setPreview({ toAdd:[], toUpdate:[], duplicates:[], errors:[], failures, fileReport, skippedFiles, seenFiles, notes, list });
-      return;
-    }
-    buildPreview(collected, failures, list, fileReport, skippedFiles, seenFiles, notes);
-  }
-
-  function buildPreview(collected, failures, list, fileReport, skippedFiles, seenFiles, notes){
-    const kind = (list[0] && list[0].kind) || "requisitions";
-    const tpl = kind === "expenses" ? EXPENSE_TEMPLATE : REQ_TEMPLATE;
-    const headers = [...new Set(collected.flatMap(c => Object.keys(c.row)))]
-      .filter(h => h !== "__file" && h !== "__folder");
-    const map = autoMapHeaders(headers, tpl);
-    const missing = tpl.filter(f => f.required && !map[f.key]);
-    const toAdd = [], duplicates = [], errors = [];
-
-    if (kind === "expenses") {
-      // Mirrors ImportTab's own "expenses" row handling (see ImportTab.buildPreview),
-      // kept as its own copy here since this tab intentionally stays append-only —
-      // simpler than the update-merge logic Import from Excel supports.
-      const etypes = (lists && lists.expenseTypes) ? lists.expenseTypes : DEFAULT_LISTS.expenseTypes;
-      const existingKeys = new Set((expenses||[]).map(e =>
-        [e.date || e.periodText, String(e.paidBy||"").toLowerCase(), Number(e.amount||0),
-         String(e.description||"").toLowerCase(), String(e.subCategory||"").toLowerCase()].join("|")));
-      const seenKeys = new Set();
-
-      collected.forEach((c, i) => {
-        const { out, problems } = mapRowGeneric(c.row, tpl, map);
-        if (problems.length) { errors.push({ source:c.source, rowNum:i+2, why:`missing ${problems.join(", ")}` }); return; }
-
-        const raw = String(out.dateRaw || "").trim();
-        delete out.dateRaw;
-        const parsedDate = excelToDateStr(raw);
-        out.date = parsedDate || "";
-        out.periodText = parsedDate ? "" : raw;
-
-        if (!out.expenseType || !etypes.includes(out.expenseType)) {
-          const t = String(out.expenseType||"").toLowerCase();
-          out.expenseType = t.indexOf("travel")>=0 ? "Travel"
-            : t.indexOf("office")>=0 ? "Office"
-            : (t.indexOf("purchase")>=0 || t.indexOf("site")>=0) ? "Site Purchase"
-            : (out.expenseType || etypes[0] || "Site Purchase");
-        }
-        if (out.paidDate && !String(out.settledTo||"").trim()) out.settledTo = out.paidBy || "";
-        if (!out.site) out.site = c.source;
-
-        const k = [out.date || out.periodText, String(out.paidBy||"").toLowerCase(), Number(out.amount||0),
-                   String(out.description||"").toLowerCase(), String(out.subCategory||"").toLowerCase()].join("|");
-        if (existingKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"already in the app" }); return; }
-        if (seenKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"repeated inside this sync" }); return; }
-        seenKeys.add(k);
-        toAdd.push({ data:out, source:c.source });
-      });
-
-      setPreview({ kind, toAdd, toUpdate:[], duplicates, errors, failures, missing, map, headers, list, fileReport, skippedFiles, seenFiles, notes });
-      return;
-    }
-
-    // Nothing already recorded gets added again as a fresh row. A sheet source
-    // rarely carries its own Ref No or UTR (those get assigned once a row lands
-    // in the app), so comparing on those — like importDupKey does for a one-off
-    // Excel import — would never match on a re-sync and let the same row back
-    // in every time. Match on date + site + name + amount + description instead,
-    // which is what a repeated sync of the same sheet will actually reproduce.
-    //
-    // A match isn't always "nothing to do" though: the whole point of syncing
-    // "Payment to be done" (or "Master") more than once is that a row that went
-    // out Pending the first time often comes back later with a Payment Date
-    // filled in. When that happens the matching row already in the app gets
-    // marked Paid instead of being silently skipped — see toUpdate below.
-    const sheetDupKey = (r) => [dupKey(r), String(r.description||"").trim().toLowerCase()].join("|");
-    const existingByKey = new Map(reqs.map(r => [sheetDupKey(r), r]));
-    const seenKeys = new Set();
-    const updatedIds = new Set();
-    const toUpdate = [];
-    // A row that syncs in already paid, and whose Name matches exactly one active
-    // Rent & EMI item, also settles that item — same as generating it by hand
-    // would (advances the due date, counts an instalment). Skipped whenever the
-    // name is ambiguous or matches nothing, so this never guesses wrong.
-    const activeRecurring = (recurring||[]).filter(r => r.active !== false);
-
-    collected.forEach((c, i) => {
-      const { out, problems } = mapRowGeneric(c.row, tpl, map);
-      if (problems.length) { errors.push({ source:c.source, rowNum:i+2, why:`missing ${problems.join(", ")}` }); return; }
-
-      settleRequisitionDates(out);
-      if (!out.site) out.site = c.source;
-
-      const k = sheetDupKey(out);
-      const existing = existingByKey.get(k);
-      if (existing) {
-        const canPromoteToPaid = out.paymentStatus === "Paid"
-          && existing.paymentStatus !== "Paid"
-          && existing.paymentStatus !== "On Hold"
-          && !updatedIds.has(existing.id);
-        if (canPromoteToPaid) {
-          updatedIds.add(existing.id);
-          toUpdate.push({
-            id: existing.id,
-            source: c.source,
-            existing,
-            data: out,
-            patch: {
-              paymentStatus: "Paid",
-              paymentDate: out.paymentDate || existing.paymentDate || out.date,
-              paidFromDateColumn: !!out.paidFromDateColumn,
-              paidDateAssumed: !!out.paidDateAssumed,
-            },
-          });
-        } else {
-          duplicates.push({ data:out, source:c.source, why:"already in the app" });
-        }
-        return;
-      }
-      if (seenKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"repeated inside this sync" }); return; }
-      seenKeys.add(k);
-
-      if (out.paymentStatus === "Paid") {
-        const nameMatches = activeRecurring.filter(r =>
-          String(r.name||"").trim().toLowerCase() === String(out.name||"").trim().toLowerCase());
-        if (nameMatches.length === 1) out.__recurringMatchId = nameMatches[0].id;
-      }
-      toAdd.push({ data:out, source:c.source });
-    });
-
-    setPreview({ kind, toAdd, toUpdate, duplicates, errors, failures, missing, map, headers, list, fileReport, skippedFiles, seenFiles, notes });
-  }
-
-  async function testConnection(sh){
-    setBusy(sh.name);
-    try {
-      if (!driveImportFolderId) throw new Error("Choose your import folder first (button above).");
-      const token = await importToken();
-      const data = await driveReadImportFile(driveImportFolderId, sh.fileName, token, sh.tab);
-      if (!data || data.ok === false) throw new Error((data && data.error) || "The file could not be read");
-      const rowCount = (data.rows || []).length;
-      setSheets(sheets.map(x => x.id === sh.id ? {
-        ...x,
-        status: rowCount > 0 ? "active" : "empty",
-        lastCheck: new Date().toISOString(),
-        lastError: "",
-        siteStats: siteStatsFrom(data),
-        rowCount,
-      } : x));
-      showToast(rowCount > 0 ? `Connected — ${rowCount} row(s) available` : "Connected, but no rows found", rowCount > 0 ? "ok" : "error");
-    } catch (err) {
-      setSheets(sheets.map(x => x.id === sh.id ? {
-        ...x, status:"failed", lastCheck:new Date().toISOString(), lastError: err.message || String(err),
-      } : x));
-      showToast("Not connected — see the reason on the card", "error");
-    } finally {
-      setBusy("");
-    }
-  }
-
-  function applyPreview(){
-    if (!preview) return;
-    const hasUpdates = preview.toUpdate && preview.toUpdate.length > 0;
-    if (preview.toAdd.length === 0 && !hasUpdates) return;
-    const stamp = new Date().toISOString();
-
-    if (preview.kind === "expenses") {
-      const added = preview.toAdd.map((a, idx) => ({
-        ...emptyExpense, ...a.data, id: uid(), claimId:"", claimRef:"", createdAt: Date.now() + idx,
-      }));
-      setExpenses([...(expenses||[]), ...added]);
-
-      const L = lists || DEFAULT_LISTS;
-      const nl = { ...L, sites:[...(L.sites||[])], categories:[...(L.categories||[])],
-                   expenseTypes:[...(L.expenseTypes||DEFAULT_LISTS.expenseTypes)], people:[...(L.people||[])] };
-      added.forEach(d => {
-        if (d.site && !nl.sites.includes(d.site)) nl.sites.push(d.site);
-        if (d.category && !nl.categories.includes(d.category)) nl.categories.push(d.category);
-        if (d.expenseType && !nl.expenseTypes.includes(d.expenseType)) nl.expenseTypes.push(d.expenseType);
-        if (d.paidBy && !nl.people.includes(d.paidBy)) nl.people.push(d.paidBy);
-      });
-      nl.sites.sort(); nl.categories.sort(); nl.people.sort();
-      setLists(nl);
-
-      setSheets(sheets.map(x => (preview.list || []).some(l => l.id === x.id) ? { ...x, lastSync: stamp } : x));
-      showToast(`${added.length} expense(s) brought in`);
-      setPreview(null);
-      return;
-    }
-
-    const added = [];
-    const recurringUpdates = [];
-    preview.toAdd.forEach((a, idx) => {
-      const d = { ...a.data };
-      const recurMatchId = d.__recurringMatchId;
-      delete d.__recurringMatchId;
-      const vend = vendors.find(v => String(v.name||"").trim().toLowerCase() === String(d.name).trim().toLowerCase());
-      added.push({
-        ...emptyReq, ...d,
-        id: uid(),
-        refNo: d.refNo || nextRefNo([...reqs, ...added], d.date),
-        vendorId: vend ? vend.id : "",
-        accNo: d.accNo || (vend ? vend.accNo : ""),
-        ifsc: d.ifsc || (vend ? vend.ifsc : ""),
-        site: d.site || a.source,
-        exported: false,
-        createdAt: Date.now() + idx,
-        recurringId: recurMatchId || "",
-      });
-      if (recurMatchId) {
-        const item = (recurring||[]).find(r => r.id === recurMatchId);
-        if (item && !recurringUpdates.some(u => u.id === item.id)) {
-          const upd = { ...item };
-          if (item.frequency === "One-time") upd.active = false;
-          else upd.nextDueDate = addInterval(item.nextDueDate, item.frequency);
-          if (isInstalment(item) && item.installmentsPaid !== "") {
-            upd.installmentsPaid = (Number(item.installmentsPaid)||0) + 1;
-            if (Number(item.totalInstallments) && upd.installmentsPaid >= Number(item.totalInstallments)) upd.active = false;
-          }
-          recurringUpdates.push(upd);
-        }
-      }
-    });
-    // Rows that matched an existing Pending requisition and came back in with a
-    // Payment Date now filled in get marked Paid on that same existing record —
-    // not added again as a second row. Applied in the same setReqs call as the
-    // brand-new rows so the list only re-renders once.
-    const updatePatches = new Map((preview.toUpdate || []).map(u => [u.id, u.patch]));
-    setReqs([
-      ...reqs.map(r => updatePatches.has(r.id) ? { ...r, ...updatePatches.get(r.id) } : r),
-      ...added,
-    ]);
-    if (recurringUpdates.length) {
-      setRecurring(recurring.map(r => recurringUpdates.find(u => u.id === r.id) || r));
-    }
-
-    const promoted = promoteSalaryLedgers(vendors, added);
-    if (promoted) setVendors(promoted.vendors);
-
-    const L = lists || DEFAULT_LISTS;
-    const nl = { ...L, sites:[...(L.sites||[])], categories:[...(L.categories||[])], subCategories:{...(L.subCategories||{})} };
-    added.forEach(d => {
-      if (d.site && !nl.sites.includes(d.site)) nl.sites.push(d.site);
-      if (d.category && !nl.categories.includes(d.category)) nl.categories.push(d.category);
-      if (d.category && d.subCategory) {
-        const cur = nl.subCategories[d.category] || [];
-        if (!cur.includes(d.subCategory)) nl.subCategories[d.category] = [...cur, d.subCategory].sort();
-      }
-    });
-    nl.sites.sort(); nl.categories.sort();
-    setLists(nl);
-
-    setSheets(sheets.map(x => (preview.list || []).some(l => l.id === x.id) ? { ...x, lastSync: stamp } : x));
-    const updatedCount = updatePatches.size;
-    showToast(`${added.length} requisition(s) brought in`
-      + (updatedCount ? ` · ${updatedCount} marked Paid` : "")
-      + (recurringUpdates.length ? ` · ${recurringUpdates.length} Rent & EMI item(s) updated` : ""));
-    setPreview(null);
-  }
-
   /* ---------- preview ---------- */
   if (preview) {
     return (
       <div>
-        <button onClick={()=>setPreview(null)}
+        <button onClick={dismissPreview}
           style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
           <Icon name="close" size={16} /> Cancel
         </button>
@@ -9575,19 +9729,17 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
             <input style={inputStyle} value={editing.name}
               onChange={e=>setEditing({...editing, name:e.target.value})} placeholder="e.g. Payment to be done" />
           </Field>
-          <Field label="File name" required hint='The Excel file to look for in your import folder — matches the start of the file name, so "Payment to be done" also matches "Payment to be done.xlsx" or "Payment to be done (1).xlsx"'>
-            <input style={inputStyle} value={editing.fileName || ""}
-              onChange={e=>setEditing({...editing, fileName:e.target.value})}
-              placeholder="e.g. Payment to be done" />
-            {editing.fileName && fileNameProblem(editing.fileName) && (
-              <div style={{ background:"#FDECEE", border:`1px solid ${RED}`, borderRadius:12, padding:12, marginTop:8,
-                fontSize:13, color:INK, lineHeight:1.55 }}>
-                {fileNameProblem(editing.fileName)}
-              </div>
-            )}
-            {editing.fileName && !fileNameProblem(editing.fileName) && (
-              <div style={{ fontSize:13, fontWeight:600, color:GREEN, marginTop:8 }}>Looks right</div>
-            )}
+          <Field label="Excel file" required hint="Pick the actual file in Drive, once. Re-saving/replacing that same file later is picked up automatically on the next sync — you only need to pick again here if you create a genuinely new file (a different copy) instead of overwriting this one.">
+            <button onClick={pickFileForEditing} disabled={pickingFile}
+              style={{ width:"100%", textAlign:"left", padding:"12px 14px", borderRadius:12,
+                background: editing.fileId ? "#E6F7F2" : SAND, border:`1.5px solid ${editing.fileId ? GREEN : SAND}`,
+                cursor: pickingFile ? "default" : "pointer", display:"flex", alignItems:"center", gap:10 }}>
+              <Icon name={editing.fileId ? "check" : "download"} size={16} color={editing.fileId ? GREEN : INK} />
+              <span style={{ fontSize:14, fontWeight:600, color:INK, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", flex:1 }}>
+                {pickingFile ? "Opening picker…" : editing.fileId ? (editing.fileName || "File chosen") : "Choose file from Drive"}
+              </span>
+              {editing.fileId && <span style={{ fontSize:12, fontWeight:700, color:GREEN, flexShrink:0 }}>Change</span>}
+            </button>
           </Field>
           <Field label="Tab inside that file" hint={"Only needed if the file has more than one tab and the data you want isn't on the first one — e.g. your Excel template keeps \"Payment to be done\" and \"Office Master\" as two tabs in the same file, so this source and your Office Master source would point at the same file name with different tabs. Leave blank to use the first tab."}>
             <input style={inputStyle} value={editing.tab || ""}
@@ -9603,10 +9755,10 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
             </select>
           </Field>
           <BigButton icon="check" label="Save Source" onClick={()=>saveSheet(editing)} tone="green" full
-            disabled={!editing.name.trim() || !!fileNameProblem(editing.fileName)} />
-          {(!editing.name.trim() || !!fileNameProblem(editing.fileName)) && (
+            disabled={!editing.name.trim() || !!sourceProblem(editing)} />
+          {(!editing.name.trim() || !!sourceProblem(editing)) && (
             <div style={{ fontSize:12, color:MUTED, marginTop:8, textAlign:"center", lineHeight:1.5 }}>
-              Save becomes active once the name and file name are both correct.
+              Save becomes active once this has a name and a file chosen.
             </div>
           )}
         </div>
@@ -9628,38 +9780,17 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
         </div>
       )}
 
-      <div style={{ background:SURFACE, borderRadius:16, padding:16, marginBottom:14,
-        border:`2px solid ${driveImportFolderId ? GREEN : SAND}` }}>
-        <SectionLabel>Import folder</SectionLabel>
-        {!driveConnected ? (
-          <React.Fragment>
-            <p style={{ fontSize:13, color:MUTED, lineHeight:1.6, marginBottom:12 }}>
-              Connect Google Drive once, then choose the folder you drop your Excel files into. No
-              Apps Script, no deployment, no URL to paste — this reuses the same sign-in as Drive backup.
-            </p>
-            <BigButton icon="check" label="Connect Google Drive" onClick={connectDrive} tone="green" full />
-          </React.Fragment>
-        ) : driveImportFolderId ? (
-          <React.Fragment>
-            <p style={{ fontSize:13, color:INK, lineHeight:1.6, marginBottom:10 }}>
-              Reading from <strong>{driveImportFolderName || "your chosen folder"}</strong>. Drop your
-              Excel files there — the file name for each source below must match what's in the folder.
-            </p>
-            <button onClick={driveChooseImportFolder}
-              style={{ fontSize:13, fontWeight:700, color:AMBER, background:"none", border:"none", cursor:"pointer", padding:0 }}>
-              Change folder
-            </button>
-          </React.Fragment>
-        ) : (
-          <React.Fragment>
-            <p style={{ fontSize:13, color:MUTED, lineHeight:1.6, marginBottom:12 }}>
-              Choose the Drive folder your Excel files (e.g. Payment to be done, Office Master) get
-              dropped into. The app reads straight from there — nothing else to set up.
-            </p>
-            <BigButton icon="check" label="Choose import folder" onClick={driveChooseImportFolder} tone="green" full />
-          </React.Fragment>
-        )}
-      </div>
+      {!driveConnected && (
+        <div style={{ background:SURFACE, borderRadius:16, padding:16, marginBottom:14, border:`2px solid ${SAND}` }}>
+          <SectionLabel>Connect Google Drive</SectionLabel>
+          <p style={{ fontSize:13, color:MUTED, lineHeight:1.6, marginBottom:12 }}>
+            Each source below reads one Excel file you pick directly from your Drive — no folder to
+            set up first, no file name to type and match. Connect once, then Add Source below and
+            choose the file when prompted. This reuses the same sign-in as Drive backup.
+          </p>
+          <BigButton icon="check" label="Connect Google Drive" onClick={connectDrive} tone="green" full />
+        </div>
+      )}
 
       {sheets.length > 0 && (() => {
         const active = sheets.filter(x => x.status === "active").length;
@@ -9711,10 +9842,11 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
           <div style={{ background:SURFACE, borderRadius:20, padding:20, border:`1px solid ${SAND}`, boxShadow:SHADOW }}>
             <SectionLabel>Automatic sync — optional</SectionLabel>
             <p style={{ fontSize:13, color:MUTED, lineHeight:1.7 }}>
-              Choose your import folder above, then add a source below for each Excel file (or tab)
-              you want the app to read. From then on, dropping an updated file into that folder and
-              tapping Sync now pulls the latest rows in — no Apps Script, no deployment, nothing to
-              re-do each time. Nothing here is required — Import from Excel above still works any time.
+              Add a source below for each Excel file (or tab) you want the app to read — pick the
+              file directly from your Drive, wherever it lives. From then on, re-saving that same
+              file in Drive and tapping Sync now pulls the latest rows in — no folder to set up, no
+              file name to type, nothing to re-do each time. Nothing here is required — Import from
+              Excel above still works any time.
             </p>
           </div>
         </div>
@@ -9735,6 +9867,9 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
                     <div style={{ fontWeight:700, color:INK }}>{sh.name}</div>
                     <div style={{ fontSize:12, color:MUTED, marginTop:3 }}>
                       Syncs into {(sh.kind||"requisitions") === "expenses" ? "Expenses" : "Requisitions"} · {sh.tab ? `Tab: ${sh.tab} · ` : ""}Last sync {sh.lastSync ? friendlyTime(sh.lastSync) : "never"}
+                    </div>
+                    <div style={{ fontSize:12, marginTop:2, color: sh.fileId ? MUTED : RED, fontWeight: sh.fileId ? 400 : 700, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                      {sh.fileId ? `File: ${sh.fileName || "chosen file"}` : "No file chosen yet — edit this source to pick one"}
                     </div>
                   </div>
                   <div style={{ display:"flex", gap:8, flexShrink:0 }}>
@@ -9822,7 +9957,7 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
           );
         })}
         <BigButton icon="plus" label="Add Source"
-          onClick={()=>setEditing({ id: uid(), name:"", fileName:"", tab:"", kind:"requisitions", lastSync:null })} tone="amber" full />
+          onClick={()=>setEditing({ id: uid(), name:"", fileId:"", fileName:"", tab:"", kind:"requisitions", lastSync:null })} tone="amber" full />
       </div>
     </div>
   );

@@ -209,7 +209,7 @@ exactly as invisible to it as before.
 - **Optional PIN lock** exists under Settings if you want to lock the app on the
   phone — off by default.
 - If the app is ever updated (a new `index.html`), bump `CACHE_NAME` in `sw.js`
-  (currently `v11`) so installed phones pick up the new version instead of a
+  (currently `v17`) so installed phones pick up the new version instead of a
   cached old one — and **re-upload all three of `index.html`, `sw.js`, and
   `README.md` together, every time**, even if only one of them actually
   changed. Uploading just `index.html` leaves the live site serving an old
@@ -403,54 +403,87 @@ never more than one:
   special handling — they're just different values in the Category column of
   ordinary Payment to be done rows.
 
-**How the sync actually reads your data (as of v6.12):** the old Apps
-Script / Web app URL setup is gone. It meant deploying your own script on
-`script.google.com` and pasting the URL it gave you — fiddly on a phone, and
-prone to failing in ways that were genuinely impossible to diagnose from
-outside (a correctly deployed, "Anyone"-access script would still
-intermittently 404 for no visible reason). It's been replaced with something
-much simpler: the app reads Excel files straight out of a Google Drive
-folder you choose, using the exact same Google sign-in already proven
-reliable for Drive backup. There is nothing to deploy and no URL to paste.
+**How the sync actually reads your data (as of v6.17):** each source now
+points straight at one Excel file in Google Drive — you pick it once,
+directly, using Google's own file picker. There's no import folder to
+choose first and no file name to type in for the app to go searching for.
+Picking a file through the picker is also what grants the app permission to
+read that exact file, so there's no more guessing about whether the app can
+"see" what's inside a folder — it's pointed straight at the file you chose,
+wherever in Drive it lives (subfolders included, since you're picking the
+file itself, not browsing for it by name).
 
-**Setup — you need one import folder and two or three sync sources (Master is
-optional, per the "safety net" note above):**
+*(Earlier versions worked differently — v6.12 through v6.16 used a chosen
+import folder plus a typed file name the app searched for, and v6.16 added
+searching inside subfolders. All of that is gone as of v6.17; if your setup
+predates it, see the note at the bottom of this section.)*
 
-1. In Google Drive, pick (or create) a folder you'll drop your Excel exports
-   into — it can be the same folder your automatic backup uses, or a
-   separate one, your choice.
-2. Keep "Payment to be done", "Master" and "Office Master" as tabs in one
+**Setup — you need two or three sync sources (Master is optional, per the
+"safety net" note above). No import folder to set up first.**
+
+1. Keep "Payment to be done", "Master" and "Office Master" as tabs in one
    Excel workbook (this is exactly how the Excel template you were given is
    already laid out). Whenever you want to sync, export/save that workbook
-   as `.xlsx` and put it in the Drive folder from step 1, replacing the
-   previous copy (or adding a new one — the app always reads whichever
-   file's name matches, most-recently-modified first).
-3. In the app: **Sync from Google Sheets → Choose import folder** (top of
-   the screen) → sign in to Google if asked → pick the folder from step 1.
-4. **Add Source** → give it a name (e.g. "Payment to be done"), set
-   **File name** to match the *start* of your workbook's actual file name in
-   Drive — check the file's name in Drive and use that (or just the first
-   word or two of it; it only needs to match the start, so it still matches
-   a later copy Drive saves as "... (1).xlsx"), set **Tab inside that file**
-   to `Payment to be done`, and set **Syncs into** to **Requisitions**. Save.
-5. **Add Source** again → same file name, **Tab inside that file** set to
-   `Office Master`, **Syncs into** set to **Expenses**. Save.
-6. **Optional — Add Source** a third time → same file name, **Tab inside
-   that file** set to `Master`, **Syncs into** set to **Requisitions**
-   (same option as step 4 — the dropdown now reads "Requisitions (Payment to
-   be done / Master)" to make this clear). Save. Only add this one if you
-   want the extra safety net described above; skip it if you're comfortable
-   relying on "Payment to be done" alone.
-7. From then on: drop an updated copy of the workbook into the Drive folder,
-   come back to **Sync from Google Sheets**, and tap **Sync now** on each
-   card (or use "Sync all ... sources" once you have two or more of the same
-   kind — it's fine to sync "Payment to be done" and "Master" together or in
-   any order, the update-not-duplicate logic above handles it either way).
+   as `.xlsx` to Google Drive — anywhere in your Drive is fine, since you'll
+   pick the file directly. **Re-save/replace that same file each time**
+   (Google Drive keeps the same file, updated) rather than creating a
+   brand-new file each time — see the note below on why that matters.
+2. In the app: **Sync from Google Sheets** → **Add Source** → give it a name
+   (e.g. "Payment to be done") → tap **Choose file**, sign in to Google if
+   asked, and pick your workbook from Drive. Set **Tab inside that file** to
+   `Payment to be done`, and **Syncs into** to **Requisitions**. Save.
+3. **Add Source** again → tap **Choose file** and pick the *same* workbook
+   again, **Tab inside that file** set to `Office Master`, **Syncs into** set
+   to **Expenses**. Save.
+4. **Optional — Add Source** a third time → pick the same workbook once
+   more, **Tab inside that file** set to `Master`, **Syncs into** set to
+   **Requisitions** (same option as step 2 — the dropdown reads
+   "Requisitions (Payment to be done / Master)" to make this clear). Save.
+   Only add this one if you want the extra safety net described above; skip
+   it if you're comfortable relying on "Payment to be done" alone.
+5. From then on: **save over that same file** in Drive with your updates
+   (don't create a new file with a different name), come back to **Sync from
+   Google Sheets**, and tap **Sync now** on each card (or use "Sync all ...
+   sources" once you have two or more of the same kind). You do **not** need
+   to pick the file again after this — re-saving/replacing the same file is
+   picked up automatically on every sync.
+6. **You only need to tap Choose file again if you create a genuinely new
+   file** (a different file, a different name) instead of overwriting the
+   old one — for example if you ever start a fresh workbook for a new year.
+   In that case, edit the source, tap **Change**, and pick the new file.
 
-**If you set this up before v6.12** (the old Apps Script version): your
-sources will show as "Not working" until you edit each one — tap the pencil,
-fill in **File name** (and **Tab inside that file**, if needed), and Save.
-The Web app URL field is gone; nothing else about the setup changes.
+**Why "re-save the same file" matters:** picking a file through the picker
+gives the app permission for that one specific file — not a rule like "any
+file in this folder" or "any file with this name." Overwriting/re-saving the
+same file in Drive keeps that same file, so the app's permission still
+applies and syncing keeps working with no extra steps. Creating a brand-new
+file (even with the exact same name) is, to Google Drive, a different file
+that the app has never been given permission to see — that's the one case
+where you'd need to pick again.
+
+**If you set this up before v6.17** (the folder + typed-file-name version):
+your sources keep their name, tab, and "Syncs into" settings, but each one
+needs its file picked once — open **Sync from Google Sheets**, and any
+source without a file shows a clear **"No file chosen yet"** warning instead
+of a sync error. Tap the pencil to edit it, tap **Choose file**, pick your
+workbook, and Save — then it works exactly as described above from then on.
+
+**As of v6.18, syncing also happens automatically.** Every source with a
+file already picked is checked quietly the moment you open the app — you no
+longer have to open Sync from Google Sheets and tap Sync now yourself every
+time. If it finds anything new, a green banner appears on the Overview
+screen ("Synced from Google Sheets — N rows ready to review") — tap it to
+see the exact same preview screen described above and decide whether to
+Import. **Nothing is ever added automatically** — the preview and the
+Import tap are still required every time, this just saves you the trip to
+go fetch the data in the first place. If nothing new is found, or Drive
+isn't reachable at that moment, the app stays silent about it — no error
+popups from a background check you didn't ask for; a source's own **Check
+status** card still shows the real reason if something's actually wrong
+with it. It also re-checks after the app has been sitting in the background
+for a while and you bring it back to the front (at most once every 20
+minutes), so leaving the app open overnight still catches a fresh sync the
+next time you look at it.
 
 ## Optional: one-click move between "Payment to be done" and "Master"
 
