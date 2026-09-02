@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.14";
+const APP_VERSION = "6.15";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -66,6 +66,10 @@ const GOOGLE_DRIVE_PICKER_API_KEY = "AIzaSyABzgqparoHG9wfLMV6QBsvviEoUW_uhyU";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.15", date:"2026-09-02", title:"Sync error now says exactly what it found", items:[
+    "\"No file starting with ... found\" used to look the same whether the import folder was genuinely empty to the app or had files that just didn't match the name you typed - two very different problems",
+    "That error now says which of the two it is: either \"0 files found in this folder\" (check you're in the right folder, or the right Google account), or the actual list of file names the app can see there, so you can compare them straight against what you typed",
+  ]},
   { v:"6.14", date:"2026-09-02", title:"Sync back on with a real fix, Master now supported, quiet status dot", items:[
     "Sync from Google Sheets is back in the menu, with a real bug fixed: re-syncing a row after you fill in its Payment Date used to be silently skipped forever instead of marking the existing requisition Paid - it now correctly updates that same requisition instead of ignoring it or adding a duplicate",
     "The preview screen has a new \"Already in the app - will be marked Paid\" section so you can see exactly which existing requisitions a sync is about to update, before you tap Import",
@@ -1193,7 +1197,16 @@ async function driveReadImportFile(folderId, filenameHint, token, tabHint){
   const match = files.find(f => String(f.name || "").toLowerCase().startsWith(hint))
     || files.find(f => String(f.name || "").toLowerCase().indexOf(hint) >= 0);
   if (!match) {
-    throw new Error(`No file starting with "${filenameHint}" found in the import folder — check the file is there and named right.`);
+    // This error used to just say "not found," which looks identical whether
+    // the folder is genuinely empty (from the app's point of view) or has
+    // files that just don't match the name typed in — two very different
+    // problems with very different fixes. Naming exactly what (if anything)
+    // was actually seen turns a guessing game into a one-glance diagnosis.
+    if (files.length === 0) {
+      throw new Error(`The import folder looks empty to the app — 0 files found in it. Either the file isn't in this exact folder (check for subfolders, or that you picked the right one), or it's on a different Google account than the one you signed in with here.`);
+    }
+    const seen = files.slice(0, 8).map(f => f.name).join(", ") + (files.length > 8 ? `, and ${files.length - 8} more` : "");
+    throw new Error(`No file starting with "${filenameHint}" found. The app can see ${files.length} file(s) in this folder: ${seen}. Check the File name field matches the start of one of those exactly.`);
   }
   const fileRes = await driveApiFetch(
     `https://www.googleapis.com/drive/v3/files/${match.id}?alt=media`, token
