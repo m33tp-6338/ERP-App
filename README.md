@@ -316,19 +316,26 @@ know which card they belong to:
 
 ## Syncing "Payment to be done" and "Office Master" from Google Sheets
 
-This replaces the two-file Excel workflow (Payment to be done + Master, with
-Office Master as a separate backing sheet) with one Google Sheet the app reads
-directly — no more entering the same payment twice, once in the sheet and once
-in the app.
+This moves "Payment to be done" and "Office Master" into one Google Sheet the
+app reads directly — no more entering the same payment twice, once in the
+sheet and once in the app. **"Master" is unaffected by any of this** — see
+below.
 
 **How the pieces map onto the app:**
 
-- **"Master" goes away.** It doesn't need its own sheet or tab any more — the
-  app's own **Payment Register** is already exactly that: any Requisition
-  whose Payment Status holds a date (not "Pending") shows there automatically,
-  Account/IFSC included in the underlying record but not surfaced in that
-  view. Keep "Payment to be done" as your one working sheet; stop maintaining
-  Master by hand.
+- **"Master" keeps working exactly as it always has — it is not part of the
+  sync, and the app never reads it.** Master is your own manual, month-end
+  record of Head-Office-paid (non-cash) payments, kept for reconciling
+  payment dates — cash-paid items don't go in it, those stay in your separate
+  cash balance/debit record. Keep that tab in the same workbook if you like
+  (it travels along for convenience), and keep filling it in by hand, once a
+  month, the same way you always have: copy across whichever rows in
+  "Payment to be done"/"Office Master" Head Office actually paid that month.
+  Nothing here replaces it — the app's own **Payment Register** (any
+  Requisition whose Payment Status holds a date) is a *different* view: it
+  includes every paid Requisition regardless of how it was paid, cash
+  included, so it isn't a stand-in for Master's Head-Office-only, cash-
+  excluded reconciliation record.
 - **"Payment to be done"** (Date, Site, Category, Sub-Category, Name, Amount,
   Description, Payment Status, A/c No., IFSC Code) syncs straight into
   **Requisitions**, using the exact same rule already built into the app:

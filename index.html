@@ -51,7 +51,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.10";
+const APP_VERSION = "6.11";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -65,6 +65,10 @@ const GOOGLE_DRIVE_PICKER_API_KEY = "AIzaSyABzgqparoHG9wfLMV6QBsvviEoUW_uhyU";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.11", date:"2026-09-02", title:"Drive backup: folder picker now works", items:[
+    "Settings & Backup → Choose backup folder now actually opens Google's folder browser instead of showing \"not set up yet\" - the missing one-time API key is in place",
+    "Also fixed the \"Payment to be done\" sync guidance (README.md) - it wrongly said to stop keeping a separate Master sheet by hand; Master is unaffected and unrelated to that sync",
+  ]},
   { v:"6.10", date:"2026-09-02", title:"Payroll — fixed salaries and attendance-based pay", items:[
     "New Payroll tab: raise this month's salary requisitions in one place instead of typing each one by hand",
     "Every employee now has a Pay Type - Fixed (full Monthly Salary every month, e.g. top management) or Attendance-based (that month's pay worked out from days present) - set it on the employee's ledger",

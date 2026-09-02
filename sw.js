@@ -2,7 +2,7 @@
 //
 // Bump CACHE_NAME any time you replace index.html (or any vendored file)
 // so returning users get the new version instead of a stale cached copy.
-const CACHE_NAME = "erp-ledger-cache-v10";
+const CACHE_NAME = "erp-ledger-cache-v11";
 
 const PRECACHE_URLS = [
   "./",
