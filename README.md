@@ -209,7 +209,7 @@ exactly as invisible to it as before.
 - **Optional PIN lock** exists under Settings if you want to lock the app on the
   phone — off by default.
 - If the app is ever updated (a new `index.html`), bump `CACHE_NAME` in `sw.js`
-  (currently `v21`) so installed phones pick up the new version instead of a
+  (currently `v22`) so installed phones pick up the new version instead of a
   cached old one — and **re-upload all three of `index.html`, `sw.js`, and
   `README.md` together, every time**, even if only one of them actually
   changed. Uploading just `index.html` leaves the live site serving an old
@@ -489,6 +489,20 @@ the app was asking Google for the file (a required parameter for Shared
 Drive files was missing), not anything wrong with your setup. Fixed in
 v6.20 — if you saw this error on an older version, just update and tap
 **Sync now** again; you don't need to re-pick the file.
+
+**A second, different "File not found" could still happen on a freshly-picked
+Google Sheet even after v6.21** — fixed in **v6.22**. Two separate,
+documented causes: some files need a security key the picker hands back to
+be sent on every later request (it wasn't), and a file organised as a
+**shortcut** inside a shared folder (very common in company Drive
+structures) needs to be followed through to the real file first (it
+wasn't, so the app was trying to read the shortcut itself, which has no
+content of its own). Unlike the v6.20 fix, this one needs the file to be
+**picked again** for a source that's still stuck on "Not working" after
+updating — edit that source, tap **Change**, and pick it again; that's what
+lets the app pick up the extra information (the security key, and where a
+shortcut actually points) this fix relies on. A source that's already
+green/"Active" doesn't need anything done to it.
 
 **Why "re-save the same file" matters:** picking a file through the picker
 gives the app permission for that one specific file — not a rule like "any

@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.21";
+const APP_VERSION = "6.22";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -66,6 +66,11 @@ const GOOGLE_DRIVE_PICKER_API_KEY = "AIzaSyABzgqparoHG9wfLMV6QBsvviEoUW_uhyU";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.22", date:"2026-09-03", title:"Fixed: a freshly-picked Google Sheet could still say \"File not found\"", items:[
+    "After v6.21 let you pick a live Google Sheet, some Sheets (especially ones organised as a shortcut inside a shared company folder, or reached via a shared link) could still fail with \"File not found\" right after picking them - this was a second, different gap from the one fixed in v6.20",
+    "Fixed two specific causes, both confirmed against Google's own documentation: (1) some files require a security key the picker provides to be sent back on every request - it wasn't; (2) a file organised as a \"shortcut\" inside a folder (very common in shared company Drive structures) needs to be followed to the real file first - it wasn't",
+    "If a source is still showing \"Not working\" after updating to v6.22, edit that source and tap Change to re-pick the file - this refreshes the extra information the fix needs, which older picks don't have yet",
+  ]},
   { v:"6.21", date:"2026-09-02", title:"\"Choose file\" now also lets you pick a live Google Sheet, not just uploaded Excel files", items:[
     "Until now, the picker only showed real .xlsx/.xls files, so if your actual working file is a Google Sheet you keep live in Drive (never downloaded), it simply didn't appear as pickable - it wasn't a bug in reading it, the picker was filtering it out entirely",
     "Fixed: the picker now shows both real Excel files and native Google Sheets, and Sync now reads a picked Google Sheet correctly (Google converts it to Excel format behind the scenes each time you sync - you don't have to do that step yourself anymore)",
@@ -1236,8 +1241,41 @@ async function driveApiFetch(url, token, options){
 // call). Which path to use is decided by the file's real mimeType, read
 // from the metadata call below — not by guessing from the file name/
 // extension, which is exactly what native Sheets don't reliably have.
+//
+// v6.22: fixes a second, DIFFERENT "File not found" reported after v6.21 —
+// this one on a freshly-picked native Google Sheet, with supportsAllDrives
+// already in place. Verified against Google's official docs (Drive API
+// resource-keys guide, Picker DocumentObject reference, Drive shortcuts
+// guide) before writing anything, since a Shared-Drive picker-config theory
+// (setEnableDrives) was checked and explicitly ruled out — Google's own
+// picker docs say shared-drive items are included by default and that
+// setEnableDrives should NOT be combined with setParent (which this app
+// already correctly uses for the "Starting folder" feature). Two remaining,
+// officially-documented 404 mechanisms were addressed instead:
+//  1. Resource keys — some files (notably ones reached via a shared link
+//     rather than direct/inherited access) require the picker's returned
+//     resourceKey to be sent back on every later Drive API call, via the
+//     X-Goog-Drive-Resource-Keys header, or files.get 404s even with a
+//     perfectly valid fileId. The Picker's DocumentObject carries this in
+//     its own `resourceKey` field, which driveChooseSourceFile now captures
+//     and saves alongside the fileId, and this function now sends back.
+//  2. Shortcuts — a very common way nested Shared Drive folders (like PW →
+//     ERP → PR) reference a file without duplicating it. A shortcut is its
+//     own Drive object (mimeType application/vnd.google-apps.shortcut) with
+//     its own file ID, distinct from the real file's ID and resourceKey —
+//     if the Picker ever hands back a shortcut's ID instead of resolving it
+//     first, files.get "succeeds" at finding the shortcut but the app has no
+//     way to read a shortcut's own "content" (it has none), which can also
+//     surface as this kind of failure. Handled by asking for
+//     shortcutDetails on the metadata call and transparently following it
+//     to the real target file/resourceKey when present, so the user never
+//     has to know or care that their file was organized as a shortcut.
 const GOOGLE_SHEET_MIME = "application/vnd.google-apps.spreadsheet";
-async function driveReadFileById(fileId, token, tabHint){
+const GOOGLE_SHORTCUT_MIME = "application/vnd.google-apps.shortcut";
+function resourceKeyHeader(fileId, resourceKey){
+  return resourceKey ? { "X-Goog-Drive-Resource-Keys": `${fileId}/${resourceKey}` } : undefined;
+}
+async function driveReadFileById(fileId, token, tabHint, resourceKey){
   if (!fileId) throw new Error("No file has been chosen for this source yet — edit it and tap Choose file.");
   // supportsAllDrives=true matters specifically when the picked file lives
   // inside a Google Shared Drive (a "Team Drive") rather than the user's own
@@ -1249,10 +1287,27 @@ async function driveReadFileById(fileId, token, tabHint){
   // genuinely deleted/inaccessible file. Always including it here is safe
   // and has no effect on an ordinary My Drive file; it's required for a
   // Shared Drive one. See: developers.google.com/workspace/drive/api/guides/handle-errors
-  const metaRes = await driveApiFetch(
-    `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,trashed,modifiedTime,mimeType&supportsAllDrives=true`, token
+  let metaRes = await driveApiFetch(
+    `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,trashed,modifiedTime,mimeType,resourceKey,shortcutDetails&supportsAllDrives=true`,
+    token, { headers: resourceKeyHeader(fileId, resourceKey) }
   );
-  const meta = await metaRes.json();
+  let meta = await metaRes.json();
+  // v6.22: transparently follow a shortcut to its real target, once. The
+  // Picker's own mimeType filter should normally keep shortcuts out of what
+  // the user can select, but a shortcut is exactly how a shared/nested
+  // Drive folder commonly points at a file without duplicating it, so this
+  // is worth resolving rather than trusting the filter alone.
+  if (meta.mimeType === GOOGLE_SHORTCUT_MIME && meta.shortcutDetails && meta.shortcutDetails.targetId) {
+    const targetId = meta.shortcutDetails.targetId;
+    const targetKey = meta.shortcutDetails.targetResourceKey || resourceKey;
+    metaRes = await driveApiFetch(
+      `https://www.googleapis.com/drive/v3/files/${targetId}?fields=id,name,trashed,modifiedTime,mimeType,resourceKey&supportsAllDrives=true`,
+      token, { headers: resourceKeyHeader(targetId, targetKey) }
+    );
+    meta = await metaRes.json();
+    fileId = targetId;
+    resourceKey = targetKey;
+  }
   if (meta.trashed) {
     throw new Error(`"${meta.name || "This file"}" has been deleted (moved to Trash) in Google Drive — edit this source and choose the file again.`);
   }
@@ -1267,7 +1322,7 @@ async function driveReadFileById(fileId, token, tabHint){
     isGoogleSheet
       ? `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`
       : `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`,
-    token
+    token, { headers: resourceKeyHeader(fileId, resourceKey) }
   );
   const buf = await fileRes.arrayBuffer();
   let wb;
@@ -2449,9 +2504,11 @@ function ERPApp(){
   // dropped into it afterward" question the folder-based approach depended
   // on. As of v6.21, filtered to real .xlsx/.xls files AND native Google
   // Sheets — driveReadFileById now reads both. Returns
-  // {id, name} on pick, or null on cancel/error; the caller (SheetSyncTab's
-  // source-editing form) applies it to just that one source, so this
-  // doesn't touch any shared/global state the way the two folder pickers do.
+  // {id, name, resourceKey} on pick (resourceKey added in v6.22, empty
+  // string when the file doesn't need one), or null on cancel/error; the
+  // caller (SheetSyncTab's source-editing form) applies it to just that one
+  // source, so this doesn't touch any shared/global state the way the two
+  // folder pickers do.
   //
   // v6.19: if a starting folder has been set (driveImportFolderId, via the
   // "Starting folder" control in Sync from Google Sheets), the picker opens
@@ -2497,7 +2554,7 @@ function ERPApp(){
           .setCallback((data) => {
             if (data.action === google.picker.Action.PICKED && data.docs && data.docs[0]) {
               const f = data.docs[0];
-              resolve({ id: f.id, name: f.name || "" });
+              resolve({ id: f.id, name: f.name || "", resourceKey: f.resourceKey || "" });
             } else if (data.action === google.picker.Action.CANCEL) {
               resolve(null);
             }
@@ -2820,7 +2877,7 @@ function ERPApp(){
     for (const sh of list) {
       setSheetSyncBusy(sh.name);
       try {
-        const data = await driveReadFileById(sh.fileId, token, sh.tab);
+        const data = await driveReadFileById(sh.fileId, token, sh.tab, sh.resourceKey);
         if (!data || data.ok === false) throw new Error((data && data.error) || "The file could not be read");
         (data.rows || []).forEach(r => collected.push({ row:r, source: r.__folder || r.__file || sh.name }));
         if (data.files) fileReport.push(...data.files);
@@ -2865,7 +2922,7 @@ function ERPApp(){
     setSheetSyncBusy(sh.name);
     try {
       const token = await importToken();
-      const data = await driveReadFileById(sh.fileId, token, sh.tab);
+      const data = await driveReadFileById(sh.fileId, token, sh.tab, sh.resourceKey);
       if (!data || data.ok === false) throw new Error((data && data.error) || "The file could not be read");
       const rowCount = (data.rows || []).length;
       // Uses sheetsRef (not the closed-over sheets state) for the same reason
@@ -9606,7 +9663,7 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
     setPickingFile(true);
     try {
       const picked = await driveChooseSourceFile();
-      if (picked) setEditing(e => e ? { ...e, fileId: picked.id, fileName: picked.name } : e);
+      if (picked) setEditing(e => e ? { ...e, fileId: picked.id, fileName: picked.name, resourceKey: picked.resourceKey || "" } : e);
     } finally {
       setPickingFile(false);
     }
@@ -10076,7 +10133,7 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
           );
         })}
         <BigButton icon="plus" label="Add Source"
-          onClick={()=>setEditing({ id: uid(), name:"", fileId:"", fileName:"", tab:"", kind:"requisitions", lastSync:null })} tone="amber" full />
+          onClick={()=>setEditing({ id: uid(), name:"", fileId:"", fileName:"", resourceKey:"", tab:"", kind:"requisitions", lastSync:null })} tone="amber" full />
       </div>
     </div>
   );
