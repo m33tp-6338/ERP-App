@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.22";
+const APP_VERSION = "6.23";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -63,9 +63,28 @@ const GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
 // Used only to open Google's own folder-picker dialog (so you can point the backup
 // at a folder you already have, like PW/ERP) — not a secret, same as the Client ID.
 const GOOGLE_DRIVE_PICKER_API_KEY = "AIzaSyABzgqparoHG9wfLMV6QBsvviEoUW_uhyU";
+// v6.23: the Google Cloud project number (NOT the Client ID, NOT the API key —
+// the plain number from Cloud Console's "Project info" box). Per Google's own
+// Picker API reference, PickerBuilder.setAppId() is documented as MANDATORY
+// whenever the drive.file scope is used (which this app does everywhere it
+// touches Drive) — without it, a file picked through the Picker dialog is
+// never actually granted to this app under drive.file, so every later Drive
+// API read of that exact file ID 404s with "File not found," permanently,
+// even immediately after a completely fresh pick. This was the real root
+// cause of the "File not found" reports that v6.20/v6.21/v6.22 each partly
+// (but never fully) explained — those were real, separate bugs too (a Shared
+// Drive needing supportsAllDrives, a shared link needing a resourceKey, a
+// shortcut needing to be followed), but none of them was sufficient on its
+// own without this. See: developers.google.com/workspace/drive/picker/reference/picker.pickerbuilder.setappid
+const GOOGLE_DRIVE_APP_ID = "60621934527";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.23", date:"2026-09-07", title:"Fixed the real cause of \"File not found\" on Sync from Google Sheets", items:[
+    "The file picker was missing a required setting Google calls setAppId — without it, picking a file never actually granted this app permission to read it, so it correctly said \"File not found\" every single time, even right after a completely fresh pick.",
+    "v6.20/v6.21/v6.22 fixed real, separate edge cases (a shared company folder, a shared-link file, a shortcut) — all still correct and still needed — but this was the missing piece that made the plain case fail too.",
+    "If any source still shows \"Not working\", edit it, tap Change, and pick the file again — this refreshes the permission this update grants. You should not need to do this more than once.",
+  ]},
   { v:"6.22", date:"2026-09-03", title:"Fixed: a freshly-picked Google Sheet could still say \"File not found\"", items:[
     "After v6.21 let you pick a live Google Sheet, some Sheets (especially ones organised as a shortcut inside a shared company folder, or reached via a shared link) could still fail with \"File not found\" right after picking them - this was a second, different gap from the one fixed in v6.20",
     "Fixed two specific causes, both confirmed against Google's own documentation: (1) some files require a security key the picker provides to be sent back on every request - it wasn't; (2) a file organised as a \"shortcut\" inside a folder (very common in shared company Drive structures) needs to be followed to the real file first - it wasn't",
@@ -2399,6 +2418,7 @@ function ERPApp(){
           .addView(view)
           .setOAuthToken(token)
           .setDeveloperKey(GOOGLE_DRIVE_PICKER_API_KEY)
+          .setAppId(GOOGLE_DRIVE_APP_ID)
           .setOrigin(window.location.protocol + "//" + window.location.host)
           .setTitle("Choose the folder to back up into")
           .setCallback((data) => {
@@ -2469,6 +2489,7 @@ function ERPApp(){
           .addView(view)
           .setOAuthToken(token)
           .setDeveloperKey(GOOGLE_DRIVE_PICKER_API_KEY)
+          .setAppId(GOOGLE_DRIVE_APP_ID)
           .setOrigin(window.location.protocol + "//" + window.location.host)
           .setTitle("Choose the folder \"Choose file\" should start inside")
           .setCallback((data) => {
@@ -2547,6 +2568,7 @@ function ERPApp(){
           .addView(view)
           .setOAuthToken(token)
           .setDeveloperKey(GOOGLE_DRIVE_PICKER_API_KEY)
+          .setAppId(GOOGLE_DRIVE_APP_ID)
           .setOrigin(window.location.protocol + "//" + window.location.host)
           .setTitle(driveImportFolderId
             ? `Choose the Excel file or Google Sheet for this source (starting in ${driveImportFolderName || "your folder"})`
