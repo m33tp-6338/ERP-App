@@ -209,7 +209,7 @@ exactly as invisible to it as before.
 - **Optional PIN lock** exists under Settings if you want to lock the app on the
   phone — off by default.
 - If the app is ever updated (a new `index.html`), bump `CACHE_NAME` in `sw.js`
-  (currently `v22`) so installed phones pick up the new version instead of a
+  (currently `v24`) so installed phones pick up the new version instead of a
   cached old one — and **re-upload all three of `index.html`, `sw.js`, and
   `README.md` together, every time**, even if only one of them actually
   changed. Uploading just `index.html` leaves the live site serving an old
@@ -796,3 +796,117 @@ Attendance-based staff, at their full salary. Treat that figure as a
 **budgeted ceiling assuming full attendance**, not the actual amount paid
 out that month; the real, attendance-adjusted total is what the Payroll tab
 shows for the month you've selected there.
+
+## Diesel Log: a second, separate diesel-tracking section (v6.24)
+
+A new **Diesel Log** tab (Daily work menu) tracks daily diesel issued per
+machine, purchases, and a machinery master list — matching, sheet for sheet
+and column for column, the **Diesel Log** Excel workbooks (Diesel Issued
+Log / Diesel Purchases / Machinery Master) already in use for July/August
+2026.
+
+**This is deliberately separate from the existing Diesel & Machinery tab**,
+not a replacement for it — both keep working independently. The reason:
+the existing tab's Purchase entries have no **Party** or **Payment Status**
+fields, which the reconciled data needs (a purchase's party is who it was
+bought from — a fuel station, a supplier — and Payment Status is free text
+like "Cash/Card", "Bank Transferred", or a specific note like "Bank
+Transfer NEFT on 17/8/2026"). If you're currently using the Diesel &
+Machinery tab and don't need Party/Payment Status tracking, there's no need
+to switch — use whichever fits how you track fuel, or both side by side.
+
+**Import from Excel** on this tab reads a workbook with sheets named
+exactly `Diesel Issued Log`, `Diesel Purchases`, and `Machinery Master` (any
+subset of the three is fine — a file with just one or two sheets still
+imports what's there). It's safe to import the same file more than once:
+matching rows already in the app (by date + machine for the log, date +
+party + litres + amount for purchases) are skipped rather than duplicated,
+and a machine already in the master list (matched by name) is updated
+in place instead of duplicated. Rows with no usable date — including a
+blank TOTAL row, a blank separator row, or the template's "e.g. 2026-09-01"
+example row — are silently skipped, and the app tells you afterward how
+many rows of each kind were added versus skipped.
+
+**Export Excel** on this tab writes the same three-sheet format back out
+(with a TOTAL row on the Log and Purchases sheets, same as the source
+workbooks), so it's interchangeable with the desktop template.
+
+One thing worth knowing: the Machinery Master sheet's **Present in
+July**/**Present in August** columns are preserved when you import a file
+that has them (so re-exporting keeps them), but the app itself doesn't show
+them as editable fields — they were specific to that one-time
+July/August reconciliation and don't generalise to later months. Instead,
+each machine has an ongoing **Active/Inactive** status you set directly in
+the app, which is what the app actually uses to mean "still on site" going
+forward.
+
+## Requisitions & Export: a "Sync Now" button that actually syncs
+
+The **Requisitions & Export** screen's row of buttons now has a fourth one,
+**Sync Now**, next to New / From Excel / From Sheets. Unlike **From
+Sheets** (which just opens the Sync from Google Sheets screen so you can
+manage sources), **Sync Now** runs the sync immediately, right from this
+screen, using whichever Google Sheets sources are set up for Requisitions
+— then takes you to the Sync from Google Sheets screen to review and import
+whatever it found, same as tapping Sync there yourself. If no Requisitions
+source is set up yet, it says so and takes you to that screen to add one.
+
+## Sync from Google Sheets now also covers Cash & Card, Diesel & Machinery and Diesel Log (v6.25)
+
+Sync from Google Sheets was previously limited to Requisitions and
+Expenses. As of v6.25, adding a source's "Syncs into" dropdown offers four
+more kinds: **Cash & Card**, **Diesel & Machinery**, and Diesel Log's
+**Issued Log**, **Purchases** and **Machinery Master** (three separate
+kinds, since a Diesel Log workbook has three tabs — add one source per
+tab you want synced, same as "Payment to be done"/"Master"/"Office Master"
+already work). Two ready-to-use templates are included —
+`Cash_Card_Sync_Template.xlsx` and `Diesel_Machinery_Sync_Template.xlsx` —
+with the exact column headers each kind expects; Diesel Log already had
+its own template from v6.24.
+
+**Sync Now buttons.** Cash & Card, Diesel & Machinery and Diesel Log each
+now have their own **Sync Now** button (next to Import/Export on each
+screen), working exactly like the one on Requisitions & Export — it runs
+that section's sync immediately and takes you to the results. The Diesel
+Log button syncs whichever of its three sources you've set up, all in one
+tap, since a real Diesel Log workbook usually has all three tabs.
+
+**Auto-create on sync.** A Card named in your Cash & Card sheet, or a
+Machine named in your Diesel & Machinery sheet, that doesn't exist in the
+app yet is created automatically — the same behaviour Import from Excel
+already has for both.
+
+**What's append-only vs. what can update an existing row.** To keep this
+sync feature simple and safe, Cash & Card, Diesel & Machinery, and Diesel
+Log's Issued Log and Purchases are **append-only** — a re-sync only ever
+adds rows that look genuinely new; it never rewrites something already in
+the app, even if you've since edited that row's other columns in Excel.
+Diesel Log's Machinery Master is the one exception: a machine matching one
+already here by name has its Category, Ownership and Present-in-month
+flags updated from the sheet (exactly like its Import from Excel already
+does), so correcting a machine's details in the sheet and re-syncing keeps
+the app in step. If you need Cash & Card or Diesel & Machinery entries to
+update in place rather than only append, bring that file in via **Import
+from Excel** instead, which supports that.
+
+**One thing to know about Cash & Card's dedup.** A cash-book sync tells
+rows apart by date, card, type, amount, description and paid-to party —
+not by the row's position in the sheet (Import from Excel does use row
+position, which is why it can tell two identical same-day entries apart
+and this sync currently can't). In practice this only matters if you have
+two genuinely identical entries on the same day (same amount, same
+description, same party) — only the first comes through on a sync. Add a
+short distinguishing word to one of them, or use Import from Excel for
+that file instead. It also means new rows should be added at the bottom of
+a cash book you're syncing repeatedly, not inserted partway through.
+
+**Verification note for a future session:** these five new kinds were
+tested with Node unit tests (copying the exact transform/dedup logic
+verbatim, run against synthetic rows for Cash & Card/Diesel & Machinery
+and the real, already-reconciled July/August/Template workbooks for the
+three Diesel Log kinds) and headless-browser smoke tests (dropdown
+contents, each new Sync Now button's no-source-configured path) — not yet
+against a real Google account or a real filled-in copy of either new
+template. If you set up a real sheet from one of the two new templates and
+something doesn't look right after syncing it, that's the first thing to
+check next.

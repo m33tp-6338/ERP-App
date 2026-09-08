@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.23";
+const APP_VERSION = "6.25";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -80,6 +80,18 @@ const GOOGLE_DRIVE_APP_ID = "60621934527";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.25", date:"2026-09-07", title:"Sync from Google Sheets now covers Cash & Card, Diesel & Machinery and Diesel Log too", items:[
+    "The \"Syncs into\" choice when adding a sync source now includes Cash & Card, Diesel & Machinery, and Diesel Log's three tabs (Issued Log, Purchases, Machinery Master) — previously only Requisitions and Expenses could be synced this way.",
+    "Cash & Card, Diesel & Machinery and Diesel Log each now have their own \"Sync Now\" button, matching the one Requisitions & Export got in the last update — it runs the sync for that section's kind(s) immediately and takes you to the results.",
+    "A card or machine named in your sheet that doesn't exist in the app yet is created automatically on sync, the same way Import from Excel already does it.",
+    "These three new kinds sync additively (nothing already in the app is ever overwritten or removed) — Cash & Card and Diesel & Machinery add only rows that look new; Diesel Log's Machinery Master also updates a matching machine's details in place, same as its Import from Excel already does.",
+    "Two new ready-to-use templates are included — Cash_Card_Sync_Template.xlsx and Diesel_Machinery_Sync_Template.xlsx — for setting up a Google Sheet in the exact column format these two kinds expect (Diesel Log already had its own template).",
+  ]},
+  { v:"6.24", date:"2026-09-07", title:"New: Diesel Log section, and a one-tap Sync Now on Requisitions & Export", items:[
+    "Added a new \"Diesel Log\" section (Daily work menu) — separate from the existing Diesel & Machinery section — for the daily issued log, purchases (with Party and Payment Status, which the existing section doesn't track), and a machinery master list. It has its own Import from Excel and Export Excel, reading and writing the exact same three-sheet format as the Diesel Log workbooks already in use, so the app and that spreadsheet stay interchangeable.",
+    "Importing is safe to repeat: re-importing an updated copy of the same file adds only what's new (matched by date + machine, or date + party + amount, or machine name) instead of creating duplicates.",
+    "Requisitions & Export now has a \"Sync Now\" button that runs the Google Sheets sync immediately and takes you straight to the results — the existing \"From Sheets\" button still just opens that screen if you want to check sources first.",
+  ]},
   { v:"6.23", date:"2026-09-07", title:"Fixed the real cause of \"File not found\" on Sync from Google Sheets", items:[
     "The file picker was missing a required setting Google calls setAppId — without it, picking a file never actually granted this app permission to read it, so it correctly said \"File not found\" every single time, even right after a completely fresh pick.",
     "v6.20/v6.21/v6.22 fixed real, separate edge cases (a shared company folder, a shared-link file, a shortcut) — all still correct and still needed — but this was the missing piece that made the plain case fail too.",
@@ -746,6 +758,167 @@ const DIESEL_PAID_FROM = ["Cash / Card", "Credit (pay later)", "Paid by requisit
 // bought for machinery, whether owned, hired or on instalment.
 const DEFAULT_COMPANIES = ["Own Use", "For Machinery"];
 
+// ---- diesel log (v6.24) ----
+// A second, separate diesel-tracking model — deliberately NOT merged into
+// emptyDiesel/DieselTab above. That existing model has no Party or Payment
+// Status fields on a purchase, and its Issue entries aren't tied to a daily
+// machine log the way this one is. This model instead matches, field for
+// field, the "Diesel Issued Log" / "Diesel Purchases" / "Machinery Master"
+// three-sheet Excel format already reconciled and in use (see
+// Diesel_Log_TEMPLATE.xlsx) so the in-app data and that spreadsheet stay
+// interchangeable — the Excel import/export below reads and writes exactly
+// these column names.
+const emptyDieselLogEntry = { id:"", date:"", machine:"", category:"", ownership:"Own",
+  litres:"", amount:"", openingReading:"", closingReading:"", workingHours:"", trip:"",
+  remarks:"", createdAt:0 };
+const emptyDieselLogPurchase = { id:"", date:"", party:"", litres:"", amount:"",
+  paymentStatus:"", createdAt:0 };
+const emptyDieselLogMachine = { id:"", name:"", category:"", ownership:"Own", active:true,
+  // presentJuly/presentAugust are carried over for round-tripping with the
+  // already-reconciled Machinery Master sheet (its "Present in July/August"
+  // columns) — they aren't shown as editable fields in the app itself since
+  // they're specific to that one-time reconciliation and don't generalise to
+  // later months. Going forward, "active" is the field this app actually
+  // uses to mean "still on site."
+  presentJuly:false, presentAugust:false,
+  notes:"", createdAt:0 };
+const DIESEL_LOG_OWNERSHIP = ["Own", "Rent"];
+// Free-text in the real data (e.g. "Bank Transfer NEFT on 17/8/2026"), so this
+// is offered as suggestions, not a locked list — same pattern as elsewhere
+// in the app where a field is part-fixed, part free text.
+const DIESEL_LOG_PAYMENT_STATUS_SUGGESTIONS = ["Cash/Card", "Bank Transferred", "Payment Pending"];
+
+// Date cells in the Diesel Log workbooks are formatted dd-mmm-yyyy (e.g.
+// "01-Jul-2026"). The import below reads with { raw:true }, so a real xlsx
+// date cell arrives here as its underlying Excel serial number (handled by
+// the numeric branch below) rather than as that formatted text — but the
+// text form is still handled by hand, in case a file was edited so that a
+// date cell became text (e.g. typed into a Text-formatted cell, or pasted
+// from elsewhere). This deliberately does NOT fall back to native
+// new Date(str) parsing the way excelToDateStr (defined further down) does
+// for the rest of the app's Excel imports: new Date() is lenient enough to
+// silently parse throwaway strings like the template's "e.g. 2026-09-01"
+// example-row placeholder as a real date (2026-09-01), which would have
+// silently imported that example row as if it were real data. Every case
+// here is matched by hand instead, same as parseMonthCell elsewhere in this
+// file — anything unrecognised returns "" and the row is skipped, never
+// guessed at. MONTH_NAME_MAP is defined later in this file, but that's fine
+// here: this function's body only runs when a user actually imports a file,
+// by which point the whole script (including that definition) has already run.
+function parseDieselLogDate(v){
+  if (v === undefined || v === null || v === "") return "";
+  if (typeof v === "number") {                        // Excel serial date
+    const d = new Date(Math.round((v - 25569) * 86400 * 1000));
+    return isNaN(d) ? "" : d.toISOString().slice(0,10);
+  }
+  const str = String(v).trim();
+  if (/^\d{5}(\.\d+)?$/.test(str)) {                   // Excel serial that arrived as text
+    const d = new Date(Math.round((Number(str) - 25569) * 86400 * 1000));
+    if (!isNaN(d)) return d.toISOString().slice(0,10);
+  }
+  const iso = str.match(/^(\d{4})-(\d{2})-(\d{2})$/);  // ISO, fully anchored
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+  const dMon = str.match(/^(\d{1,2})[\s\-]([A-Za-z]{3,9})[\s\-](\d{2,4})$/); // "01-Jul-2026" / "1 Jul 26"
+  if (dMon) {
+    const mon = MONTH_NAME_MAP[dMon[2].toLowerCase()];
+    if (!mon) return ""; // unrecognised month name — don't guess, skip the row
+    let y = dMon[3];
+    if (y.length === 2) y = "20" + y;
+    return `${y}-${String(mon).padStart(2,"0")}-${String(dMon[1]).padStart(2,"0")}`;
+  }
+  const dmy = str.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/);      // numeric D/M/Y
+  if (dmy) {
+    let [, d, m, y] = dmy;
+    if (y.length === 2) y = "20" + y;
+    return `${y}-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+  }
+  return ""; // unrecognised — never guessed at via native Date parsing
+}
+// Diesel Log number cells (Litres, Amount, readings) are read with
+// { raw:true } (see handleImportFile below) specifically so a real xlsx
+// number cell arrives here as its exact underlying value (e.g. 707.27, not
+// the display-rounded "707.3" that reading with raw:false would give for a
+// cell formatted to one decimal place) — accuracy matters more here than
+// convenience. This function is the fallback for when a cell isn't a native
+// number at all — typed into a Text-formatted cell, or showing "-" (this
+// workbook's number format for zero) or a thousands-separated string like
+// "14,075.0" pasted in from elsewhere. Blank/"-" comes back as "" (not 0) so
+// a genuine "nothing recorded" cell stays distinguishable from an actual
+// zero — the same convention the rest of this app's numeric fields already
+// use (e.g. emptyDiesel's litres:"").
+function parseDieselLogNumber(v){
+  if (v === undefined || v === null) return "";
+  if (typeof v === "number") return v;
+  const str = String(v).trim();
+  if (str === "" || str === "-") return "";
+  const n = Number(str.replace(/,/g, ""));
+  return isNaN(n) ? "" : n;
+}
+
+// A sync source pointed at one of the three Diesel Log tabs needs
+// driveReadFileById to read with raw:true (see the comment on that
+// function) so parseDieselLogDate/parseDieselLogNumber get the exact
+// values they're written for, not display-rounded text.
+const DIESEL_LOG_SYNC_KINDS = new Set(["diesellogEntries", "diesellogPurchases", "diesellogMachines"]);
+
+// One place describing every "Sync from Google Sheets" kind, used by
+// SheetSyncTab to render labels/rows/buttons without a growing chain of
+// kind==="..." ternaries (that pattern is exactly what produced a couple of
+// real bugs earlier in this project — see the project doc). Adding a new
+// sync kind should mean adding one entry here plus the buildPreview/
+// applyPreview branches, not touching a dozen scattered ternaries.
+//   label       — shown as "Syncs into <label>" and in "Sync all <label> sources"
+//   newLabel    — the "New ..." review-row / button-summary phrase
+//   itemLabel   — singular noun for a count, e.g. "42 <itemLabel>(s)"
+//   describe(d) — one-line summary of a toAdd/duplicate row's data
+//   updateLabel/updateDesc — only set for kinds whose sync can update an
+//     existing record in place (requisitions' Paid-promotion, and
+//     diesellogMachines' merge-by-name); other kinds are append-only.
+const SYNC_KIND_META = {
+  requisitions: {
+    label: "Requisitions", newLabel: "New requisitions", itemLabel: "requisition",
+    describe: (d) => `${d.name || "—"} · ₹${fmtINR(d.amount)} · ${fmtDate(d.date) || "no date"}`,
+    dupDesc: "Same date, same name and same amount as something already recorded, so these are not added again.",
+    updateLabel: "Already in the app — will be marked Paid",
+    updateDesc: "Same date, name and amount as a requisition already here, but this row now shows a Payment Date — so instead of adding a duplicate, the existing one is updated to Paid.",
+    updateSummary: (n) => `${n} marked Paid`,
+  },
+  expenses: {
+    label: "Expenses", newLabel: "New expenses", itemLabel: "expense",
+    describe: (d) => `${d.description || d.expenseType || "—"} · ₹${fmtINR(d.amount)}${d.date || d.periodText ? ` · ${d.date ? fmtDate(d.date) : d.periodText}` : " · no date"}`,
+    dupDesc: "Same date, payer, amount and description as something already recorded, so these are not added again.",
+  },
+  cash: {
+    label: "Cash & Card", newLabel: "New cash entries", itemLabel: "cash entry",
+    describe: (d) => `${d.description || d.vendorName || "—"} · ₹${fmtINR(d.amount)} · ${d.type || ""}${d.date ? ` · ${fmtDate(d.date)}` : ""}`,
+    dupDesc: "Same date, card, type, amount, description and party as something already recorded, so these are not added again. If your cash book genuinely has two identical entries on the same day (same amount, same description, same party), only the first comes through this way — add a short distinguishing note to one of them, or bring that file in via Import from Excel instead, which tells true repeats apart by their row number.",
+  },
+  diesel: {
+    label: "Diesel & Machinery", newLabel: "New diesel entries", itemLabel: "diesel entry",
+    describe: (d) => `${d.type || "Purchase"}${d.__machineName ? ` · ${d.__machineName}` : ""} · ${d.litres || 0} L${d.site ? ` · ${d.site}` : ""}`,
+    dupDesc: "Same date, type, site, litres and machine as something already recorded, so these are not added again.",
+  },
+  diesellogEntries: {
+    label: "Diesel Log — Issued Log", newLabel: "New log entries", itemLabel: "log entry",
+    describe: (d) => `${d.machine || "—"} · ${d.litres === "" ? "no litres" : d.litres + " L"}${d.date ? ` · ${fmtDate(d.date)}` : ""}`,
+    dupDesc: "Same date and machine as something already recorded, so these are not added again.",
+  },
+  diesellogPurchases: {
+    label: "Diesel Log — Purchases", newLabel: "New purchases", itemLabel: "purchase",
+    describe: (d) => `${d.party || "—"} · ${d.litres || 0} L · ₹${fmtINR(d.amount)}`,
+    dupDesc: "Same date, party, litres and amount as something already recorded, so these are not added again.",
+  },
+  diesellogMachines: {
+    label: "Diesel Log — Machinery Master", newLabel: "New machines", itemLabel: "machine",
+    describe: (d) => `${d.name || "—"}${d.category ? ` · ${d.category}` : ""}`,
+    dupDesc: "No machine in your sheet exactly duplicates one already here without changes.",
+    updateLabel: "Already in the app — will be updated",
+    updateDesc: "A machine with this name already exists — its Category, Ownership and Present-in-month flags are updated from the sheet rather than adding a second entry.",
+    updateSummary: (n) => `${n} updated`,
+  },
+};
+function syncKindMeta(kind){ return SYNC_KIND_META[kind] || SYNC_KIND_META.requisitions; }
+
 function dieselStock(site, entries){
   let l = 0;
   entries.forEach(e => {
@@ -1136,6 +1309,9 @@ function collectAllData(){
     utilities: loadKey("erp:utilities", []),
     attendance: loadKey("erp:attendance", []),
     ledgerEntries: loadKey("erp:ledgerEntries", []),
+    dieselLog: loadKey("erp:dieselLog", []),
+    dieselLogPurchases: loadKey("erp:dieselLogPurchases", []),
+    dieselLogMachines: loadKey("erp:dieselLogMachines", []),
     settings: loadKey("erp:settings", { gstApiKey:"" }),
     company: loadKey("erp:company", DEFAULT_COMPANY),
     lists: loadKey("erp:lists", DEFAULT_LISTS),
@@ -1294,7 +1470,7 @@ const GOOGLE_SHORTCUT_MIME = "application/vnd.google-apps.shortcut";
 function resourceKeyHeader(fileId, resourceKey){
   return resourceKey ? { "X-Goog-Drive-Resource-Keys": `${fileId}/${resourceKey}` } : undefined;
 }
-async function driveReadFileById(fileId, token, tabHint, resourceKey){
+async function driveReadFileById(fileId, token, tabHint, resourceKey, raw){
   if (!fileId) throw new Error("No file has been chosen for this source yet — edit it and tap Choose file.");
   // supportsAllDrives=true matters specifically when the picked file lives
   // inside a Google Shared Drive (a "Team Drive") rather than the user's own
@@ -1361,7 +1537,16 @@ async function driveReadFileById(fileId, token, tabHint, resourceKey){
   }
   if (!sheetName) sheetName = wb.SheetNames.find(n => n.toLowerCase() !== "read me") || wb.SheetNames[0];
   const ws = wb.Sheets[sheetName];
-  const rows = XLSX.utils.sheet_to_json(ws, { defval: "", raw: false });
+  // raw:false (the default) reads a cell's DISPLAY text, which is exactly
+  // right for everything that already works (dates as "DD-MMM-YYYY"-style
+  // text, numbers as their formatted string). The Diesel Log sync kinds
+  // opt into raw:true instead — see the v6.24 build notes in the project
+  // doc: reading a formatted cell's display text there silently rounded a
+  // real value (707.27 -> "707.3"), and parseDieselLogDate/Number are
+  // written specifically to consume raw:true's exact numbers and Excel
+  // serial dates. Never flip this default for the other kinds without the
+  // same care taken there.
+  const rows = XLSX.utils.sheet_to_json(ws, { defval: "", raw: !!raw });
   return { ok: true, sheet: sheetName, rows, fileName: meta.name, modifiedTime: meta.modifiedTime };
 }
 function payloadCounts(d){
@@ -1730,6 +1915,7 @@ const MENU_SECTIONS = [
     { id:"expenses",    label:"Expenses",            desc:"Office, travel and site spending" },
     { id:"cash",        label:"Cash & Card",         desc:"ATM refills, cash spends, balances" },
     { id:"diesel",      label:"Diesel & Machinery",  desc:"Fuel stock, usage per machine, assets" },
+    { id:"diesellog",   label:"Diesel Log",          desc:"Daily issued log, purchases, machinery master" },
     { id:"utilities",   label:"Utilities",           desc:"Electricity, water, internet by month" },
     { id:"receivables", label:"Receivables",         desc:"Money overpaid and due back" },
   ]},
@@ -2108,6 +2294,9 @@ function ERPApp(){
   const [utilities, setUtilitiesState] = useState([]);
   const [attendance, setAttendanceState] = useState([]);
   const [ledgerEntries, setLedgerEntriesState] = useState([]);
+  const [dieselLog, setDieselLogState] = useState([]);
+  const [dieselLogPurchases, setDieselLogPurchasesState] = useState([]);
+  const [dieselLogMachines, setDieselLogMachinesState] = useState([]);
   const [settings, setSettingsState] = useState({ gstApiKey:"" });
   const [company, setCompanyState] = useState(DEFAULT_COMPANY);
   const [lists, setListsState] = useState(DEFAULT_LISTS);
@@ -2194,6 +2383,9 @@ function ERPApp(){
     if (data.utilities) { setUtilitiesState(data.utilities); saveKey("erp:utilities", data.utilities); }
     if (data.attendance) { setAttendanceState(data.attendance); saveKey("erp:attendance", data.attendance); }
     if (data.ledgerEntries) { setLedgerEntriesState(data.ledgerEntries); saveKey("erp:ledgerEntries", data.ledgerEntries); }
+    if (data.dieselLog) { setDieselLogState(data.dieselLog); saveKey("erp:dieselLog", data.dieselLog); }
+    if (data.dieselLogPurchases) { setDieselLogPurchasesState(data.dieselLogPurchases); saveKey("erp:dieselLogPurchases", data.dieselLogPurchases); }
+    if (data.dieselLogMachines) { setDieselLogMachinesState(data.dieselLogMachines); saveKey("erp:dieselLogMachines", data.dieselLogMachines); }
     if (data.settings) { setSettingsState(data.settings); saveKey("erp:settings", data.settings); }
     if (data.company) { setCompanyState(data.company); saveKey("erp:company", data.company); }
     if (data.lists) { setListsState(data.lists); saveKey("erp:lists", data.lists); }
@@ -2218,6 +2410,9 @@ function ERPApp(){
     setUtilitiesState(loadKey("erp:utilities", []));
     setAttendanceState(loadKey("erp:attendance", []));
     setLedgerEntriesState(loadKey("erp:ledgerEntries", []));
+    setDieselLogState(loadKey("erp:dieselLog", []));
+    setDieselLogPurchasesState(loadKey("erp:dieselLogPurchases", []));
+    setDieselLogMachinesState(loadKey("erp:dieselLogMachines", []));
     setCompanyState(loadKey("erp:company", DEFAULT_COMPANY));
     setListsState(loadKey("erp:lists", DEFAULT_LISTS));
     setLoaded(true);
@@ -2705,6 +2900,21 @@ function ERPApp(){
     if (!saveKey("erp:ledgerEntries", next)) showToast("Could not save the ledger entry", "error");
     markDirty();
   }, [showToast, markDirty]);
+  const setDieselLog = useCallback((next) => {
+    setDieselLogState(next);
+    if (!saveKey("erp:dieselLog", next)) showToast("Could not save the diesel log", "error");
+    markDirty();
+  }, [showToast, markDirty]);
+  const setDieselLogPurchases = useCallback((next) => {
+    setDieselLogPurchasesState(next);
+    if (!saveKey("erp:dieselLogPurchases", next)) showToast("Could not save diesel purchases", "error");
+    markDirty();
+  }, [showToast, markDirty]);
+  const setDieselLogMachines = useCallback((next) => {
+    setDieselLogMachinesState(next);
+    if (!saveKey("erp:dieselLogMachines", next)) showToast("Could not save the machinery master list", "error");
+    markDirty();
+  }, [showToast, markDirty]);
   const setSheets = useCallback((next) => {
     setSheetsState(next);
     if (!saveKey("erp:sheets", next)) showToast("Could not save sheet settings", "error");
@@ -2746,26 +2956,114 @@ function ERPApp(){
 
   const buildPreview = useCallback((collected, failures, list, fileReport, skippedFiles, seenFiles, notes, silent) => {
     const kind = (list[0] && list[0].kind) || "requisitions";
-    const tpl = kind === "expenses" ? EXPENSE_TEMPLATE : REQ_TEMPLATE;
-    const headers = [...new Set(collected.flatMap(c => Object.keys(c.row)))]
-      .filter(h => h !== "__file" && h !== "__folder");
-    const map = autoMapHeaders(headers, tpl);
-    const missing = tpl.filter(f => f.required && !map[f.key]);
-    const toAdd = [], duplicates = [], errors = [];
 
     // Queues (rather than replaces) the result — an automatic check can find
-    // both a Requisitions source and an Expenses source ready at once, and
-    // each gets its own turn in the preview screen. A fresh check for a kind
-    // replaces whatever was still queued for that same kind, so the queue
-    // never shows stale data. When silent (the automatic check, not a tap
-    // on Sync now/Sync all), nothing is queued unless there's actually
-    // something worth the user's attention — no interruption for "nothing
-    // new".
+    // several sources ready at once, and each kind gets its own turn in the
+    // preview screen. A fresh check for a kind replaces whatever was still
+    // queued for that same kind, so the queue never shows stale data. When
+    // silent (the automatic check, not a tap on Sync now/Sync all), nothing
+    // is queued unless there's actually something worth the user's
+    // attention — no interruption for "nothing new".
     function queueResult(entry){
       const hasSomethingToReview = entry.toAdd.length > 0 || (entry.toUpdate && entry.toUpdate.length > 0);
       if (silent && !hasSomethingToReview) return;
       setSheetPreviewQueue(q => [...q.filter(p => p.kind !== kind), entry]);
     }
+
+    // The three Diesel Log kinds read raw column names straight off the row
+    // (exactly like DieselLogTab's own Import from Excel, v6.24) instead of
+    // going through the TEMPLATE/autoMapHeaders header-matching engine the
+    // other kinds use below — there's no template for a 3-tab, hand-parsed
+    // format like this. Each source syncs exactly one of the three tabs;
+    // driveReadFileById was called with raw:true for these kinds (see
+    // DIESEL_LOG_SYNC_KINDS) so parseDieselLogDate/Number see exact values.
+    if (kind === "diesellogEntries") {
+      const toAdd = [], duplicates = [], errors = [];
+      const existingKeys = new Set((dieselLog||[]).map(e => `${e.date}|${e.machine}`.toLowerCase()));
+      const seenKeys = new Set();
+      collected.forEach(c => {
+        const r = c.row;
+        const date = parseDieselLogDate(r["Date"]);
+        const machine = String(r["Machine"]||"").trim();
+        if (!date || !machine) return; // TOTAL row, blank row, or a template placeholder row — not real data, not an error
+        const out = { date, machine, category: String(r["Category"]||"").trim(),
+          ownership: String(r["Ownership"]||"").trim() || "Own",
+          litres: parseDieselLogNumber(r["Diesel Issued (L)"]),
+          amount: parseDieselLogNumber(r["Amount (Rs)"]),
+          openingReading: parseDieselLogNumber(r["Opening Reading"]),
+          closingReading: parseDieselLogNumber(r["Closing Reading"]),
+          workingHours: parseDieselLogNumber(r["Working Hours / KM"]),
+          trip: String(r["Trip"]||"").trim(), remarks: String(r["Remarks"]||"").trim() };
+        const k = `${date}|${machine}`.toLowerCase();
+        if (existingKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"already in the app" }); return; }
+        if (seenKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"repeated inside this sync" }); return; }
+        seenKeys.add(k);
+        toAdd.push({ data:out, source:c.source });
+      });
+      queueResult({ kind, toAdd, toUpdate:[], duplicates, errors, failures, missing:[], list, fileReport, skippedFiles, seenFiles, notes });
+      return;
+    }
+
+    if (kind === "diesellogPurchases") {
+      const toAdd = [], duplicates = [], errors = [];
+      const existingKeys = new Set((dieselLogPurchases||[]).map(p => `${p.date}|${p.party}|${p.litres}|${p.amount}`.toLowerCase()));
+      const seenKeys = new Set();
+      collected.forEach(c => {
+        const r = c.row;
+        const date = parseDieselLogDate(r["Date"]);
+        if (!date) return; // TOTAL row, blank row, or a template placeholder row
+        const litres = parseDieselLogNumber(r["Litres"]);
+        const amount = parseDieselLogNumber(r["Amount (Rs)"]);
+        if (litres === "" && amount === "") return; // a dated row with nothing actually purchased
+        const party = String(r["Party"]||"").trim();
+        const out = { date, party, litres, amount, paymentStatus: String(r["Payment Status"]||"").trim() };
+        const k = `${date}|${party}|${litres}|${amount}`.toLowerCase();
+        if (existingKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"already in the app" }); return; }
+        if (seenKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"repeated inside this sync" }); return; }
+        seenKeys.add(k);
+        toAdd.push({ data:out, source:c.source });
+      });
+      queueResult({ kind, toAdd, toUpdate:[], duplicates, errors, failures, missing:[], list, fileReport, skippedFiles, seenFiles, notes });
+      return;
+    }
+
+    if (kind === "diesellogMachines") {
+      const toAdd = [], toUpdate = [], duplicates = [], errors = [];
+      const existing = dieselLogMachines || [];
+      collected.forEach(c => {
+        const r = c.row;
+        const name = String(r["Machine"]||"").trim();
+        const category = String(r["Category"]||"").trim();
+        const ownership = String(r["Ownership"]||"").trim();
+        if (!name || (!category && !ownership)) return; // trailing instructional note row
+        const presentJuly = /^y/i.test(String(r["Present in July"]||""));
+        const presentAugust = /^y/i.test(String(r["Present in August"]||""));
+        const notes = String(r["Notes"]||"").trim();
+        const out = { name, category, ownership: ownership || "Own", presentJuly, presentAugust, notes };
+        const match = existing.find(m => String(m.name||"").trim().toLowerCase() === name.toLowerCase());
+        if (match) {
+          const changed = match.category !== category || (ownership && match.ownership !== ownership)
+            || (presentJuly && !match.presentJuly) || (presentAugust && !match.presentAugust)
+            || (notes && match.notes !== notes);
+          if (!changed) { duplicates.push({ data:out, source:c.source, why:"no change from what's already here" }); return; }
+          toUpdate.push({ existing:match, source:c.source, data:out,
+            patch: { category, ownership: ownership || match.ownership,
+              presentJuly: presentJuly || match.presentJuly, presentAugust: presentAugust || match.presentAugust,
+              notes: notes || match.notes } });
+          return;
+        }
+        toAdd.push({ data:out, source:c.source });
+      });
+      queueResult({ kind, toAdd, toUpdate, duplicates, errors, failures, missing:[], list, fileReport, skippedFiles, seenFiles, notes });
+      return;
+    }
+
+    const tpl = kind === "expenses" ? EXPENSE_TEMPLATE : kind === "cash" ? CASH_TEMPLATE : kind === "diesel" ? DIESEL_TEMPLATE : REQ_TEMPLATE;
+    const headers = [...new Set(collected.flatMap(c => Object.keys(c.row)))]
+      .filter(h => h !== "__file" && h !== "__folder");
+    const map = autoMapHeaders(headers, tpl);
+    const missing = tpl.filter(f => f.required && !map[f.key]);
+    const toAdd = [], duplicates = [], errors = [];
 
     if (kind === "expenses") {
       // Mirrors ImportTab's own "expenses" row handling (see ImportTab.buildPreview),
@@ -2799,6 +3097,101 @@ function ERPApp(){
 
         const k = [out.date || out.periodText, String(out.paidBy||"").toLowerCase(), Number(out.amount||0),
                    String(out.description||"").toLowerCase(), String(out.subCategory||"").toLowerCase()].join("|");
+        if (existingKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"already in the app" }); return; }
+        if (seenKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"repeated inside this sync" }); return; }
+        seenKeys.add(k);
+        toAdd.push({ data:out, source:c.source });
+      });
+
+      queueResult({ kind, toAdd, toUpdate:[], duplicates, errors, failures, missing, map, headers, list, fileReport, skippedFiles, seenFiles, notes });
+      return;
+    }
+
+    if (kind === "cash") {
+      // Mirrors ImportTab's own "cash" row handling (debit/credit inference,
+      // card auto-create by name) but stays append-only, like the expenses
+      // branch above — no running-balance check and no update-by-ID/match,
+      // since those are exactly the update-merge features this tab
+      // deliberately leaves to Import from Excel. Dedup is content-based
+      // (no row-position tracking across syncs) — see SYNC_KIND_META.cash's
+      // dupDesc for the one known trade-off that comes with that.
+      const cardNameOfId = (id) => ((cards||[]).find(c=>c.id===id)||{}).name || "";
+      const existingKeys = new Set();
+      (cashTxns||[]).forEach(t => {
+        const k = [t.date, cardNameOfId(t.cardId).toLowerCase(), t.type, Number(t.amount||0),
+                   String(t.description||"").toLowerCase(), String(t.vendorName||"").toLowerCase()].join("|");
+        existingKeys.add(k);
+      });
+      const seenKeys = new Set();
+
+      collected.forEach((c, i) => {
+        const { out, problems } = mapRowGeneric(c.row, tpl, map);
+        if (problems.length) { errors.push({ source:c.source, rowNum:i+2, why:`missing ${problems.join(", ")}` }); return; }
+
+        const dr = Number(out.debit || 0), cr = Number(out.credit || 0);
+        delete out.debit; delete out.credit;
+        delete out.sheetBalance; delete out.srNo;
+        if (out.voucherNo && !out.billNo) out.billNo = out.voucherNo;
+        if (dr > 0 || cr > 0) { out.type = cr > 0 ? "Refill" : "Spend"; out.amount = cr > 0 ? cr : dr; }
+        else {
+          const t = String(out.type||"").toLowerCase();
+          out.type = (t.indexOf("refill")>=0 || t.indexOf("withdraw")>=0 || t.indexOf("deposit")>=0
+                      || t.indexOf("credit")>=0 || t.indexOf("in")===0) ? "Refill"
+                   : (t.indexOf("return")>=0 || t.indexOf("refund")>=0) ? "Return" : "Spend";
+        }
+        if (!Number(out.amount)) { errors.push({ source:c.source, rowNum:i+2, why:"no amount, debit or credit on this row" }); return; }
+        if (out.voucherNo) out.ref = [out.ref, "Voucher " + out.voucherNo].filter(Boolean).join(" / ");
+        delete out.voucherNo;
+        const hb = String(out.hasBillRaw||"").trim().toLowerCase();
+        out.hasBill = ["yes","y","true","1","available","attached","received"].includes(hb) || !!String(out.billNo||"").trim();
+        delete out.hasBillRaw;
+        if (!out.site) out.site = c.source;
+
+        const cName = String(out.cardName||"").trim();
+        delete out.cardName;
+        out.__cardName = cName;
+
+        const k = [out.date, cName.toLowerCase(), out.type, Number(out.amount||0),
+                   String(out.description||"").toLowerCase(), String(out.vendorName||"").toLowerCase()].join("|");
+        if (existingKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"already in the app" }); return; }
+        if (seenKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"repeated inside this sync" }); return; }
+        seenKeys.add(k);
+        toAdd.push({ data:out, source:c.source });
+      });
+
+      queueResult({ kind, toAdd, toUpdate:[], duplicates, errors, failures, missing, map, headers, list, fileReport, skippedFiles, seenFiles, notes });
+      return;
+    }
+
+    if (kind === "diesel") {
+      // Mirrors ImportTab's own "diesel" row handling (purchase/issue
+      // inference, machine auto-create by name), append-only like the
+      // branches above. Dedup key is identical to ImportTab's dieselByKey
+      // formula so the same row is recognised the same way either path.
+      const machineNameOf = (id) => ((machines||[]).find(m=>m.id===id)||{}).name || "";
+      const existingKeys = new Set((diesel||[]).map(d =>
+        [d.date, d.type, d.site, Number(d.litres||0), machineNameOf(d.machineId).toLowerCase()].join("|")));
+      const seenKeys = new Set();
+
+      collected.forEach((c, i) => {
+        const { out, problems } = mapRowGeneric(c.row, tpl, map);
+        if (problems.length) { errors.push({ source:c.source, rowNum:i+2, why:`missing ${problems.join(", ")}` }); return; }
+
+        const dt = String(out.type||"").toLowerCase();
+        out.type = (dt.indexOf("issue")>=0 || dt.indexOf("usage")>=0 || dt.indexOf("consum")>=0
+                    || dt.indexOf("out")===0 || !!String(out.machineName||"").trim()) ? "Issue" : "Purchase";
+        const hb = String(out.hasBillRaw||"").trim().toLowerCase();
+        out.hasBill = ["yes","y","true","1","available","attached","received"].includes(hb) || !!String(out.billNo||"").trim();
+        delete out.hasBillRaw;
+        if (out.type === "Purchase") {
+          const lit = Number(out.litres||0), rate = Number(out.rate||0), amt = Number(out.amount||0);
+          if (!amt && rate && lit) out.amount = +(lit*rate).toFixed(2);
+          if (!rate && amt && lit) out.rate = +(amt/lit).toFixed(2);
+        }
+        out.__machineName = String(out.machineName||"").trim();
+        delete out.machineName;
+
+        const k = [out.date, out.type, out.site, Number(out.litres||0), out.__machineName.toLowerCase()].join("|");
         if (existingKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"already in the app" }); return; }
         if (seenKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"repeated inside this sync" }); return; }
         seenKeys.add(k);
@@ -2877,7 +3270,7 @@ function ERPApp(){
     });
 
     queueResult({ kind, toAdd, toUpdate, duplicates, errors, failures, missing, map, headers, list, fileReport, skippedFiles, seenFiles, notes });
-  }, [lists, expenses, reqs, recurring]);
+  }, [lists, expenses, reqs, recurring, cards, cashTxns, machines, diesel, dieselLog, dieselLogPurchases, dieselLogMachines]);
 
   const syncSheets = useCallback(async (list, opts) => {
     const silent = !!(opts && opts.silent);
@@ -2899,7 +3292,7 @@ function ERPApp(){
     for (const sh of list) {
       setSheetSyncBusy(sh.name);
       try {
-        const data = await driveReadFileById(sh.fileId, token, sh.tab, sh.resourceKey);
+        const data = await driveReadFileById(sh.fileId, token, sh.tab, sh.resourceKey, DIESEL_LOG_SYNC_KINDS.has(sh.kind));
         if (!data || data.ok === false) throw new Error((data && data.error) || "The file could not be read");
         (data.rows || []).forEach(r => collected.push({ row:r, source: r.__folder || r.__file || sh.name }));
         if (data.files) fileReport.push(...data.files);
@@ -2944,7 +3337,7 @@ function ERPApp(){
     setSheetSyncBusy(sh.name);
     try {
       const token = await importToken();
-      const data = await driveReadFileById(sh.fileId, token, sh.tab, sh.resourceKey);
+      const data = await driveReadFileById(sh.fileId, token, sh.tab, sh.resourceKey, DIESEL_LOG_SYNC_KINDS.has(sh.kind));
       if (!data || data.ok === false) throw new Error((data && data.error) || "The file could not be read");
       const rowCount = (data.rows || []).length;
       // Uses sheetsRef (not the closed-over sheets state) for the same reason
@@ -3001,6 +3394,122 @@ function ERPApp(){
 
       setSheets(sheets.map(x => (preview.list || []).some(l => l.id === x.id) ? { ...x, lastSync: stamp } : x));
       showToast(`${added.length} expense(s) brought in`);
+      setSheetPreviewQueue(q => q.slice(1));
+      return;
+    }
+
+    if (preview.kind === "cash") {
+      const newCards = [];
+      const findCard = (nm) => {
+        const t = String(nm||"").trim().toLowerCase();
+        if (!t) return null;
+        return (cards||[]).find(c => String(c.name||"").trim().toLowerCase() === t)
+            || newCards.find(c => String(c.name||"").trim().toLowerCase() === t) || null;
+      };
+      const seqBase = (cashTxns||[]).reduce((m,t)=>Math.max(m, Number(t.seq||0)), 0);
+      const added = preview.toAdd.map((a, idx) => {
+        const d = { ...a.data };
+        const cName = d.__cardName || "";
+        delete d.__cardName;
+        let card = findCard(cName);
+        if (!card) {
+          if (cName) { card = { ...emptyCard, id: uid(), name: cName, site: d.site || "" }; newCards.push(card); }
+          else {
+            const existingCards = cards || [];
+            card = existingCards.length === 1 ? existingCards[0]
+                 : findCard("Site Cash")
+                 || (() => { const c = { ...emptyCard, id: uid(), name:"Site Cash", site: d.site || "" }; newCards.push(c); return c; })();
+          }
+        }
+        return { ...emptyCashTxn, ...d, id: uid(), cardId: card ? card.id : "", seq: seqBase + idx + 1, createdAt: Date.now() + idx };
+      });
+      setCashTxns([...(cashTxns||[]), ...added]);
+      if (newCards.length) setCards([...(cards||[]), ...newCards]);
+
+      const L = lists || DEFAULT_LISTS;
+      const nl = { ...L, sites:[...(L.sites||[])], categories:[...(L.categories||[])], subCategories:{...(L.subCategories||{})} };
+      added.forEach(d => {
+        if (d.site && !nl.sites.includes(d.site)) nl.sites.push(d.site);
+        if (d.category && !nl.categories.includes(d.category)) nl.categories.push(d.category);
+        if (d.category && d.subCategory) {
+          const cur = nl.subCategories[d.category] || [];
+          if (!cur.includes(d.subCategory)) nl.subCategories[d.category] = [...cur, d.subCategory].sort();
+        }
+      });
+      nl.sites.sort(); nl.categories.sort();
+      setLists(nl);
+
+      setSheets(sheets.map(x => (preview.list || []).some(l => l.id === x.id) ? { ...x, lastSync: stamp } : x));
+      showToast(`${added.length} cash entry(ies) brought in${newCards.length ? ` · ${newCards.length} card(s) created` : ""}`);
+      setSheetPreviewQueue(q => q.slice(1));
+      return;
+    }
+
+    if (preview.kind === "diesel") {
+      const newMachines = [];
+      const findMachine = (nm) => {
+        const t = String(nm||"").trim().toLowerCase();
+        if (!t) return null;
+        return (machines||[]).find(m => String(m.name||"").trim().toLowerCase() === t
+                                     || String(m.regNo||"").trim().toLowerCase() === t)
+            || newMachines.find(m => String(m.name||"").trim().toLowerCase() === t) || null;
+      };
+      const added = preview.toAdd.map((a, idx) => {
+        const d = { ...a.data };
+        const mName = d.__machineName || "";
+        delete d.__machineName;
+        let machine = null;
+        if (d.type === "Issue" && mName) {
+          machine = findMachine(mName);
+          if (!machine) {
+            machine = { ...emptyMachine, id: uid(), name: mName, site: d.site || "", ownership:"Owned", active:true };
+            newMachines.push(machine);
+          }
+        }
+        return { ...emptyDiesel, ...d, id: uid(), machineId: machine ? machine.id : "", createdAt: Date.now() + idx };
+      });
+      setDiesel([...(diesel||[]), ...added]);
+      if (newMachines.length) setMachines([...(machines||[]), ...newMachines]);
+
+      const L = lists || DEFAULT_LISTS;
+      const nl = { ...L, sites:[...(L.sites||[])] };
+      added.forEach(d => { if (d.site && !nl.sites.includes(d.site)) nl.sites.push(d.site); });
+      nl.sites.sort(); setLists(nl);
+
+      setSheets(sheets.map(x => (preview.list || []).some(l => l.id === x.id) ? { ...x, lastSync: stamp } : x));
+      showToast(`${added.length} diesel entry(ies) brought in${newMachines.length ? ` · ${newMachines.length} machine(s) created` : ""}`);
+      setSheetPreviewQueue(q => q.slice(1));
+      return;
+    }
+
+    if (preview.kind === "diesellogEntries") {
+      const added = preview.toAdd.map((a, idx) => ({ ...emptyDieselLogEntry, ...a.data, id: uid(), createdAt: Date.now() + idx }));
+      setDieselLog([...(dieselLog||[]), ...added]);
+      setSheets(sheets.map(x => (preview.list || []).some(l => l.id === x.id) ? { ...x, lastSync: stamp } : x));
+      showToast(`${added.length} log entry(ies) brought in`);
+      setSheetPreviewQueue(q => q.slice(1));
+      return;
+    }
+
+    if (preview.kind === "diesellogPurchases") {
+      const added = preview.toAdd.map((a, idx) => ({ ...emptyDieselLogPurchase, ...a.data, id: uid(), createdAt: Date.now() + idx }));
+      setDieselLogPurchases([...(dieselLogPurchases||[]), ...added]);
+      setSheets(sheets.map(x => (preview.list || []).some(l => l.id === x.id) ? { ...x, lastSync: stamp } : x));
+      showToast(`${added.length} purchase(s) brought in`);
+      setSheetPreviewQueue(q => q.slice(1));
+      return;
+    }
+
+    if (preview.kind === "diesellogMachines") {
+      const added = preview.toAdd.map((a, idx) => ({ ...emptyDieselLogMachine, ...a.data, id: uid(), active:true, createdAt: Date.now() + idx }));
+      let next = [...(dieselLogMachines||[]), ...added];
+      (preview.toUpdate||[]).forEach(u => {
+        next = next.map(m => m.id === u.existing.id ? { ...m, ...u.patch } : m);
+      });
+      setDieselLogMachines(next);
+      setSheets(sheets.map(x => (preview.list || []).some(l => l.id === x.id) ? { ...x, lastSync: stamp } : x));
+      const updCount = (preview.toUpdate||[]).length;
+      showToast(`${added.length} machine(s) added${updCount ? ` · ${updCount} updated` : ""}`);
       setSheetPreviewQueue(q => q.slice(1));
       return;
     }
@@ -3073,7 +3582,9 @@ function ERPApp(){
       + (updatedCount ? ` · ${updatedCount} marked Paid` : "")
       + (recurringUpdates.length ? ` · ${recurringUpdates.length} Rent & EMI item(s) updated` : ""));
     setSheetPreviewQueue(q => q.slice(1));
-  }, [sheetPreviewQueue, expenses, setExpenses, lists, setLists, sheets, setSheets, showToast, reqs, setReqs, vendors, setVendors, recurring, setRecurring]);
+  }, [sheetPreviewQueue, expenses, setExpenses, lists, setLists, sheets, setSheets, showToast, reqs, setReqs, vendors, setVendors, recurring, setRecurring,
+      cards, setCards, cashTxns, setCashTxns, machines, setMachines, diesel, setDiesel,
+      dieselLog, setDieselLog, dieselLogPurchases, setDieselLogPurchases, dieselLogMachines, setDieselLogMachines]);
 
   // Runs syncSheets() silently (no toasts, no interrupting whatever tab the
   // user is on) for every source that already has a file picked, grouped by
@@ -3085,7 +3596,7 @@ function ERPApp(){
     const ready = sheets.filter(sh => sh.fileId);
     if (!ready.length) return;
     lastAutoSyncAtRef.current = Date.now();
-    for (const k of ["requisitions", "expenses"]) {
+    for (const k of Object.keys(SYNC_KIND_META)) {
       const group = ready.filter(sh => (sh.kind||"requisitions") === k);
       if (group.length) await syncSheets(group, { silent: true });
     }
@@ -3205,7 +3716,7 @@ function ERPApp(){
       }} />;
   }
 
-  const TAB_TITLES = { dashboard:"Overview", vendors:"Ledgers", requisition:"New Payment Requisition", export:"Requisitions & Export", settings:"Settings", recurring:"Rent & EMI", company:"Company Details", payments:"Payment Register", import:"Import from Excel", receivables:"Receivables", expenses:"Expenses", sheets:"Sync from Google Sheets", statement:"Monthly Statement", sitesummary:"Site Summary", employees:"Employee Master", cash:"Cash & Card", diesel:"Diesel & Machinery", utilities:"Utilities", changelog:"What is New", fixedcost:"Fixed Cost Summary", payroll:"Payroll" };
+  const TAB_TITLES = { dashboard:"Overview", vendors:"Ledgers", requisition:"New Payment Requisition", export:"Requisitions & Export", settings:"Settings", recurring:"Rent & EMI", company:"Company Details", payments:"Payment Register", import:"Import from Excel", receivables:"Receivables", expenses:"Expenses", sheets:"Sync from Google Sheets", statement:"Monthly Statement", sitesummary:"Site Summary", employees:"Employee Master", cash:"Cash & Card", diesel:"Diesel & Machinery", diesellog:"Diesel Log", utilities:"Utilities", changelog:"What is New", fixedcost:"Fixed Cost Summary", payroll:"Payroll" };
 
   const openImport = (kind, cardId) => { setImportFocus(kind || ""); setImportCardHint(cardId || ""); setTab("import"); };
   const toPayCount = reqs.filter(r => r.paymentStatus !== "Paid" || !r.paymentDate).length;
@@ -3249,7 +3760,7 @@ function ERPApp(){
         {tab==="dashboard" && <Dashboard vendors={vendors} reqs={reqs} setReqs={setReqs} recurring={recurring} setRecurring={setRecurring} expenses={expenses} cashTxns={cashTxns} goTo={navigate} showToast={showToast} sync={syncProps} />}
         {tab==="vendors" && <VendorsTab vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
         {tab==="requisition" && <RequisitionForm vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} expenses={expenses} setExpenses={setExpenses} lists={lists} setLists={setLists} goTo={navigate} openImport={openImport} showToast={showToast} />}
-        {tab==="export" && <ExportTab reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} expenses={expenses} setExpenses={setExpenses} goTo={navigate} openImport={openImport} showToast={showToast} />}
+        {tab==="export" && <ExportTab reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} expenses={expenses} setExpenses={setExpenses} goTo={navigate} openImport={openImport} showToast={showToast} sheets={sheets} syncSheets={syncSheets} sheetSyncBusy={sheetSyncBusy} />}
         {tab==="recurring" && <RecurringTab vendors={vendors} setVendors={setVendors} recurring={recurring} setRecurring={setRecurring} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
         {tab==="import" && <ImportTab focusKind={importFocus} clearFocus={()=>setImportFocus("")} presetCardId={importCardHint} vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} recurring={recurring} setRecurring={setRecurring} expenses={expenses} setExpenses={setExpenses} cards={cards} setCards={setCards} cashTxns={cashTxns} setCashTxns={setCashTxns} machines={machines} setMachines={setMachines} diesel={diesel} setDiesel={setDiesel} utilities={utilities} setUtilities={setUtilities} attendance={attendance} setAttendance={setAttendance} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} />}
         {tab==="fixedcost" && <FixedCostTab recurring={recurring} vendors={vendors} machines={machines} showToast={showToast} goTo={navigate} />}
@@ -3257,10 +3768,17 @@ function ERPApp(){
         {tab==="utilities" && <UtilitiesTab utilities={utilities} setUtilities={setUtilities} cards={cards}
           lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} />}
         {tab==="diesel" && <DieselTab machines={machines} setMachines={setMachines} diesel={diesel} setDiesel={setDiesel}
-          recurring={recurring} vendors={vendors} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
+          recurring={recurring} vendors={vendors} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport}
+          sheets={sheets} syncSheets={syncSheets} sheetSyncBusy={sheetSyncBusy} />}
+        {tab==="diesellog" && <DieselLogTab dieselLog={dieselLog} setDieselLog={setDieselLog}
+          dieselLogPurchases={dieselLogPurchases} setDieselLogPurchases={setDieselLogPurchases}
+          dieselLogMachines={dieselLogMachines} setDieselLogMachines={setDieselLogMachines}
+          showToast={showToast} goTo={navigate}
+          sheets={sheets} syncSheets={syncSheets} sheetSyncBusy={sheetSyncBusy} />}
         {tab==="cash" && <CashTab cards={cards} setCards={setCards} cashTxns={cashTxns} setCashTxns={setCashTxns}
           cashCounts={cashCounts} setCashCounts={setCashCounts} vendors={vendors}
-          lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
+          lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport}
+          sheets={sheets} syncSheets={syncSheets} sheetSyncBusy={sheetSyncBusy} />}
         {tab==="employees" && <EmployeesTab vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
         {tab==="payroll" && <PayrollTab vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} attendance={attendance} setAttendance={setAttendance} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
         {tab==="statement" && <MonthlyStatementTab reqs={reqs} expenses={expenses} cashTxns={cashTxns} cards={cards} showToast={showToast} goTo={navigate} />}
@@ -4921,7 +5439,7 @@ async function shareRequisitions(rows){
 }
 
 /* ================= EXPORT TAB ================= */
-function ExportTab({ reqs, setReqs, vendors, setVendors, lists, setLists, expenses, setExpenses, goTo, openImport, showToast }){
+function ExportTab({ reqs, setReqs, vendors, setVendors, lists, setLists, expenses, setExpenses, goTo, openImport, showToast, sheets, syncSheets, sheetSyncBusy }){
   const [selected, setSelected] = useState(new Set());
   const [filterStatus, setFilterStatus] = useState("All");
   const [editingRow, setEditingRow] = useState(null);
@@ -4997,6 +5515,20 @@ function ExportTab({ reqs, setReqs, vendors, setVendors, lists, setLists, expens
     showToast("Duplicated — edit the copy as needed");
   }
 
+  // v6.24: runs the Google Sheets sync immediately, right here, instead of just
+  // navigating to the Sync from Google Sheets screen and making the user tap
+  // Sync there too. Mirrors exactly what that screen's own per-card "Sync now"
+  // button does — same kind filter (falls back to "requisitions" for sources
+  // saved before the kind field existed), same syncSheets() call — so the
+  // result lands in the same preview-before-import queue; navigating to the
+  // Sync from Google Sheets screen afterwards just shows that same screen
+  // with the preview (or the "add a source" / error toast) already waiting.
+  async function syncNow(){
+    const list = (sheets || []).filter(x => (x.kind || "requisitions") === "requisitions");
+    await syncSheets(list);
+    goTo && goTo("sheets");
+  }
+
   if (editingRow) {
     return <RequisitionForm vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists}
       showToast={showToast} editItem={editingRow}
@@ -5018,18 +5550,24 @@ function ExportTab({ reqs, setReqs, vendors, setVendors, lists, setLists, expens
 
   return (
     <div>
-      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:8, marginBottom:14 }}>
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr", gap:8, marginBottom:14 }}>
         <button onClick={()=>goTo && goTo("requisition")}
-          style={{ borderRadius:14, padding:"12px 6px", fontSize:13, fontWeight:700, background:AMBER, color:"#fff", border:"none", cursor:"pointer" }}>
+          style={{ borderRadius:14, padding:"12px 4px", fontSize:12.5, fontWeight:700, background:AMBER, color:"#fff", border:"none", cursor:"pointer" }}>
           New
         </button>
         <button onClick={()=>openImport && openImport("requisitions")}
-          style={{ borderRadius:14, padding:"12px 6px", fontSize:13, fontWeight:600, background:SAND, color:INK, border:"none", cursor:"pointer" }}>
+          style={{ borderRadius:14, padding:"12px 4px", fontSize:12.5, fontWeight:600, background:SAND, color:INK, border:"none", cursor:"pointer" }}>
           From Excel
         </button>
         <button onClick={()=>goTo && goTo("sheets")}
-          style={{ borderRadius:14, padding:"12px 6px", fontSize:13, fontWeight:600, background:SAND, color:INK, border:"none", cursor:"pointer" }}>
+          style={{ borderRadius:14, padding:"12px 4px", fontSize:12.5, fontWeight:600, background:SAND, color:INK, border:"none", cursor:"pointer" }}>
           From Sheets
+        </button>
+        <button onClick={syncNow} disabled={!!sheetSyncBusy}
+          style={{ borderRadius:14, padding:"12px 4px", fontSize:12.5, fontWeight:700,
+            background: sheetSyncBusy ? SAND : GREEN, color: sheetSyncBusy ? INK : "#fff", border:"none",
+            cursor: sheetSyncBusy ? "default" : "pointer" }}>
+          {sheetSyncBusy ? "Syncing…" : "Sync Now"}
         </button>
       </div>
 
@@ -7073,7 +7611,7 @@ function UtilityForm({ u, cards, lists, setLists, places, utilTypes, onCancel, o
 
 /* ================= DIESEL & MACHINERY ================= */
 function DieselTab({ machines, setMachines, diesel, setDiesel, recurring, vendors,
-                     lists, setLists, showToast, goTo, openImport }){
+                     lists, setLists, showToast, goTo, openImport, sheets, syncSheets, sheetSyncBusy }){
   const L = lists || DEFAULT_LISTS;
   const [mode, setMode] = useState("purchase");     // purchase | usage | machines
   const [siteFilter, setSiteFilter] = useState("All");
@@ -7111,6 +7649,15 @@ function DieselTab({ machines, setMachines, diesel, setDiesel, recurring, vendor
     setDraft({ ...emptyDiesel, id: uid(), date: todayStr(), type,
       site: siteFilter !== "All" ? siteFilter : (sites.length === 1 ? sites[0] : "") });
     setShowForm(true);
+  }
+
+  // Mirrors the v6.24 "Sync Now" button on Requisitions & Export — runs
+  // the same syncSheets() a "diesel"-kind source's own Sync now button
+  // would, then lands on Sync from Google Sheets to review the result.
+  async function syncNow(){
+    const list = (sheets || []).filter(x => (x.kind || "requisitions") === "diesel");
+    await syncSheets(list);
+    goTo && goTo("sheets");
   }
 
   function saveEntry(d){
@@ -7362,22 +7909,28 @@ function DieselTab({ machines, setMachines, diesel, setDiesel, recurring, vendor
         </React.Fragment>
       )}
 
-      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:8, marginBottom:14 }}>
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr", gap:8, marginBottom:14 }}>
         <button onClick={()=>{
             if (mode === "machines") { setEditingMachine({ ...emptyMachine, id: uid() }); return; }
             if (showForm) { setShowForm(false); setDraft(null); }
             else openAdd(mode === "usage" ? "Issue" : "Purchase");
           }}
-          style={{ borderRadius:14, padding:"12px 6px", fontSize:13, fontWeight:700, background:GRAD, color:"#fff", border:"none", cursor:"pointer" }}>
-          {mode === "machines" ? "Add Machine" : showForm ? "Close Form" : "Add"}
+          style={{ borderRadius:14, padding:"12px 4px", fontSize:12.5, fontWeight:700, background:GRAD, color:"#fff", border:"none", cursor:"pointer" }}>
+          {mode === "machines" ? "Add Machine" : showForm ? "Close" : "Add"}
         </button>
         <button onClick={()=>openImport(mode === "machines" ? "machinery" : "diesel")}
-          style={{ borderRadius:14, padding:"12px 6px", fontSize:13, fontWeight:600, background:SAND, color:INK, border:"none", cursor:"pointer" }}>
+          style={{ borderRadius:14, padding:"12px 4px", fontSize:12.5, fontWeight:600, background:SAND, color:INK, border:"none", cursor:"pointer" }}>
           Import
         </button>
         <button onClick={exportDiesel}
-          style={{ borderRadius:14, padding:"12px 6px", fontSize:13, fontWeight:700, background:GREEN, color:"#fff", border:"none", cursor:"pointer" }}>
+          style={{ borderRadius:14, padding:"12px 4px", fontSize:12.5, fontWeight:700, background:GREEN, color:"#fff", border:"none", cursor:"pointer" }}>
           Export
+        </button>
+        <button onClick={syncNow} disabled={!!sheetSyncBusy}
+          style={{ borderRadius:14, padding:"12px 4px", fontSize:12.5, fontWeight:700,
+            background: sheetSyncBusy ? SAND : GREEN, color: sheetSyncBusy ? INK : "#fff", border:"none",
+            cursor: sheetSyncBusy ? "default" : "pointer" }}>
+          {sheetSyncBusy ? "Syncing…" : "Sync Now"}
         </button>
       </div>
 
@@ -7735,9 +8288,522 @@ function MachineForm({ m, vendors, recurring, lists, setLists, onCancel, onSave 
   );
 }
 
+/* ================= DIESEL LOG (v6.24) ================= */
+// A second, separate diesel-tracking section — see the comment on
+// emptyDieselLogEntry near the top of this file for why it's kept apart
+// from DieselTab/emptyDiesel above rather than folded into it. This section
+// has its own self-contained Excel import/export (not routed through
+// ImportTab) because ImportTab's buildPreview/applyImport are already one
+// very large kind-switched function, and adding an eleventh kind there
+// risked breaking the ten that already work. Import here is additive and
+// deduplicating (matching on date+machine for the log, date+party+litres+
+// amount for purchases, and machine name for the master list, which merges
+// instead of duplicating) so re-importing an updated copy of the same
+// monthly file is always safe.
+function DieselLogTab({ dieselLog, setDieselLog, dieselLogPurchases, setDieselLogPurchases,
+                        dieselLogMachines, setDieselLogMachines, showToast, goTo, sheets, syncSheets, sheetSyncBusy }){
+  const [mode, setMode] = useState("log"); // "log" | "purchases" | "machines"
+  const [monthFilter, setMonthFilter] = useState("all");
+  const [editingEntry, setEditingEntry] = useState(null);
+  const [editingPurchase, setEditingPurchase] = useState(null);
+  const [editingMachine, setEditingMachine] = useState(null);
+  const fileInputRef = React.useRef(null);
+
+  const months = useMemo(() => {
+    const set = new Set();
+    dieselLog.forEach(e => { if (e.date) set.add(e.date.slice(0,7)); });
+    dieselLogPurchases.forEach(p => { if (p.date) set.add(p.date.slice(0,7)); });
+    return [...set].sort().reverse();
+  }, [dieselLog, dieselLogPurchases]);
+
+  const visibleLog = useMemo(() => {
+    const rows = monthFilter==="all" ? dieselLog : dieselLog.filter(e => (e.date||"").startsWith(monthFilter));
+    return sortBy(rows, e => e.date||"", true);
+  }, [dieselLog, monthFilter]);
+
+  const visiblePurchases = useMemo(() => {
+    const rows = monthFilter==="all" ? dieselLogPurchases : dieselLogPurchases.filter(p => (p.date||"").startsWith(monthFilter));
+    return sortBy(rows, p => p.date||"", true);
+  }, [dieselLogPurchases, monthFilter]);
+
+  const machinesSorted = useMemo(() => sortBy(dieselLogMachines, m => m.name||"", false), [dieselLogMachines]);
+
+  const totalIssuedL = visibleLog.reduce((s,e)=>s+Number(e.litres||0),0);
+  const totalIssuedAmt = visibleLog.reduce((s,e)=>s+Number(e.amount||0),0);
+  const totalPurchL = visiblePurchases.reduce((s,p)=>s+Number(p.litres||0),0);
+  const totalPurchAmt = visiblePurchases.reduce((s,p)=>s+Number(p.amount||0),0);
+  const pendingPayments = visiblePurchases.filter(p => /pending/i.test(p.paymentStatus||"")).length;
+
+  function saveEntry(v){
+    if (!v.date) return showToast("Choose a date", "error");
+    if (!String(v.machine||"").trim()) return showToast("Choose or enter a machine", "error");
+    const exists = dieselLog.some(x=>x.id===v.id);
+    setDieselLog(exists ? dieselLog.map(x=>x.id===v.id?v:x) : [...dieselLog, {...v, createdAt: v.createdAt || Date.now()}]);
+    setEditingEntry(null);
+    showToast(exists ? "Updated" : "Added");
+  }
+  function deleteEntry(e){
+    if (!confirm(`Delete the log entry for ${e.machine||"this machine"} on ${fmtDate(e.date)}?`)) return;
+    setDieselLog(dieselLog.filter(x=>x.id!==e.id));
+    showToast("Deleted");
+  }
+  function savePurchase(v){
+    if (!v.date) return showToast("Choose a date", "error");
+    const exists = dieselLogPurchases.some(x=>x.id===v.id);
+    setDieselLogPurchases(exists ? dieselLogPurchases.map(x=>x.id===v.id?v:x) : [...dieselLogPurchases, {...v, createdAt: v.createdAt || Date.now()}]);
+    setEditingPurchase(null);
+    showToast(exists ? "Updated" : "Added");
+  }
+  function deletePurchase(p){
+    if (!confirm(`Delete this purchase of ${fmtINR(p.litres)} L on ${fmtDate(p.date)}?`)) return;
+    setDieselLogPurchases(dieselLogPurchases.filter(x=>x.id!==p.id));
+    showToast("Deleted");
+  }
+  function saveMachine(v){
+    if (!String(v.name||"").trim()) return showToast("Enter the machine name", "error");
+    const dupe = dieselLogMachines.some(x=>x.id!==v.id && x.name.trim().toLowerCase()===v.name.trim().toLowerCase());
+    if (dupe) return showToast("A machine with this name already exists", "error");
+    const exists = dieselLogMachines.some(x=>x.id===v.id);
+    setDieselLogMachines(exists ? dieselLogMachines.map(x=>x.id===v.id?v:x) : [...dieselLogMachines, {...v, createdAt: v.createdAt || Date.now()}]);
+    setEditingMachine(null);
+    showToast(exists ? "Updated" : "Added");
+  }
+  function deleteMachine(m){
+    if (!confirm(`Delete ${m.name} from the machinery master list? Past log entries for it are not deleted.`)) return;
+    setDieselLogMachines(dieselLogMachines.filter(x=>x.id!==m.id));
+    showToast("Deleted");
+  }
+
+  // Syncs whichever of the three Diesel Log sync kinds (Issued Log,
+  // Purchases, Machinery Master) have a source configured — a real Diesel
+  // Log workbook usually has all three tabs, so this runs all of them
+  // rather than only whichever one the user happens to be viewing, then
+  // lands on Sync from Google Sheets to review whatever came back.
+  async function syncNow(){
+    for (const k of ["diesellogEntries", "diesellogPurchases", "diesellogMachines"]) {
+      const list = (sheets || []).filter(x => (x.kind || "requisitions") === k);
+      if (list.length) await syncSheets(list);
+    }
+    goTo && goTo("sheets");
+  }
+
+  function handleImportFile(e){
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const buf = new Uint8Array(ev.target.result);
+        const wb = XLSX.read(buf, { type:"array" });
+        const logSheet = wb.Sheets["Diesel Issued Log"];
+        const purchSheet = wb.Sheets["Diesel Purchases"];
+        const machSheet = wb.Sheets["Machinery Master"];
+        if (!logSheet && !purchSheet && !machSheet) {
+          showToast("That doesn't look like a Diesel Log file — expected sheets named \"Diesel Issued Log\", \"Diesel Purchases\" and/or \"Machinery Master\"", "error");
+          return;
+        }
+
+        let addedLog = 0, skippedLog = 0, nextLog = dieselLog;
+        if (logSheet) {
+          const rows = XLSX.utils.sheet_to_json(logSheet, { defval:"", raw:true });
+          const existingKeys = new Set(dieselLog.map(e => `${e.date}|${e.machine}`.toLowerCase()));
+          const toAdd = [];
+          rows.forEach(r => {
+            const date = parseDieselLogDate(r["Date"]);
+            const machine = String(r["Machine"]||"").trim();
+            if (!date || !machine) { skippedLog++; return; } // TOTAL row, blank row, or the template's "e.g." example row
+            const key = `${date}|${machine}`.toLowerCase();
+            if (existingKeys.has(key)) { skippedLog++; return; }
+            existingKeys.add(key);
+            toAdd.push({ ...emptyDieselLogEntry, id: uid(), date, machine,
+              category: String(r["Category"]||"").trim(),
+              ownership: String(r["Ownership"]||"").trim() || "Own",
+              litres: parseDieselLogNumber(r["Diesel Issued (L)"]),
+              amount: parseDieselLogNumber(r["Amount (Rs)"]),
+              openingReading: parseDieselLogNumber(r["Opening Reading"]),
+              closingReading: parseDieselLogNumber(r["Closing Reading"]),
+              workingHours: parseDieselLogNumber(r["Working Hours / KM"]),
+              trip: String(r["Trip"]||"").trim(),
+              remarks: String(r["Remarks"]||"").trim(),
+              createdAt: Date.now() });
+            addedLog++;
+          });
+          nextLog = [...dieselLog, ...toAdd];
+        }
+
+        let addedPurch = 0, skippedPurch = 0, nextPurch = dieselLogPurchases;
+        if (purchSheet) {
+          const rows = XLSX.utils.sheet_to_json(purchSheet, { defval:"", raw:true });
+          const existingKeys = new Set(dieselLogPurchases.map(p => `${p.date}|${p.party}|${p.litres}|${p.amount}`.toLowerCase()));
+          const toAdd = [];
+          rows.forEach(r => {
+            const date = parseDieselLogDate(r["Date"]);
+            if (!date) { skippedPurch++; return; } // TOTAL row, blank row, or the template's example row
+            const litres = parseDieselLogNumber(r["Litres"]);
+            const amount = parseDieselLogNumber(r["Amount (Rs)"]);
+            if (litres === "" && amount === "") { skippedPurch++; return; } // a dated row with nothing actually purchased
+            const party = String(r["Party"]||"").trim();
+            const key = `${date}|${party}|${litres}|${amount}`.toLowerCase();
+            if (existingKeys.has(key)) { skippedPurch++; return; }
+            existingKeys.add(key);
+            toAdd.push({ ...emptyDieselLogPurchase, id: uid(), date, party, litres, amount,
+              paymentStatus: String(r["Payment Status"]||"").trim(), createdAt: Date.now() });
+            addedPurch++;
+          });
+          nextPurch = [...dieselLogPurchases, ...toAdd];
+        }
+
+        let addedMach = 0, updatedMach = 0, skippedMach = 0, nextMach = dieselLogMachines;
+        if (machSheet) {
+          const rows = XLSX.utils.sheet_to_json(machSheet, { defval:"", raw:true });
+          const working = [...dieselLogMachines];
+          rows.forEach(r => {
+            const name = String(r["Machine"]||"").trim();
+            const category = String(r["Category"]||"").trim();
+            const ownership = String(r["Ownership"]||"").trim();
+            if (!name || (!category && !ownership)) { skippedMach++; return; } // trailing instructional note row
+            const presentJuly = /^y/i.test(String(r["Present in July"]||""));
+            const presentAugust = /^y/i.test(String(r["Present in August"]||""));
+            const notes = String(r["Notes"]||"").trim();
+            const idx = working.findIndex(m => m.name.trim().toLowerCase() === name.toLowerCase());
+            if (idx >= 0) {
+              working[idx] = { ...working[idx], category, ownership: ownership || working[idx].ownership,
+                presentJuly: presentJuly || working[idx].presentJuly,
+                presentAugust: presentAugust || working[idx].presentAugust,
+                notes: notes || working[idx].notes };
+              updatedMach++;
+            } else {
+              working.push({ ...emptyDieselLogMachine, id: uid(), name, category, ownership: ownership || "Own",
+                presentJuly, presentAugust, active:true, notes, createdAt: Date.now() });
+              addedMach++;
+            }
+          });
+          nextMach = working;
+        }
+
+        setDieselLog(nextLog);
+        setDieselLogPurchases(nextPurch);
+        setDieselLogMachines(nextMach);
+
+        const parts = [];
+        if (logSheet) parts.push(`${addedLog} new log row${addedLog===1?"":"s"}${skippedLog?`, ${skippedLog} skipped`:""}`);
+        if (purchSheet) parts.push(`${addedPurch} new purchase${addedPurch===1?"":"s"}${skippedPurch?`, ${skippedPurch} skipped`:""}`);
+        if (machSheet) parts.push(`${addedMach} new machine${addedMach===1?"":"s"}, ${updatedMach} updated${skippedMach?`, ${skippedMach} skipped`:""}`);
+        showToast(parts.join(" · ") || "Nothing new to import");
+      } catch (err) {
+        showToast("That file could not be read — check it matches the Diesel Log format", "error");
+      }
+    };
+    reader.readAsArrayBuffer(file);
+    e.target.value = "";
+  }
+
+  function exportDieselLogExcel(){
+    if (dieselLog.length===0 && dieselLogPurchases.length===0 && dieselLogMachines.length===0) {
+      showToast("Nothing to export", "error"); return;
+    }
+    const wb = XLSX.utils.book_new();
+    const numOrBlank = (n) => (n===""||n===null||n===undefined) ? "" : Number(n);
+
+    const logRows = [...dieselLog].sort((a,b)=>String(a.date||"").localeCompare(String(b.date||""))).map(e => ({
+      Date: fmtDate(e.date), Machine: e.machine||"", Category: e.category||"", Ownership: e.ownership||"",
+      "Diesel Issued (L)": numOrBlank(e.litres), "Amount (Rs)": numOrBlank(e.amount),
+      "Opening Reading": numOrBlank(e.openingReading), "Closing Reading": numOrBlank(e.closingReading),
+      "Working Hours / KM": numOrBlank(e.workingHours), Trip: e.trip||"", Remarks: e.remarks||"",
+    }));
+    logRows.push({ Date:"", Machine:"", Category:"", Ownership:"TOTAL",
+      "Diesel Issued (L)": dieselLog.reduce((s,e)=>s+Number(e.litres||0),0),
+      "Amount (Rs)": dieselLog.reduce((s,e)=>s+Number(e.amount||0),0),
+      "Opening Reading":"", "Closing Reading":"", "Working Hours / KM":"", Trip:"", Remarks:"" });
+    const logWs = XLSX.utils.json_to_sheet(logRows);
+    logWs["!cols"] = [{wch:12},{wch:28},{wch:16},{wch:10},{wch:14},{wch:12},{wch:14},{wch:14},{wch:16},{wch:10},{wch:28}];
+    XLSX.utils.book_append_sheet(wb, logWs, "Diesel Issued Log");
+
+    const purchRows = [...dieselLogPurchases].sort((a,b)=>String(a.date||"").localeCompare(String(b.date||""))).map(p => ({
+      Date: fmtDate(p.date), Party: p.party||"", Litres: numOrBlank(p.litres), "Amount (Rs)": numOrBlank(p.amount),
+      "Payment Status": p.paymentStatus||"",
+    }));
+    purchRows.push({ Date:"", Party:"TOTAL",
+      Litres: dieselLogPurchases.reduce((s,p)=>s+Number(p.litres||0),0),
+      "Amount (Rs)": dieselLogPurchases.reduce((s,p)=>s+Number(p.amount||0),0), "Payment Status":"" });
+    const purchWs = XLSX.utils.json_to_sheet(purchRows);
+    purchWs["!cols"] = [{wch:12},{wch:22},{wch:10},{wch:14},{wch:30}];
+    XLSX.utils.book_append_sheet(wb, purchWs, "Diesel Purchases");
+
+    const machRows = [...dieselLogMachines].sort((a,b)=>String(a.name||"").localeCompare(String(b.name||""))).map(m => ({
+      Machine: m.name||"", Category: m.category||"", Ownership: m.ownership||"",
+      "Present in July": m.presentJuly ? "Yes" : "No", "Present in August": m.presentAugust ? "Yes" : "No",
+      Notes: (m.active===false ? "[Inactive] " : "") + (m.notes||""),
+    }));
+    const machWs = XLSX.utils.json_to_sheet(machRows);
+    machWs["!cols"] = [{wch:32},{wch:16},{wch:12},{wch:14},{wch:16},{wch:44}];
+    XLSX.utils.book_append_sheet(wb, machWs, "Machinery Master");
+
+    XLSX.writeFile(wb, `Diesel_Log_${todayStr()}.xlsx`);
+    showToast("Exported");
+  }
+
+  if (editingEntry) return <DieselLogEntryForm v={editingEntry} machines={dieselLogMachines} onCancel={()=>setEditingEntry(null)} onSave={saveEntry} />;
+  if (editingPurchase) return <DieselLogPurchaseForm v={editingPurchase} onCancel={()=>setEditingPurchase(null)} onSave={savePurchase} />;
+  if (editingMachine) return <DieselLogMachineForm v={editingMachine} onCancel={()=>setEditingMachine(null)} onSave={saveMachine} />;
+
+  const chip = (active) => ({ padding:"8px 14px", borderRadius:12, fontSize:14, fontWeight:600, whiteSpace:"nowrap", cursor:"pointer",
+    background: active?INK:"#fff", color: active?"#fff":INK, border:`1px solid ${active?INK:SAND}` });
+  const modeChip = (active) => ({ flex:1, padding:"10px 0", borderRadius:12, fontSize:13.5, fontWeight:700, cursor:"pointer",
+    background: active?AMBER:SAND, color: active?"#fff":INK, border:"none" });
+  const rowCard = { background:SURFACE, borderRadius:14, padding:14, border:`1px solid ${SAND}`, cursor:"pointer" };
+  const deleteBtnStyle = { marginTop:8, fontSize:12.5, fontWeight:700, color:RED, background:"none", border:"none", cursor:"pointer", padding:0 };
+
+  return (
+    <div>
+      <button onClick={()=>goTo("dashboard")}
+        style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
+        <Icon name="back" size={16} /> Back to dashboard
+      </button>
+
+      <div style={{ background:GRAD_INK, borderRadius:22, padding:20, marginBottom:12, boxShadow:SHADOW_LG }}>
+        <div style={{ fontSize:11.5, fontWeight:600, color:"#8FA0BC", textTransform:"uppercase", letterSpacing:"0.08em" }}>
+          {monthFilter==="all" ? "All months" : monthLabel(monthFilter)}
+        </div>
+        <div style={{ display:"flex", gap:22, marginTop:10, flexWrap:"wrap" }}>
+          <div>
+            <div className="num" style={{ fontSize:22, fontWeight:800, color:"#fff" }}>{fmtINR(totalIssuedL)} L</div>
+            <div style={{ fontSize:12, color:"#8FA0BC" }}>Issued · ₹{fmtINR(totalIssuedAmt)}</div>
+          </div>
+          <div>
+            <div className="num" style={{ fontSize:22, fontWeight:800, color:"#fff" }}>{fmtINR(totalPurchL)} L</div>
+            <div style={{ fontSize:12, color:"#8FA0BC" }}>Purchased · ₹{fmtINR(totalPurchAmt)}</div>
+          </div>
+          {pendingPayments > 0 && (
+            <div>
+              <div className="num" style={{ fontSize:22, fontWeight:800, color:"#FFC24B" }}>{pendingPayments}</div>
+              <div style={{ fontSize:12, color:"#8FA0BC" }}>Payment pending</div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {months.length > 0 && (
+        <div style={{ display:"flex", gap:8, marginBottom:14, overflowX:"auto", paddingBottom:4 }}>
+          <button onClick={()=>setMonthFilter("all")} style={chip(monthFilter==="all")}>All</button>
+          {months.map(m => <button key={m} onClick={()=>setMonthFilter(m)} style={chip(monthFilter===m)}>{monthLabel(m)}</button>)}
+        </div>
+      )}
+
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr", gap:8, marginBottom:12 }}>
+        <button onClick={()=>{
+            if (mode==="log") setEditingEntry({ ...emptyDieselLogEntry, id:uid(), date:todayStr() });
+            else if (mode==="purchases") setEditingPurchase({ ...emptyDieselLogPurchase, id:uid(), date:todayStr() });
+            else setEditingMachine({ ...emptyDieselLogMachine, id:uid() });
+          }}
+          style={{ borderRadius:14, padding:"12px 4px", fontSize:12.5, fontWeight:700, background:AMBER, color:"#fff", border:"none", cursor:"pointer" }}>
+          + Add
+        </button>
+        <button onClick={()=>fileInputRef.current && fileInputRef.current.click()}
+          style={{ borderRadius:14, padding:"12px 4px", fontSize:12.5, fontWeight:600, background:SAND, color:INK, border:"none", cursor:"pointer" }}>
+          Import Excel
+        </button>
+        <button onClick={exportDieselLogExcel}
+          style={{ borderRadius:14, padding:"12px 4px", fontSize:12.5, fontWeight:600, background:SAND, color:INK, border:"none", cursor:"pointer" }}>
+          Export Excel
+        </button>
+        <button onClick={syncNow} disabled={!!sheetSyncBusy}
+          style={{ borderRadius:14, padding:"12px 4px", fontSize:12.5, fontWeight:700,
+            background: sheetSyncBusy ? SAND : GREEN, color: sheetSyncBusy ? INK : "#fff", border:"none",
+            cursor: sheetSyncBusy ? "default" : "pointer" }}>
+          {sheetSyncBusy ? "Syncing…" : "Sync Now"}
+        </button>
+        <input ref={fileInputRef} type="file" accept=".xlsx,.xls" style={{ display:"none" }} onChange={handleImportFile} />
+      </div>
+
+      <div style={{ display:"flex", gap:8, marginBottom:16 }}>
+        <button onClick={()=>setMode("log")} style={modeChip(mode==="log")}>Log ({dieselLog.length})</button>
+        <button onClick={()=>setMode("purchases")} style={modeChip(mode==="purchases")}>Purchases ({dieselLogPurchases.length})</button>
+        <button onClick={()=>setMode("machines")} style={modeChip(mode==="machines")}>Machinery ({dieselLogMachines.length})</button>
+      </div>
+
+      {mode==="log" && (
+        visibleLog.length===0 ? <EmptyState text="No diesel issued log entries yet. Add one, or import from Excel." /> :
+        <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+          {visibleLog.map(e => (
+            <div key={e.id} onClick={()=>setEditingEntry(e)} style={rowCard}>
+              <div style={{ display:"flex", justifyContent:"space-between", gap:10 }}>
+                <div style={{ fontWeight:700, color:INK }}>{e.machine}</div>
+                <div style={{ fontSize:13, color:MUTED, flexShrink:0 }}>{fmtDate(e.date)}</div>
+              </div>
+              <div style={{ display:"flex", justifyContent:"space-between", marginTop:4, fontSize:13, color:MUTED, gap:10 }}>
+                <span>{[e.category, e.ownership].filter(Boolean).join(" · ")}</span>
+                <span style={{ flexShrink:0 }}>{e.litres!==""&&e.litres!=null ? `${fmtINR(e.litres)} L · ₹${fmtINR(e.amount)}` : "No issuance"}</span>
+              </div>
+              {e.remarks && <div style={{ marginTop:4, fontSize:12.5, color:MUTED, fontStyle:"italic" }}>{e.remarks}</div>}
+              <button onClick={(ev)=>{ ev.stopPropagation(); deleteEntry(e); }} style={deleteBtnStyle}>Delete</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {mode==="purchases" && (
+        visiblePurchases.length===0 ? <EmptyState text="No diesel purchases logged yet. Add one, or import from Excel." /> :
+        <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+          {visiblePurchases.map(p => (
+            <div key={p.id} onClick={()=>setEditingPurchase(p)} style={rowCard}>
+              <div style={{ display:"flex", justifyContent:"space-between", gap:10 }}>
+                <div style={{ fontWeight:700, color:INK }}>{p.party || "Unnamed party"}</div>
+                <div style={{ fontSize:13, color:MUTED, flexShrink:0 }}>{fmtDate(p.date)}</div>
+              </div>
+              <div style={{ display:"flex", justifyContent:"space-between", marginTop:4, fontSize:13, color:MUTED, gap:10 }}>
+                <span>{p.paymentStatus || "—"}</span>
+                <span style={{ flexShrink:0 }}>{fmtINR(p.litres)} L · ₹{fmtINR(p.amount)}</span>
+              </div>
+              <button onClick={(ev)=>{ ev.stopPropagation(); deletePurchase(p); }} style={deleteBtnStyle}>Delete</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {mode==="machines" && (
+        machinesSorted.length===0 ? <EmptyState text="No machinery added yet. Add one, or import from Excel." /> :
+        <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+          {machinesSorted.map(m => (
+            <div key={m.id} onClick={()=>setEditingMachine(m)} style={rowCard}>
+              <div style={{ display:"flex", justifyContent:"space-between", gap:10 }}>
+                <div style={{ fontWeight:700, color:INK }}>{m.name}</div>
+                {m.active===false && <div style={{ fontSize:11.5, fontWeight:700, color:RED }}>INACTIVE</div>}
+              </div>
+              <div style={{ marginTop:4, fontSize:13, color:MUTED }}>{[m.category, m.ownership].filter(Boolean).join(" · ")}</div>
+              {m.notes && <div style={{ marginTop:4, fontSize:12.5, color:MUTED, fontStyle:"italic" }}>{m.notes}</div>}
+              <button onClick={(ev)=>{ ev.stopPropagation(); deleteMachine(m); }} style={deleteBtnStyle}>Delete</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DieselLogEntryForm({ v: initial, machines, onCancel, onSave }){
+  const [v, setV] = useState(initial);
+  const set = (k, val) => setV(prev => ({ ...prev, [k]: val }));
+  function pickMachine(name){
+    const m = (machines||[]).find(x => x.name === name);
+    setV(prev => ({ ...prev, machine:name,
+      category: m ? m.category : prev.category,
+      ownership: m ? m.ownership : prev.ownership }));
+  }
+  return (
+    <div>
+      <button onClick={onCancel}
+        style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
+        <Icon name="back" size={16} /> Back
+      </button>
+      <div style={{ background:SURFACE, borderRadius:16, padding:20 }}>
+        <SectionLabel>{initial.createdAt ? "Edit log entry" : "New log entry"}</SectionLabel>
+        <Field label="Date" required>
+          <input type="date" style={inputStyle} value={v.date} onChange={e=>set("date", e.target.value)} />
+        </Field>
+        <Field label="Machine" required hint="Pick from Machinery Master, or type a new name">
+          <input list="dieselLogMachineNames" style={inputStyle} value={v.machine} onChange={e=>pickMachine(e.target.value)} />
+          <datalist id="dieselLogMachineNames">
+            {(machines||[]).map(m => <option key={m.id} value={m.name} />)}
+          </datalist>
+        </Field>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+          <Field label="Category"><input style={inputStyle} value={v.category} onChange={e=>set("category", e.target.value)} /></Field>
+          <Field label="Ownership">
+            <select style={inputStyle} value={v.ownership} onChange={e=>set("ownership", e.target.value)}>
+              {DIESEL_LOG_OWNERSHIP.map(o => <option key={o} value={o}>{o}</option>)}
+            </select>
+          </Field>
+        </div>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+          <Field label="Diesel Issued (L)" hint="Leave blank if none issued this day">
+            <input type="number" style={inputStyle} value={v.litres} onChange={e=>set("litres", e.target.value)} />
+          </Field>
+          <Field label="Amount (Rs)">
+            <input type="number" style={inputStyle} value={v.amount} onChange={e=>set("amount", e.target.value)} />
+          </Field>
+        </div>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+          <Field label="Opening Reading"><input type="number" style={inputStyle} value={v.openingReading} onChange={e=>set("openingReading", e.target.value)} /></Field>
+          <Field label="Closing Reading"><input type="number" style={inputStyle} value={v.closingReading} onChange={e=>set("closingReading", e.target.value)} /></Field>
+        </div>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+          <Field label="Working Hours / KM"><input type="number" style={inputStyle} value={v.workingHours} onChange={e=>set("workingHours", e.target.value)} /></Field>
+          <Field label="Trip"><input style={inputStyle} value={v.trip} onChange={e=>set("trip", e.target.value)} /></Field>
+        </div>
+        <Field label="Remarks"><textarea style={{ ...inputStyle, minHeight:70 }} value={v.remarks} onChange={e=>set("remarks", e.target.value)} /></Field>
+        <BigButton icon="check" label="Save" onClick={()=>onSave(v)} tone="green" full />
+      </div>
+    </div>
+  );
+}
+
+function DieselLogPurchaseForm({ v: initial, onCancel, onSave }){
+  const [v, setV] = useState(initial);
+  const set = (k, val) => setV(prev => ({ ...prev, [k]: val }));
+  return (
+    <div>
+      <button onClick={onCancel}
+        style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
+        <Icon name="back" size={16} /> Back
+      </button>
+      <div style={{ background:SURFACE, borderRadius:16, padding:20 }}>
+        <SectionLabel>{initial.createdAt ? "Edit purchase" : "New purchase"}</SectionLabel>
+        <Field label="Date" required><input type="date" style={inputStyle} value={v.date} onChange={e=>set("date", e.target.value)} /></Field>
+        <Field label="Party"><input style={inputStyle} value={v.party} onChange={e=>set("party", e.target.value)} /></Field>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+          <Field label="Litres"><input type="number" style={inputStyle} value={v.litres} onChange={e=>set("litres", e.target.value)} /></Field>
+          <Field label="Amount (Rs)"><input type="number" style={inputStyle} value={v.amount} onChange={e=>set("amount", e.target.value)} /></Field>
+        </div>
+        <Field label="Payment Status" hint="Free text — e.g. Cash/Card, Bank Transferred, Payment Pending">
+          <input list="dieselLogPaymentStatusSuggestions" style={inputStyle} value={v.paymentStatus} onChange={e=>set("paymentStatus", e.target.value)} />
+          <datalist id="dieselLogPaymentStatusSuggestions">
+            {DIESEL_LOG_PAYMENT_STATUS_SUGGESTIONS.map(s => <option key={s} value={s} />)}
+          </datalist>
+        </Field>
+        <BigButton icon="check" label="Save" onClick={()=>onSave(v)} tone="green" full />
+      </div>
+    </div>
+  );
+}
+
+function DieselLogMachineForm({ v: initial, onCancel, onSave }){
+  const [v, setV] = useState(initial);
+  const set = (k, val) => setV(prev => ({ ...prev, [k]: val }));
+  return (
+    <div>
+      <button onClick={onCancel}
+        style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
+        <Icon name="back" size={16} /> Back
+      </button>
+      <div style={{ background:SURFACE, borderRadius:16, padding:20 }}>
+        <SectionLabel>{initial.createdAt ? "Edit machine" : "New machine"}</SectionLabel>
+        <Field label="Machine name" required><input style={inputStyle} value={v.name} onChange={e=>set("name", e.target.value)} /></Field>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+          <Field label="Category"><input style={inputStyle} value={v.category} onChange={e=>set("category", e.target.value)} /></Field>
+          <Field label="Ownership">
+            <select style={inputStyle} value={v.ownership} onChange={e=>set("ownership", e.target.value)}>
+              {DIESEL_LOG_OWNERSHIP.map(o => <option key={o} value={o}>{o}</option>)}
+            </select>
+          </Field>
+        </div>
+        <Field label="Status">
+          <select style={inputStyle} value={v.active===false?"Inactive":"Active"} onChange={e=>set("active", e.target.value!=="Inactive")}>
+            <option value="Active">Active</option>
+            <option value="Inactive">Inactive</option>
+          </select>
+        </Field>
+        <Field label="Notes"><textarea style={{ ...inputStyle, minHeight:70 }} value={v.notes} onChange={e=>set("notes", e.target.value)} /></Field>
+        <BigButton icon="check" label="Save" onClick={()=>onSave(v)} tone="green" full />
+      </div>
+    </div>
+  );
+}
+
+
 /* ================= CASH & CARD ================= */
 function CashTab({ cards, setCards, cashTxns, setCashTxns, cashCounts, setCashCounts,
-                   vendors, lists, setLists, showToast, goTo, openImport }){
+                   vendors, lists, setLists, showToast, goTo, openImport, sheets, syncSheets, sheetSyncBusy }){
   const L = lists || DEFAULT_LISTS;
   const [cardFilter, setCardFilter] = useState("All");
   const [monthFilter, setMonthFilter] = useState("all");
@@ -7878,6 +8944,15 @@ function CashTab({ cards, setCards, cashTxns, setCashTxns, cashCounts, setCashCo
     setCards(exists ? cards.map(x => x.id===c.id ? c : x) : [...cards, c]);
     setEditingCard(null);
     showToast("Card saved");
+  }
+
+  // Mirrors the v6.24 "Sync Now" button on Requisitions & Export — runs the
+  // "cash"-kind sync immediately rather than requiring a visit to Sync from
+  // Google Sheets first.
+  async function syncNow(){
+    const list = (sheets || []).filter(x => (x.kind || "requisitions") === "cash");
+    await syncSheets(list);
+    goTo && goTo("sheets");
   }
 
   function exportCash(){
@@ -8542,19 +9617,25 @@ function CashTab({ cards, setCards, cashTxns, setCashTxns, cashCounts, setCashCo
           onClick={()=>setEditingCard({ ...emptyCard, id: uid() })} tone="ink" full />
       </div>
 
-      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:8, marginBottom:14 }}>
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr", gap:8, marginBottom:14 }}>
         <button onClick={()=>setCounting({ ...emptyCashCount, id: uid(), date: todayStr(),
             cardId: cardFilter !== "All" ? cardFilter : (activeCards[0] ? activeCards[0].id : "") })}
-          style={{ borderRadius:14, padding:"12px 6px", fontSize:13, fontWeight:600, background:SAND, color:INK, border:"none", cursor:"pointer" }}>
+          style={{ borderRadius:14, padding:"12px 4px", fontSize:12.5, fontWeight:600, background:SAND, color:INK, border:"none", cursor:"pointer" }}>
           Count cash
         </button>
         <button onClick={()=>openImport("cash", cardFilter !== "All" ? cardFilter : "")}
-          style={{ borderRadius:14, padding:"12px 6px", fontSize:13, fontWeight:600, background:SAND, color:INK, border:"none", cursor:"pointer" }}>
+          style={{ borderRadius:14, padding:"12px 4px", fontSize:12.5, fontWeight:600, background:SAND, color:INK, border:"none", cursor:"pointer" }}>
           Import
         </button>
         <button onClick={exportCash}
-          style={{ borderRadius:14, padding:"12px 6px", fontSize:13, fontWeight:700, background:GREEN, color:"#fff", border:"none", cursor:"pointer" }}>
+          style={{ borderRadius:14, padding:"12px 4px", fontSize:12.5, fontWeight:700, background:GREEN, color:"#fff", border:"none", cursor:"pointer" }}>
           Export
+        </button>
+        <button onClick={syncNow} disabled={!!sheetSyncBusy}
+          style={{ borderRadius:14, padding:"12px 4px", fontSize:12.5, fontWeight:700,
+            background: sheetSyncBusy ? SAND : GREEN, color: sheetSyncBusy ? INK : "#fff", border:"none",
+            cursor: sheetSyncBusy ? "default" : "pointer" }}>
+          {sheetSyncBusy ? "Syncing…" : "Sync Now"}
         </button>
       </div>
 
@@ -9717,13 +10798,13 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
 
         <div style={{ background:SURFACE, borderRadius:16, padding:20, marginBottom:16, border:`1px solid ${SAND}` }}>
           <SectionLabel>Check before importing</SectionLabel>
-          <ReviewRow label={preview.kind === "expenses" ? "New expenses" : "New requisitions"} value={preview.toAdd.length} />
-          {preview.kind !== "expenses" && preview.toUpdate && preview.toUpdate.length > 0 && (
-            <ReviewRow label="Existing rows to mark Paid" value={preview.toUpdate.length} />
+          <ReviewRow label={syncKindMeta(preview.kind).newLabel} value={preview.toAdd.length} />
+          {preview.toUpdate && preview.toUpdate.length > 0 && (
+            <ReviewRow label={syncKindMeta(preview.kind).updateLabel || "Existing rows to update"} value={preview.toUpdate.length} />
           )}
           <ReviewRow label="Skipped as duplicates" value={preview.duplicates.length} />
           <ReviewRow label="Rows with problems" value={preview.errors.length} />
-          {preview.kind !== "expenses" && preview.toAdd.some(a=>a.data.__recurringMatchId) && (
+          {preview.kind === "requisitions" && preview.toAdd.some(a=>a.data.__recurringMatchId) && (
             <ReviewRow label="Will also update Rent & EMI"
               value={preview.toAdd.filter(a=>a.data.__recurringMatchId).length} />
           )}
@@ -9800,22 +10881,13 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
             <div style={{ fontWeight:700, color:GREEN, fontSize:14, marginBottom:10 }}>Will be added ({preview.toAdd.length})</div>
             {preview.toAdd.slice(0,30).map((a,i) => (
               <div key={i} style={{ padding:"7px 0", borderTop: i? `1px solid ${SAND}`:"none", fontSize:13, color:INK }}>
-                {preview.kind === "expenses"
-                  ? <React.Fragment>
-                      <strong>{a.data.description || a.data.expenseType}</strong> · ₹{fmtINR(a.data.amount)}
-                      {a.data.date || a.data.periodText ? ` · ${a.data.date ? fmtDate(a.data.date) : a.data.periodText}` : " · no date"}
-                      <span style={{ color:MUTED }}> · {a.data.paidBy || "no payer"}</span>
-                    </React.Fragment>
-                  : <React.Fragment>
-                      <strong>{a.data.name}</strong> · ₹{fmtINR(a.data.amount)} · {fmtDate(a.data.date) || "no date"}
-                      <span style={{ color:MUTED }}> · {a.data.site || a.source}</span>
-                      {a.data.dateFromPayment && (
-                        <span style={{ color:AMBER, fontWeight:600 }}> · date taken from payment</span>
-                      )}
-                      {a.data.__recurringMatchId && (
-                        <span style={{ color:GREEN, fontWeight:600 }}> · settles Rent & EMI</span>
-                      )}
-                    </React.Fragment>}
+                {syncKindMeta(preview.kind).describe(a.data)}
+                {a.data.dateFromPayment && (
+                  <span style={{ color:AMBER, fontWeight:600 }}> · date taken from payment</span>
+                )}
+                {a.data.__recurringMatchId && (
+                  <span style={{ color:GREEN, fontWeight:600 }}> · settles Rent & EMI</span>
+                )}
               </div>
             ))}
             {preview.toAdd.length > 30 && <div style={{ fontSize:12, color:MUTED, marginTop:8 }}>…and {preview.toAdd.length-30} more</div>}
@@ -9824,17 +10896,20 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
 
         {preview.toUpdate && preview.toUpdate.length > 0 && (
           <div style={{ background:SURFACE, borderRadius:16, padding:16, marginBottom:16, border:`1.5px solid ${GREEN}` }}>
-            <div style={{ fontWeight:700, color:GREEN, fontSize:14, marginBottom:6 }}>Already in the app — will be marked Paid ({preview.toUpdate.length})</div>
+            <div style={{ fontWeight:700, color:GREEN, fontSize:14, marginBottom:6 }}>{syncKindMeta(preview.kind).updateLabel} ({preview.toUpdate.length})</div>
             <div style={{ fontSize:12, color:MUTED, marginBottom:10, lineHeight:1.5 }}>
-              Same date, name and amount as a requisition already here, but this row now shows a Payment
-              Date — so instead of adding a duplicate, the existing one is updated to Paid.
+              {syncKindMeta(preview.kind).updateDesc}
             </div>
             {preview.toUpdate.slice(0,30).map((u,i) => (
               <div key={i} style={{ padding:"7px 0", borderTop: i? `1px solid ${SAND}`:"none", fontSize:13, color:INK }}>
-                <strong>{u.existing.name}</strong> · ₹{fmtINR(u.existing.amount)}
-                <span style={{ color:MUTED }}> · {u.existing.site || u.source}</span>
-                <span style={{ color:AMBER, fontWeight:600 }}> · Pending → Paid</span>
-                {u.patch.paymentDate && <span style={{ color:MUTED }}> · paid {fmtDate(u.patch.paymentDate)}</span>}
+                {preview.kind === "requisitions"
+                  ? <React.Fragment>
+                      <strong>{u.existing.name}</strong> · ₹{fmtINR(u.existing.amount)}
+                      <span style={{ color:MUTED }}> · {u.existing.site || u.source}</span>
+                      <span style={{ color:AMBER, fontWeight:600 }}> · Pending → Paid</span>
+                      {u.patch.paymentDate && <span style={{ color:MUTED }}> · paid {fmtDate(u.patch.paymentDate)}</span>}
+                    </React.Fragment>
+                  : syncKindMeta(preview.kind).describe(u.existing)}
               </div>
             ))}
             {preview.toUpdate.length > 30 && <div style={{ fontSize:12, color:MUTED, marginTop:8 }}>…and {preview.toUpdate.length-30} more</div>}
@@ -9845,12 +10920,11 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
           <div style={{ background:SURFACE, borderRadius:16, padding:16, marginBottom:16, border:`1.5px solid ${AMBER}` }}>
             <div style={{ fontWeight:700, color:AMBER, fontSize:14, marginBottom:6 }}>Skipped as duplicates ({preview.duplicates.length})</div>
             <div style={{ fontSize:12, color:MUTED, marginBottom:10, lineHeight:1.5 }}>
-              Same date, same name and same amount as something already recorded, so these are not added again.
+              {syncKindMeta(preview.kind).dupDesc}
             </div>
             {preview.duplicates.slice(0,20).map((d,i) => (
               <div key={i} style={{ fontSize:13, color:INK, padding:"4px 0" }}>
-                {preview.kind === "expenses" ? (d.data.description || d.data.expenseType) : d.data.name} · ₹{fmtINR(d.data.amount)}
-                {d.data.date ? ` · ${fmtDate(d.data.date)}` : ""} <span style={{color:MUTED}}>— {d.why}</span>
+                {syncKindMeta(preview.kind).describe(d.data)} <span style={{color:MUTED}}>— {d.why}</span>
               </div>
             ))}
             {preview.duplicates.length > 20 && <div style={{ fontSize:12, color:MUTED, marginTop:8 }}>…and {preview.duplicates.length-20} more</div>}
@@ -9869,11 +10943,12 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
         )}
 
         {(() => {
+          const meta = syncKindMeta(preview.kind);
           const updCount = (preview.toUpdate && preview.toUpdate.length) || 0;
           const nothing = preview.toAdd.length === 0 && updCount === 0;
           const parts = [];
-          if (preview.toAdd.length) parts.push(`${preview.toAdd.length} new ${preview.kind === "expenses" ? "expense" : "requisition"}(s)`);
-          if (updCount) parts.push(`${updCount} marked Paid`);
+          if (preview.toAdd.length) parts.push(`${preview.toAdd.length} new ${meta.itemLabel}(s)`);
+          if (updCount) parts.push(meta.updateSummary ? meta.updateSummary(updCount) : `${updCount} updated`);
           return (
             <BigButton icon="check"
               label={nothing ? "Nothing new to import" : `Import — ${parts.join(" · ")}`}
@@ -9914,13 +10989,24 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
             <input style={inputStyle} value={editing.tab || ""}
               onChange={e=>setEditing({...editing, tab:e.target.value})} placeholder="e.g. Office Master" />
           </Field>
-          <Field label="Syncs into" hint={editing.kind === "expenses"
-              ? "Rows land in Expenses — use this for a sheet like Office Master (Date, Expense Type, Paid By, Amount, ...)."
-              : "Rows land in Requisitions — use this both for Payment to be done and for Master. A filled-in Payment Date sends that row straight to the Payment Register. Re-syncing later, after a row that first came in Pending gets its Payment Date filled in, now updates that same requisition to Paid instead of skipping it or adding it twice — so it's safe to add both Payment to be done and Master as separate sources and sync either or both, in any order."}>
+          <Field label="Syncs into" hint={{
+              requisitions: "Rows land in Requisitions — use this both for Payment to be done and for Master. A filled-in Payment Date sends that row straight to the Payment Register. Re-syncing later, after a row that first came in Pending gets its Payment Date filled in, now updates that same requisition to Paid instead of skipping it or adding it twice — so it's safe to add both Payment to be done and Master as separate sources and sync either or both, in any order.",
+              expenses: "Rows land in Expenses — use this for a sheet like Office Master (Date, Expense Type, Paid By, Amount, ...).",
+              cash: "Rows land in Cash & Card (Date, Card, Type or Debit/Credit, Amount, Description, ...). A card named in the sheet that doesn't exist yet is created automatically. Safe to re-sync as long as new entries are added at the bottom of the sheet, not inserted in the middle.",
+              diesel: "Rows land in Diesel & Machinery, in the same one-sheet-with-a-Type-column format as Import from Excel (Date, Type, Site, Machine, Litres, ...). A machine named in the sheet that doesn't exist yet is created automatically.",
+              diesellogEntries: "Rows land in Diesel Log's Issued Log. Point the Tab field below at the exact sheet tab named \"Diesel Issued Log\" (Date, Machine, Category, Ownership, Diesel Issued (L), ...).",
+              diesellogPurchases: "Rows land in Diesel Log's Purchases. Point the Tab field below at the exact sheet tab named \"Diesel Purchases\" (Date, Party, Litres, Amount (Rs), Payment Status).",
+              diesellogMachines: "Rows land in Diesel Log's Machinery Master. Point the Tab field below at the exact sheet tab named \"Machinery Master\" (Machine, Category, Ownership, ...). A machine matching one already here by name is updated rather than duplicated.",
+            }[editing.kind || "requisitions"]}>
             <select style={inputStyle} value={editing.kind || "requisitions"}
               onChange={e=>setEditing({...editing, kind:e.target.value})}>
               <option value="requisitions">Requisitions (Payment to be done / Master)</option>
               <option value="expenses">Expenses (Office Master)</option>
+              <option value="cash">Cash & Card</option>
+              <option value="diesel">Diesel & Machinery</option>
+              <option value="diesellogEntries">Diesel Log — Issued Log</option>
+              <option value="diesellogPurchases">Diesel Log — Purchases</option>
+              <option value="diesellogMachines">Diesel Log — Machinery Master</option>
             </select>
           </Field>
           <BigButton icon="check" label="Save Source" onClick={()=>saveSheet(editing)} tone="green" full
@@ -10064,7 +11150,7 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
                   <div style={{ flex:1, minWidth:0 }}>
                     <div style={{ fontWeight:700, color:INK }}>{sh.name}</div>
                     <div style={{ fontSize:12, color:MUTED, marginTop:3 }}>
-                      Syncs into {(sh.kind||"requisitions") === "expenses" ? "Expenses" : "Requisitions"} · {sh.tab ? `Tab: ${sh.tab} · ` : ""}Last sync {sh.lastSync ? friendlyTime(sh.lastSync) : "never"}
+                      Syncs into {syncKindMeta(sh.kind).label} · {sh.tab ? `Tab: ${sh.tab} · ` : ""}Last sync {sh.lastSync ? friendlyTime(sh.lastSync) : "never"}
                     </div>
                     <div style={{ fontSize:12, marginTop:2, color: sh.fileId ? MUTED : RED, fontWeight: sh.fileId ? 400 : 700, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
                       {sh.fileId ? `File: ${sh.fileName || "chosen file"}` : "No file chosen yet — edit this source to pick one"}
@@ -10145,12 +11231,12 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
       )}
 
       <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-        {["requisitions","expenses"].map(k => {
+        {Object.keys(SYNC_KIND_META).map(k => {
           const group = sheets.filter(x => (x.kind||"requisitions") === k);
           if (group.length < 2) return null;
           return (
             <BigButton key={k} icon="download"
-              label={`Sync all ${k==="expenses" ? "Expense" : "Requisition"} sources (${group.length})`}
+              label={`Sync all ${SYNC_KIND_META[k].label} sources (${group.length})`}
               onClick={()=>syncSheets(group)} tone="green" full disabled={!!busy} />
           );
         })}
