@@ -288,6 +288,32 @@ also covers Cash & Card, Diesel & Machinery and Diesel Log" section for
 the full detail, including the one dedup limitation worth knowing about
 for Cash & Card (same-day identical entries).
 
+## Part 7 — Syncing Vendor Master or Employee Master too (v6.26)
+
+The same **Sync from Google Sheets** screen can now also sync **Vendor
+Master** and **Employee Master** — again, no Google Sheet is set up for
+either of these yet, so this is here for when you're ready.
+
+Setup is the same shape as before: put your vendor or employee list in a
+Google Sheet (or keep it as an .xlsx in Drive), then **Add Source** →
+**Choose file** → pick it → set **Syncs into** to **Vendor Master** or
+**Employee Master**. Two new templates are included —
+`Vendor_Master_Sync_Template.xlsx` and `Employee_Master_Sync_Template.xlsx`
+— each with a Read Me tab; the quickest start is the same as before: open
+one, read its Read Me tab, delete the yellow example row, fill in your
+real data.
+
+The one real difference from Cash & Card/Diesel & Machinery: these two
+**update an existing ledger entry** rather than only adding new ones. A
+vendor already in the app (matched by GSTIN, or by exact name if there's
+no GSTIN match) gets its details refreshed from the sheet on every sync,
+same for an employee (matched by ID, then Employee Code, then exact
+name) — exactly how Import from Excel already treats both. Leaving a
+cell blank in the sheet never erases something already saved in the
+app; it just leaves that field as it is. Ledgers and Employee Master
+each also got their own **Sync Now** button, same as every other
+section.
+
 ## One thing still open
 
 You mentioned a "diesel analysis book" that's been removed from the app —

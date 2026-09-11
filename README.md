@@ -910,3 +910,133 @@ against a real Google account or a real filled-in copy of either new
 template. If you set up a real sheet from one of the two new templates and
 something doesn't look right after syncing it, that's the first thing to
 check next.
+
+## Sync from Google Sheets now also covers Vendor Master and Employee Master (v6.26)
+
+Adding a source's "Syncs into" dropdown now also offers **Vendor Master**
+and **Employee Master**, alongside every kind added in earlier versions.
+Two ready-to-use templates are included — `Vendor_Master_Sync_Template.xlsx`
+and `Employee_Master_Sync_Template.xlsx` — each with a Read Me tab and the
+exact column headers to use.
+
+**Matching and updating, not just appending.** Unlike the append-only kinds
+from v6.25, these two mirror exactly how **Import from Excel** already
+handles vendors and employees: a vendor is matched by GSTIN first, then by
+exact name; an employee is matched by ID, then Employee Code, then exact
+name. A match updates that existing ledger entry's details from the sheet
+— a blank cell in the sheet never erases a value already saved in the app,
+it just leaves that field alone. No match creates a new entry. Ledgers and
+Employee Master each got their own **Sync Now** button, matching the
+pattern every other section already has.
+
+**Verification note:** the matching/merge logic was tested with a 26-assertion
+Node unit test (copying the exact logic verbatim from the app) and a
+headless-browser smoke test confirming the dropdown options and both new
+Sync Now buttons — not yet against a real Google Sheet, since none exists
+yet for either kind.
+
+## New: Category Breakdown report
+
+**Reports → Category Breakdown** (also reachable from a link on Payment
+Register's **Paid** screen) shows every payment ever made — all-time, not
+scoped to a month — grouped by category, sorted largest first, with a
+share-of-total bar under each row. Tap a category to see its individual
+transactions (most recent first) and export just that category to Excel,
+or use **Export Summary to Excel** on the main screen for the full
+category-by-category total. This is a Payment Register view specifically
+— it only counts requisitions that have actually been paid, the same way
+the Payment Register itself does, not the broader picture Site Summary
+already gives you across every kind of spending.
+
+## New: Data Check — finds requisitions with a suspect date
+
+**Settings & Backup** now has a **Data Check** card showing how many
+requisitions currently have a date that's very likely a mistake, with a
+button straight into the full list (also reachable from the **Data** menu
+as its own screen). It flags four specific things, each something no real
+requisition should ever be:
+
+- Dated in the future
+- An implausible year — anything before 2015, the usual sign of a bad
+  Excel import (a classic spreadsheet bug lands a bad date in 1899, 1900
+  or 1970, which this catches)
+- An invalid calendar date (e.g. 30 February) — something a spreadsheet
+  or a manual typo can produce that JavaScript's own date handling would
+  otherwise silently "correct" into a different date instead of flagging
+- A payment date recorded before the requisition it pays was even raised
+
+A blank date isn't flagged — that's a separate, incomplete-entry problem,
+not a wrong one. Tap any flagged entry to open it directly in the normal
+edit screen and fix the date on the spot.
+
+**Monthly Statement** also gained a **Raised this month** list (right
+alongside the existing "Payments this month"), listing every requisition
+raised in the selected month — with a small ⚠ next to any entry Data
+Check has also flagged, so a bad date is visible right where you're
+already reviewing the month.
+
+## UTR field removed
+
+The UTR field has been removed everywhere it appeared — the payment
+details form, Import from Excel's column matching, and every Excel
+export. Reference Number already serves this purpose, and having both
+on a payment was creating confusion during reconciliation. If your
+Excel sheets still have a UTR column, it's simply ignored on import now
+— nothing needs to change there.
+
+## Fixed: refreshing the app no longer forces a re-login
+
+Previously, reloading the page — or even briefly switching to another
+app and back — locked the app again immediately, even if you'd have
+unlocked it moments before. That's fixed: the app now only re-locks once
+it's genuinely been in the background longer than your **Auto-lock**
+timer in Settings (5 minutes by default). A quick refresh, or switching
+apps for a few seconds, no longer counts as time away. Manually tapping
+**Lock** still locks the app right away regardless of the timer, and it
+stays locked through a refresh too — that part hasn't changed.
+
+## Google Drive backup now also keeps a Payment List spreadsheet current
+
+Alongside the existing `ERP-Data.json` backup, Google Drive backup now
+also writes and keeps updated a second file, **Payment-List.xlsx** — a
+ready-to-open spreadsheet listing every payment ever made (Ref No., date,
+site, category, name, amount, paid-on date, mode, account details),
+sorted by payment date. It updates automatically on the same backup that
+already runs on every change — no extra step needed. If this one file
+ever fails to update for some reason, it doesn't affect the main JSON
+backup, which remains the critical, always-protected copy of your data.
+
+## Payment Register: bulk actions on the "To Pay" screen
+
+The **To Pay** screen (Payment Register's list of what's still owed) now
+has a **Select** option, the same pattern already used elsewhere in the
+app: tap Select, tick the requisitions you want, then choose one combined
+action from the bar at the bottom —
+
+- **Register Payment** — mark all the selected requisitions paid in one
+  step, with one shared payment date and payment mode; each requisition
+  still keeps its own billed amount as what was actually paid.
+- **Export to Excel** — export just the selected rows.
+- **Delete all** — remove the selected requisitions.
+
+Switching between the To Pay and Paid screens now also clears out any
+selection left over from the other screen, so a stale selection can't
+carry across by accident.
+
+## Verification for this update (v6.26)
+
+Every item above was checked in this order before delivery: the app's
+inline script re-transforms cleanly through the same vendored Babel used
+to run it and `node --check`s cleanly on the output, twice; a dedicated
+Node unit test for each new piece of logic (vendor/employee sync
+matching, the Category Breakdown grouping, the Data Check date rules —
+50+ assertions across the three, each cross-checked to match the actual
+function bodies in `index.html`, not just a copy that might drift); and a
+headless-browser smoke test for each new screen and button, confirming
+real navigation, real data on screen, and zero JavaScript errors along
+the way.
+
+`APP_VERSION` moved from 6.25 to 6.26, and the service worker's
+`CACHE_NAME` moved from v25 to v26, so installed copies pick up this
+update automatically the next time they're online (see "If the app isn't
+showing recent updates" above if one doesn't).

@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.25";
+const APP_VERSION = "6.26";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -80,6 +80,15 @@ const GOOGLE_DRIVE_APP_ID = "60621934527";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.26", date:"2026-09-10", title:"Vendor/Employee sync, Category Breakdown, Data Check, bulk To Pay actions, and more", items:[
+    "Sync from Google Sheets now also covers Vendor Master and Employee Master — add a source and set \"Syncs into\" to either one. A vendor is matched by GSTIN or exact name and updated in place if it already exists; an employee is matched by Employee Code, ID, or exact name. Either way, a blank cell in your sheet never erases a value already saved in the app. Two new templates are included: Vendor_Master_Sync_Template.xlsx and Employee_Master_Sync_Template.xlsx. Ledgers and Employee Master each got their own \"Sync Now\" button too.",
+    "New \"Category Breakdown\" report (Reports menu, and a link from Payment Register's Paid screen) — every payment ever made, all-time, grouped by category, with a running share-of-total bar. Tap a category to see its individual transactions and export just that category, or export the whole summary to Excel.",
+    "New \"Data Check\" screen (Settings & Backup, and in the Data menu) — scans every requisition for a date that's almost certainly a mistake: dated in the future, an implausible year (the classic sign of a bad Excel import), an invalid calendar date, or a payment recorded before the requisition it pays was even raised. Settings shows the flagged count right there; tapping a flagged entry opens it directly in the edit form. Monthly Statement also gained a \"Raised this month\" list (alongside the existing \"Payments this month\"), with a small warning mark on any entry Data Check has flagged.",
+    "Removed the UTR field everywhere it appeared (payment details, Import from Excel matching, exports) — Reference Number already covers this, and having both was creating confusion during reconciliation.",
+    "Fixed: reloading or briefly switching away from the app while it was unlocked no longer forces you to re-enter your PIN. The app now only re-locks after it's actually been in the background longer than your Auto-lock timer in Settings (default 5 minutes) — refreshing the page itself doesn't count as time away. Manually tapping Lock still locks it immediately, refresh or not.",
+    "Google Drive backup now also keeps a second file, Payment-List.xlsx, up to date automatically alongside the existing data backup — a ready-to-open spreadsheet of every payment ever made, sorted by payment date. No extra step needed; it updates on the same auto-backup that already runs.",
+    "Payment Register's \"To Pay\" screen now supports selecting several requisitions at once — Select, tap the ones you want, then Register Payment to mark them all paid with one shared date and payment mode in a single step (each keeps its own billed amount), or Export to Excel / Delete all as a batch. Switching between To Pay and Paid now also clears any selection left over from the other screen.",
+  ]},
   { v:"6.25", date:"2026-09-07", title:"Sync from Google Sheets now covers Cash & Card, Diesel & Machinery and Diesel Log too", items:[
     "The \"Syncs into\" choice when adding a sync source now includes Cash & Card, Diesel & Machinery, and Diesel Log's three tabs (Issued Log, Purchases, Machinery Master) — previously only Requisitions and Expenses could be synced this way.",
     "Cash & Card, Diesel & Machinery and Diesel Log each now have their own \"Sync Now\" button, matching the one Requisitions & Export got in the last update — it runs the sync for that section's kind(s) immediately and takes you to the results.",
@@ -601,7 +610,7 @@ function warnIfDuplicateLedgerName(vendors, v){
   );
 }
 const emptyReq = {
-  coveredById:"", coveredByRef:"", dupOk:[], id:"", refNo:"", date:"", site:"", category:"", subCategory:"", vendorId:"", name:"", amount:"", description:"", paymentStatus:"Pending", accNo:"", ifsc:"", paidBy:"Company", paymentDate:"", paymentMode:"", utr:"", paidAmount:"", recovered:false, isReimbursement:false, claimId:"", exported:false, createdAt:0,
+  coveredById:"", coveredByRef:"", dupOk:[], id:"", refNo:"", date:"", site:"", category:"", subCategory:"", vendorId:"", name:"", amount:"", description:"", paymentStatus:"Pending", accNo:"", ifsc:"", paidBy:"Company", paymentDate:"", paymentMode:"", paidAmount:"", recovered:false, isReimbursement:false, claimId:"", exported:false, createdAt:0,
   salaryMonth:"" }; // set only on a requisition generated from Payroll, e.g. "2026-08" - how "already generated this month" is detected without guessing from text
 const PAYMENT_MODES = ["NEFT","RTGS","IMPS","UPI","Cheque","Cash","Other"];
 
@@ -916,6 +925,22 @@ const SYNC_KIND_META = {
     updateDesc: "A machine with this name already exists — its Category, Ownership and Present-in-month flags are updated from the sheet rather than adding a second entry.",
     updateSummary: (n) => `${n} updated`,
   },
+  vendors: {
+    label: "Vendor Master", newLabel: "New vendors", itemLabel: "vendor",
+    describe: (d) => `${d.name || "—"}${d.category ? ` · ${d.category}` : ""}`,
+    dupDesc: "No vendor in your sheet exactly duplicates one already here without changes.",
+    updateLabel: "Already in the app — will be updated",
+    updateDesc: "A vendor matching this GSTIN, or this exact name, already exists — its details are updated from the sheet (blank sheet cells leave the existing value alone) rather than adding a second entry.",
+    updateSummary: (n) => `${n} updated`,
+  },
+  employees: {
+    label: "Employee Master", newLabel: "New employees", itemLabel: "employee",
+    describe: (d) => `${d.name || "—"}${d.designation ? ` · ${d.designation}` : ""}`,
+    dupDesc: "No employee in your sheet exactly duplicates one already here without changes.",
+    updateLabel: "Already in the app — will be updated",
+    updateDesc: "An employee matching this Employee Code, or this exact name, already exists — its details are updated from the sheet (blank sheet cells leave the existing value alone) rather than adding a second entry.",
+    updateSummary: (n) => `${n} updated`,
+  },
 };
 function syncKindMeta(kind){ return SYNC_KIND_META[kind] || SYNC_KIND_META.requisitions; }
 
@@ -1029,7 +1054,7 @@ function nextRefNo(reqs, dateStr){
 }
 
 // Two entries that share a date, payee and amount are almost always the same
-// payment entered twice. Same UTR is certain.
+// payment entered twice.
 function duplicateKeyOf(r){
   return [r.date||"", String(r.site||"").trim().toLowerCase(),
           String(r.name||"").trim().toLowerCase(), Number(r.amount||0)].join("|");
@@ -1060,9 +1085,7 @@ function findDuplicateReqs(reqs){
     return Object.values(m);
   };
 
-  // Certain. A bank issues one UTR, and a reference number is ours to keep unique.
-  bucket(r => { const u = String(r.utr||"").trim().toLowerCase(); return u ? "u|"+u : ""; })
-    .forEach(g => push(g, "certain", "same UTR"));
+  // Certain. A reference number is ours to keep unique.
   bucket(r => { const f = String(r.refNo||"").trim().toLowerCase(); return f ? "f|"+f : ""; })
     .forEach(g => push(g, "certain", "same reference number"));
 
@@ -1334,6 +1357,32 @@ function downloadBackupFile(payload){
   a.href = url; a.download = `ERP-Data_${todayStr()}.json`;
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+// Builds the same "Payments Made" table the Payment Register's own Export
+// button writes (see exportRegister() in PaymentRegisterTab), but across
+// every paid requisition ever recorded, not one month/site at a time — this
+// is what auto-uploads to Drive as the Payment List alongside ERP-Data.json.
+// Reads straight from localStorage via loadKey, same as collectAllData(), so
+// it can be called from the Drive sync path with no React state/props needed.
+function buildPaymentListWorkbook(){
+  const reqs = loadKey("erp:requisitions", []);
+  const paid = reqs.filter(r => isInRegister(r) && !isRolledUp(r));
+  const data = paid
+    .slice()
+    .sort((a,b) => new Date(a.paymentDate||0) - new Date(b.paymentDate||0))
+    .map(r => ({
+      "Ref No.":r.refNo||"", Date:fmtDate(r.date), Site:r.site||"",
+      Category:r.category||"", "Sub Category":r.subCategory||"", Name:r.name||"",
+      Amount:Number(r.amount)||0, Description:r.description||"",
+      "Paid On": fmtDate(r.paymentDate),
+      "Payment Mode":r.paymentMode||"",
+      "A/c No.":r.accNo||"", "IFSC Code":r.ifsc||"",
+    }));
+  const ws = XLSX.utils.json_to_sheet(data);
+  ws["!cols"] = [{wch:16},{wch:12},{wch:16},{wch:14},{wch:14},{wch:22},{wch:12},{wch:28},{wch:14},{wch:14},{wch:18},{wch:14}];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Payment List");
+  return wb;
 }
 async function writeToFileHandle(handle, payload){
   const writable = await handle.createWritable();
@@ -1920,6 +1969,7 @@ const MENU_SECTIONS = [
     { id:"receivables", label:"Receivables",         desc:"Money overpaid and due back" },
   ]},
   { group:"Reports", items:[
+    { id:"categorybreakdown", label:"Category Breakdown", desc:"Payment Register, paid, all-time by category" },
     { id:"fixedcost",   label:"Fixed Cost Summary",  desc:"Rent, instalments and salaries per month" },
     { id:"statement",   label:"Monthly Statement",   desc:"One month: raised, paid, outstanding" },
     { id:"sitesummary", label:"Site Summary",        desc:"Spend and balances site by site" },
@@ -1934,6 +1984,7 @@ const MENU_SECTIONS = [
   { group:"Data", items:[
     { id:"sheets",      label:"Sync from Google Sheets", desc:"Pull requisitions from site sheets" },
     { id:"import",      label:"Import from Excel",   desc:"Bring in vendors and requisitions" },
+    { id:"datacheck",   label:"Data Check",          desc:"Find requisitions with a suspect date" },
     { id:"settings",    label:"Settings & Backup",   desc:"Data file, lists, restore" },
     { id:"changelog",   label:"What is New",         desc:"Version history and changes" },
   ]},
@@ -2318,7 +2369,18 @@ function ERPApp(){
     try {
       const raw = localStorage.getItem("erp:settings");
       const st = raw ? JSON.parse(raw) : null;
-      return !!(st && st.pinEnabled && st.pinHash);
+      if (!(st && st.pinEnabled && st.pinHash)) return false;
+      // A page refresh/reopen should not by itself force a re-lock — only
+      // genuine idle time should. "erp:lastActiveAt" is stamped whenever the
+      // app goes out of view or is about to unload (see the effects below);
+      // if less than the auto-lock window has passed since then, treat this
+      // load as a continuation of the same active session and stay unlocked.
+      const mins = st.autoLockMin === undefined ? 5 : Number(st.autoLockMin);
+      if (mins <= 0) return true; // "lock instantly" setting - always start locked
+      const lastRaw = localStorage.getItem("erp:lastActiveAt");
+      const lastActive = lastRaw ? Number(lastRaw) : 0;
+      if (!lastActive || Number.isNaN(lastActive)) return true; // no record - safe default
+      return (Date.now() - lastActive) > mins * 60000;
     } catch(e) { return false; }
   });
   const hiddenAtRef = React.useRef(0);
@@ -2335,6 +2397,7 @@ function ERPApp(){
   const [driveConnected, setDriveConnected] = useState(() => !!loadKey("erp:driveConnected", false));
   const [driveEmail, setDriveEmail] = useState(() => loadKey("erp:driveEmail", ""));
   const [driveFileId, setDriveFileId] = useState(() => loadKey("erp:driveFileId", ""));
+  const [drivePaymentListFileId, setDrivePaymentListFileId] = useState(() => loadKey("erp:drivePaymentListFileId", ""));
   const [driveFolderId, setDriveFolderId] = useState(() => loadKey("erp:driveFolderId", ""));
   const [driveFolderName, setDriveFolderName] = useState(() => loadKey("erp:driveFolderName", ""));
   const [driveImportFolderId, setDriveImportFolderId] = useState(() => loadKey("erp:driveImportFolderId", ""));
@@ -2453,7 +2516,13 @@ function ERPApp(){
   useEffect(() => {
     function onVis(){
       if (!settings.pinEnabled || !settings.pinHash) return;
-      if (document.hidden) { hiddenAtRef.current = Date.now(); return; }
+      if (document.hidden) {
+        hiddenAtRef.current = Date.now();
+        // Stamp "last active" so a refresh/reopen after this can tell how
+        // long the app was actually away, instead of always re-locking.
+        try { localStorage.setItem("erp:lastActiveAt", String(hiddenAtRef.current)); } catch(e){}
+        return;
+      }
       const mins = settings.autoLockMin === undefined ? 5 : Number(settings.autoLockMin);
       if (mins <= 0) { setLocked(true); return; }
       if (hiddenAtRef.current && Date.now() - hiddenAtRef.current > mins * 60000) setLocked(true);
@@ -2462,9 +2531,15 @@ function ERPApp(){
     return () => document.removeEventListener("visibilitychange", onVis);
   }, [settings.pinEnabled, settings.pinHash, settings.autoLockMin]);
 
-  // warn before leaving with unsaved changes
+  // warn before leaving with unsaved changes, and stamp "last active" so a
+  // refresh (which always fires beforeunload, unlike visibilitychange in
+  // every browser) still lets the locked-state check above tell a reload
+  // apart from a genuine period of being away.
   useEffect(() => {
     function onBeforeUnload(e){
+      if (settings.pinEnabled && settings.pinHash) {
+        try { localStorage.setItem("erp:lastActiveAt", String(Date.now())); } catch(err){}
+      }
       if (!dirty) return;
       e.preventDefault();
       e.returnValue = "";
@@ -2472,7 +2547,7 @@ function ERPApp(){
     }
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
-  }, [dirty]);
+  }, [dirty, settings.pinEnabled, settings.pinHash]);
 
   const saveToFile = useCallback(async (silent) => {
     if (!fileHandle) return false;
@@ -2578,6 +2653,50 @@ function ERPApp(){
         }
       }
 
+      // Also keep an auto-updating Excel copy of the Payment List (the
+      // Payment Register's Paid list, all-time) in the same Drive folder —
+      // same create-once-then-PATCH-update pattern as ERP-Data.json above,
+      // just a second file/id. Wrapped in its own try/catch so a problem
+      // here never blocks or fails the JSON backup above, which already
+      // succeeded by this point and is the one thing recovery depends on.
+      try {
+        const plWb = buildPaymentListWorkbook();
+        const plArray = XLSX.write(plWb, { type: "array", bookType: "xlsx" });
+        const plBlob = new Blob([plArray], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+        let plFileId = drivePaymentListFileId || loadKey("erp:drivePaymentListFileId", "");
+        if (!plFileId) {
+          const plMetadata = { name: "Payment-List.xlsx", mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" };
+          if (folderId) plMetadata.parents = [folderId];
+          const plForm = new FormData();
+          plForm.append("metadata", new Blob([JSON.stringify(plMetadata)], { type: "application/json" }));
+          plForm.append("file", plBlob);
+          const plRes = await driveApiFetch(
+            "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id",
+            token, { method: "POST", body: plForm }
+          );
+          const plJ = await plRes.json();
+          plFileId = plJ.id;
+          setDrivePaymentListFileId(plFileId); saveKey("erp:drivePaymentListFileId", plFileId);
+        } else {
+          try {
+            await driveApiFetch(
+              `https://www.googleapis.com/upload/drive/v3/files/${plFileId}?uploadType=media`,
+              token, { method: "PATCH", headers: { "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }, body: plBlob }
+            );
+          } catch (e2) {
+            if (e2 && e2.status === 404) {
+              // removed on Drive's side — drop the stale id, next sync recreates it
+              setDrivePaymentListFileId(""); saveKey("erp:drivePaymentListFileId", "");
+            }
+            throw e2;
+          }
+        }
+      } catch (plErr) {
+        // Deliberately swallowed — the JSON backup above is the source of
+        // truth and already succeeded; the Payment List simply retries on
+        // the next sync rather than surfacing a second error to the user.
+      }
+
       const stamp = new Date().toISOString();
       setDriveLastSynced(stamp); saveKey("erp:driveLastSynced", stamp);
       setDriveError("");
@@ -2594,7 +2713,7 @@ function ERPApp(){
       driveSyncingRef.current = false;
       setDriveSyncing(false);
     }
-  }, [driveConnected, driveFileId, driveFolderId, driveGetFreshToken]);
+  }, [driveConnected, driveFileId, drivePaymentListFileId, driveFolderId, driveGetFreshToken]);
 
   const driveChooseFolder = useCallback(async () => {
     if (!GOOGLE_DRIVE_PICKER_API_KEY || GOOGLE_DRIVE_PICKER_API_KEY.indexOf("PASTE_YOUR") === 0) {
@@ -3058,7 +3177,8 @@ function ERPApp(){
       return;
     }
 
-    const tpl = kind === "expenses" ? EXPENSE_TEMPLATE : kind === "cash" ? CASH_TEMPLATE : kind === "diesel" ? DIESEL_TEMPLATE : REQ_TEMPLATE;
+    const tpl = kind === "expenses" ? EXPENSE_TEMPLATE : kind === "cash" ? CASH_TEMPLATE : kind === "diesel" ? DIESEL_TEMPLATE
+      : kind === "vendors" ? VENDOR_TEMPLATE : kind === "employees" ? EMPLOYEE_TEMPLATE : REQ_TEMPLATE;
     const headers = [...new Set(collected.flatMap(c => Object.keys(c.row)))]
       .filter(h => h !== "__file" && h !== "__folder");
     const map = autoMapHeaders(headers, tpl);
@@ -3202,9 +3322,93 @@ function ERPApp(){
       return;
     }
 
+    if (kind === "vendors") {
+      // Mirrors ImportTab's own "vendors" row handling exactly (same match
+      // rule: GSTIN first, then an exact name match) — vendors and
+      // employees both live in the one shared `vendors` array, matching how
+      // Import from Excel already models them. Unlike the append-only kinds
+      // above, a match here updates the existing record in place (blank
+      // sheet cells leave the existing value alone) rather than being
+      // treated as a duplicate — see applyPreview's merge for the exact
+      // same "non-empty fields only" rule Import from Excel already uses.
+      const toUpdate = [];
+      collected.forEach((c, i) => {
+        const { out, problems } = mapRowGeneric(c.row, tpl, map);
+        if (problems.length) { errors.push({ source:c.source, rowNum:i+2, why:`missing ${problems.join(", ")}` }); return; }
+
+        const siteList = out.sitesRaw
+          ? String(out.sitesRaw).split(/[,;|/]/).map(x=>x.trim()).filter(Boolean) : [];
+        delete out.sitesRaw;
+
+        const existing = vendors.find(v =>
+          (out.gstin && v.gstin && v.gstin.toUpperCase() === out.gstin) ||
+          String(v.name||"").trim().toLowerCase() === String(out.name||"").trim().toLowerCase());
+        if (existing) {
+          if (siteList.length) out.sites = siteList;
+          if (!out.ledgerType) delete out.ledgerType;
+          toUpdate.push({ existing, data:out, source:c.source });
+          return;
+        }
+        toAdd.push({ data:{ ...emptyVendor, ...out, ledgerType: out.ledgerType || "Vendor", sites: siteList, id: uid() }, source:c.source });
+      });
+      queueResult({ kind, toAdd, toUpdate, duplicates, errors, failures, missing, map, headers, list, fileReport, skippedFiles, seenFiles, notes });
+      return;
+    }
+
+    if (kind === "employees") {
+      // Mirrors ImportTab's own "employees" row handling exactly, including
+      // its one difference from the vendors branch above: a row carrying
+      // its own ID (an export round-tripped back in) matches on that ID
+      // first, before falling back to Employee Code then name.
+      const toUpdate = [];
+      collected.forEach((c, i) => {
+        const { out, problems } = mapRowGeneric(c.row, tpl, map);
+        if (problems.length) { errors.push({ source:c.source, rowNum:i+2, why:`missing ${problems.join(", ")}` }); return; }
+
+        const siteList = out.sitesRaw
+          ? String(out.sitesRaw).split(/[,;|/]/).map(x=>x.trim()).filter(Boolean) : [];
+        delete out.sitesRaw;
+        if (out.empStatus) {
+          const st = String(out.empStatus).toLowerCase();
+          out.empStatus = st.indexOf("leave")>=0 ? "On Leave"
+            : (st.indexOf("left")>=0 || st.indexOf("resign")>=0 || st.indexOf("exit")>=0 || st.indexOf("inactive")>=0) ? "Left"
+            : "Active";
+        }
+        if (out.rollType) {
+          const rt = String(out.rollType).toLowerCase().replace(/[^a-z]/g,"");
+          out.rollType = (rt.indexOf("off")>=0 || rt.indexOf("contract")>=0 || rt.indexOf("agency")>=0 || rt.indexOf("casual")>=0)
+            ? "Off Roll" : "On Roll";
+        }
+        if (out.payType) {
+          const pt = String(out.payType).toLowerCase();
+          out.payType = (pt.indexOf("attend")>=0 || pt.indexOf("variable")>=0 || pt.indexOf("daily")>=0)
+            ? "Attendance-based" : "Fixed";
+        }
+
+        const idKey = String(out.id||"").trim();
+        const idHit = idKey ? vendors.find(v => v.id === idKey) : null;
+        if (idHit) { toUpdate.push({ existing:idHit, data:out, source:c.source }); return; }
+
+        const existing = vendors.find(v =>
+          (out.empCode && v.empCode && String(v.empCode).trim().toLowerCase() === String(out.empCode).trim().toLowerCase()) ||
+          String(v.name||"").trim().toLowerCase() === String(out.name||"").trim().toLowerCase());
+        if (existing) {
+          if (siteList.length) out.sites = siteList;
+          out.ledgerType = "Employee";
+          toUpdate.push({ existing, data:out, source:c.source });
+          return;
+        }
+        toAdd.push({ data:{ ...emptyVendor, ...out, ledgerType:"Employee",
+          empStatus: out.empStatus || "Active", rollType: out.rollType || "On Roll",
+          payType: out.payType || "Fixed", sites: siteList, id: uid() }, source:c.source });
+      });
+      queueResult({ kind, toAdd, toUpdate, duplicates, errors, failures, missing, map, headers, list, fileReport, skippedFiles, seenFiles, notes });
+      return;
+    }
+
     // Nothing already recorded gets added again as a fresh row. A sheet source
-    // rarely carries its own Ref No or UTR (those get assigned once a row lands
-    // in the app), so comparing on those — like importDupKey does for a one-off
+    // rarely carries its own Ref No (that gets assigned once a row lands
+    // in the app), so comparing on that — like importDupKey does for a one-off
     // Excel import — would never match on a re-sync and let the same row back
     // in every time. Match on date + site + name + amount + description instead,
     // which is what a repeated sync of the same sheet will actually reproduce.
@@ -3270,7 +3474,7 @@ function ERPApp(){
     });
 
     queueResult({ kind, toAdd, toUpdate, duplicates, errors, failures, missing, map, headers, list, fileReport, skippedFiles, seenFiles, notes });
-  }, [lists, expenses, reqs, recurring, cards, cashTxns, machines, diesel, dieselLog, dieselLogPurchases, dieselLogMachines]);
+  }, [lists, expenses, reqs, recurring, cards, cashTxns, machines, diesel, dieselLog, dieselLogPurchases, dieselLogMachines, vendors]);
 
   const syncSheets = useCallback(async (list, opts) => {
     const silent = !!(opts && opts.silent);
@@ -3514,6 +3718,27 @@ function ERPApp(){
       return;
     }
 
+    if (preview.kind === "vendors" || preview.kind === "employees") {
+      // Same merge rule as ImportTab's own vendors/employees commit: only
+      // non-empty sheet cells overwrite the existing record, so a Master
+      // sheet that only tracks a few columns never blanks out details kept
+      // elsewhere in the app (bank details added by hand, for instance).
+      let next = [...vendors];
+      (preview.toUpdate||[]).forEach(u => {
+        next = next.map(v => v.id === u.existing.id
+          ? { ...v, ...Object.fromEntries(Object.entries(u.data).filter(([,val]) => val !== "" && val !== undefined)) }
+          : v);
+      });
+      next = [...next, ...preview.toAdd.map(a => a.data)];
+      setVendors(next);
+      setSheets(sheets.map(x => (preview.list || []).some(l => l.id === x.id) ? { ...x, lastSync: stamp } : x));
+      const updCount = (preview.toUpdate||[]).length;
+      const kindWord = preview.kind === "employees" ? "employee" : "vendor";
+      showToast(`${preview.toAdd.length} ${kindWord}(s) added${updCount ? ` · ${updCount} updated` : ""}`);
+      setSheetPreviewQueue(q => q.slice(1));
+      return;
+    }
+
     const added = [];
     const recurringUpdates = [];
     preview.toAdd.forEach((a, idx) => {
@@ -3716,7 +3941,7 @@ function ERPApp(){
       }} />;
   }
 
-  const TAB_TITLES = { dashboard:"Overview", vendors:"Ledgers", requisition:"New Payment Requisition", export:"Requisitions & Export", settings:"Settings", recurring:"Rent & EMI", company:"Company Details", payments:"Payment Register", import:"Import from Excel", receivables:"Receivables", expenses:"Expenses", sheets:"Sync from Google Sheets", statement:"Monthly Statement", sitesummary:"Site Summary", employees:"Employee Master", cash:"Cash & Card", diesel:"Diesel & Machinery", diesellog:"Diesel Log", utilities:"Utilities", changelog:"What is New", fixedcost:"Fixed Cost Summary", payroll:"Payroll" };
+  const TAB_TITLES = { dashboard:"Overview", vendors:"Ledgers", requisition:"New Payment Requisition", export:"Requisitions & Export", settings:"Settings", recurring:"Rent & EMI", company:"Company Details", payments:"Payment Register", import:"Import from Excel", receivables:"Receivables", expenses:"Expenses", sheets:"Sync from Google Sheets", statement:"Monthly Statement", sitesummary:"Site Summary", employees:"Employee Master", cash:"Cash & Card", diesel:"Diesel & Machinery", diesellog:"Diesel Log", utilities:"Utilities", changelog:"What is New", fixedcost:"Fixed Cost Summary", payroll:"Payroll", categorybreakdown:"Category Breakdown", datacheck:"Data Check" };
 
   const openImport = (kind, cardId) => { setImportFocus(kind || ""); setImportCardHint(cardId || ""); setTab("import"); };
   const toPayCount = reqs.filter(r => r.paymentStatus !== "Paid" || !r.paymentDate).length;
@@ -3758,12 +3983,15 @@ function ERPApp(){
 
       <main style={{ flex:1, maxWidth:720, width:"100%", margin:"0 auto", padding:"16px 16px 112px" }}>
         {tab==="dashboard" && <Dashboard vendors={vendors} reqs={reqs} setReqs={setReqs} recurring={recurring} setRecurring={setRecurring} expenses={expenses} cashTxns={cashTxns} goTo={navigate} showToast={showToast} sync={syncProps} />}
-        {tab==="vendors" && <VendorsTab vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
+        {tab==="vendors" && <VendorsTab vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport}
+          sheets={sheets} syncSheets={syncSheets} sheetSyncBusy={sheetSyncBusy} />}
         {tab==="requisition" && <RequisitionForm vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} expenses={expenses} setExpenses={setExpenses} lists={lists} setLists={setLists} goTo={navigate} openImport={openImport} showToast={showToast} />}
         {tab==="export" && <ExportTab reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} expenses={expenses} setExpenses={setExpenses} goTo={navigate} openImport={openImport} showToast={showToast} sheets={sheets} syncSheets={syncSheets} sheetSyncBusy={sheetSyncBusy} />}
         {tab==="recurring" && <RecurringTab vendors={vendors} setVendors={setVendors} recurring={recurring} setRecurring={setRecurring} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
         {tab==="import" && <ImportTab focusKind={importFocus} clearFocus={()=>setImportFocus("")} presetCardId={importCardHint} vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} recurring={recurring} setRecurring={setRecurring} expenses={expenses} setExpenses={setExpenses} cards={cards} setCards={setCards} cashTxns={cashTxns} setCashTxns={setCashTxns} machines={machines} setMachines={setMachines} diesel={diesel} setDiesel={setDiesel} utilities={utilities} setUtilities={setUtilities} attendance={attendance} setAttendance={setAttendance} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} />}
         {tab==="fixedcost" && <FixedCostTab recurring={recurring} vendors={vendors} machines={machines} showToast={showToast} goTo={navigate} />}
+        {tab==="categorybreakdown" && <CategoryBreakdownTab reqs={reqs} goTo={navigate} />}
+        {tab==="datacheck" && <DataCheckTab reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} expenses={expenses} setExpenses={setExpenses} lists={lists} setLists={setLists} goTo={navigate} openImport={openImport} showToast={showToast} />}
         {tab==="changelog" && <ChangelogTab settings={settings} setSettings={setSettings} goTo={navigate} />}
         {tab==="utilities" && <UtilitiesTab utilities={utilities} setUtilities={setUtilities} cards={cards}
           lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} />}
@@ -3779,7 +4007,8 @@ function ERPApp(){
           cashCounts={cashCounts} setCashCounts={setCashCounts} vendors={vendors}
           lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport}
           sheets={sheets} syncSheets={syncSheets} sheetSyncBusy={sheetSyncBusy} />}
-        {tab==="employees" && <EmployeesTab vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
+        {tab==="employees" && <EmployeesTab vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport}
+          sheets={sheets} syncSheets={syncSheets} sheetSyncBusy={sheetSyncBusy} />}
         {tab==="payroll" && <PayrollTab vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} attendance={attendance} setAttendance={setAttendance} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
         {tab==="statement" && <MonthlyStatementTab reqs={reqs} expenses={expenses} cashTxns={cashTxns} cards={cards} showToast={showToast} goTo={navigate} />}
         {tab==="sitesummary" && <SiteSummaryTab reqs={reqs} expenses={expenses} cashTxns={cashTxns} cards={cards} diesel={diesel} utilities={utilities} machines={machines} vendors={vendors} showToast={showToast} goTo={navigate} />}
@@ -3788,7 +4017,7 @@ function ERPApp(){
         {tab==="receivables" && <ReceivablesTab reqs={reqs} setReqs={setReqs} showToast={showToast} goTo={navigate} />}
         {tab==="payments" && <PaymentRegisterTab reqs={reqs} setReqs={setReqs} vendors={vendors} expenses={expenses} setExpenses={setExpenses} cashTxns={cashTxns} cards={cards} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} />}
         {tab==="company" && <CompanyTab company={company} setCompany={setCompany} showToast={showToast} />}
-        {tab==="settings" && <SettingsTab settings={settings} setSettings={setSettings} vendors={vendors} reqs={reqs} recurring={recurring} expenses={expenses} sheets={sheets} cashTxns={cashTxns} cards={cards} machines={machines} diesel={diesel} utilities={utilities} lists={lists} setLists={setLists} showToast={showToast} sync={syncProps} />}
+        {tab==="settings" && <SettingsTab settings={settings} setSettings={setSettings} vendors={vendors} reqs={reqs} recurring={recurring} expenses={expenses} sheets={sheets} cashTxns={cashTxns} cards={cards} machines={machines} diesel={diesel} utilities={utilities} lists={lists} setLists={setLists} showToast={showToast} sync={syncProps} goTo={navigate} />}
       </main>
 
       <div style={{ position:"fixed", bottom:0, left:0, right:0, zIndex:40, background:"rgba(255,255,255,0.92)", backdropFilter:"blur(14px)", WebkitBackdropFilter:"blur(14px)", borderTop:`1px solid ${SAND}` }}>
@@ -3836,7 +4065,14 @@ function ERPApp(){
       <NavDrawer open={menuOpen} tab={tab} onPick={navigate} onClose={()=>setMenuOpen(false)}
         canLock={!!(settings.pinEnabled && settings.pinHash)}
         unseenUpdate={settings.lastSeenVersion !== APP_VERSION}
-        onLock={()=>{ setMenuOpen(false); setLocked(true); }} />
+        onLock={()=>{
+          setMenuOpen(false);
+          // A manual lock must stick even across a refresh — clear the
+          // "last active" stamp so the reload check above can't mistake
+          // this for a still-within-the-grace-window reopen.
+          try { localStorage.removeItem("erp:lastActiveAt"); } catch(e){}
+          setLocked(true);
+        }} />
       <Toast toast={toast} />
     </div>
   );
@@ -4181,7 +4417,7 @@ function StatCard({ label, value, color, plain }) {
 }
 
 /* ================= VENDORS ================= */
-function VendorsTab({ vendors, setVendors, reqs, setReqs, lists, setLists, showToast, goTo, openImport }){
+function VendorsTab({ vendors, setVendors, reqs, setReqs, lists, setLists, showToast, goTo, openImport, sheets, syncSheets, sheetSyncBusy }){
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState(null);
   const [showForm, setShowForm] = useState(false);
@@ -4218,6 +4454,17 @@ function VendorsTab({ vendors, setVendors, reqs, setReqs, lists, setLists, showT
     return (v.sites||[]).includes(siteFilter) || !(v.sites||[]).length;
   });
   const filtered = sortBy(filteredRaw, (LEDGER_SORTS.find(x=>x.k===sortKey)||LEDGER_SORTS[0]).get, desc);
+
+  // Mirrors the v6.24/v6.25 "Sync Now" buttons elsewhere — runs the same
+  // syncSheets() a "vendors"-kind source's own Sync now button would, then
+  // lands on Sync from Google Sheets to review the result. Only vendors
+  // (not employees) sources, so a mixed set of Vendor and Employee Master
+  // sheets never syncs a screen's worth of the wrong records by mistake.
+  async function syncNow(){
+    const list = (sheets || []).filter(x => (x.kind || "requisitions") === "vendors");
+    await syncSheets(list);
+    goTo && goTo("sheets");
+  }
 
   function exportLedgers(){
     if (vendors.length === 0) { showToast("No ledgers to export", "error"); return; }
@@ -4340,6 +4587,12 @@ function VendorsTab({ vendors, setVendors, reqs, setReqs, lists, setLists, showT
         {vendors.length > 0 && (
           <BigButton icon="sheet" label="Export Ledgers to Excel" onClick={exportLedgers} tone="green" full />
         )}
+        <button onClick={syncNow} disabled={!!sheetSyncBusy}
+          style={{ borderRadius:16, padding:"14px 20px", fontSize:15, fontWeight:700,
+            background: sheetSyncBusy ? SAND : GREEN, color: sheetSyncBusy ? INK : "#fff", border:"none",
+            cursor: sheetSyncBusy ? "default" : "pointer" }}>
+          {sheetSyncBusy ? "Syncing…" : "Sync Now"}
+        </button>
       </div>
 
       {vendors.length > 0 && (
@@ -5395,9 +5648,6 @@ function RequisitionForm({ vendors, setVendors, reqs, setReqs, expenses, setExpe
                 </select>
               </Field>
             </div>
-            <Field label="UTR / Transaction Ref" hint="Optional for now — you can add it later or import it from the sheet accounts returns">
-              <input style={inputStyle} value={form.utr||""} onChange={e=>set("utr",e.target.value)} />
-            </Field>
             <div style={{ fontSize:12, color:GREEN, fontWeight:600 }}>
               With a date and mode set, this entry moves to the Payment Register.
             </div>
@@ -5461,7 +5711,7 @@ function ExportTab({ reqs, setReqs, vendors, setVendors, lists, setLists, expens
 
   const sorted = useMemo(()=>sortBy(reqs, (REQ_SORTS.find(x=>x.k===sortKey)||REQ_SORTS[0]).get, desc), [reqs, sortKey, desc]);
   const filtered = useMemo(() => {
-    const q = (r) => matches(query, dateTerms(r.date, r.paymentDate), r.name, r.refNo, r.site, r.category, r.subCategory, r.description, r.amount, r.utr);
+    const q = (r) => matches(query, dateTerms(r.date, r.paymentDate), r.name, r.refNo, r.site, r.category, r.subCategory, r.description, r.amount);
     if (filterStatus === "In Register") return sorted.filter(r => isInRegister(r) && q(r));
     // "Paid" shows every paid entry, whether or not it has moved to the register
     if (filterStatus === "Paid") return sorted.filter(r => r.paymentStatus === "Paid" && q(r));
@@ -5479,10 +5729,10 @@ function ExportTab({ reqs, setReqs, vendors, setVendors, lists, setLists, expens
       Date:fmtDate(r.date), Site:r.site, Category:r.category, "Sub-Category":r.subCategory,
       Name:r.name, Amount:Number(r.amount)||0, Description:r.description,
       "Payment Status":r.paymentStatus, "A/c No.":r.accNo, "IFSC Code":r.ifsc,
-      "Payment Date":fmtDate(r.paymentDate), "Payment Mode":r.paymentMode||"", "UTR":r.utr||"",
+      "Payment Date":fmtDate(r.paymentDate), "Payment Mode":r.paymentMode||"",
     }));
     const ws = XLSX.utils.json_to_sheet(data);
-    ws["!cols"] = [{wch:16},{wch:12},{wch:16},{wch:14},{wch:14},{wch:20},{wch:12},{wch:28},{wch:14},{wch:18},{wch:14},{wch:14},{wch:14},{wch:22}];
+    ws["!cols"] = [{wch:16},{wch:12},{wch:16},{wch:14},{wch:14},{wch:20},{wch:12},{wch:28},{wch:14},{wch:18},{wch:14},{wch:14},{wch:14}];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Payment Requisition");
     const filename = `Payment_Requisition_${todayStr()}.xlsx`;
@@ -5509,7 +5759,7 @@ function ExportTab({ reqs, setReqs, vendors, setVendors, lists, setLists, expens
 
   function duplicate(r){
     const copy = { ...r, id: uid(), refNo: nextRefNo(reqs), paymentStatus:"Pending",
-      paymentDate:"", paymentMode:"", utr:"", exported:false, createdAt: Date.now() };
+      paymentDate:"", paymentMode:"", exported:false, createdAt: Date.now() };
     setReqs([...reqs, copy]);
     setDetailRow(copy);
     showToast("Duplicated — edit the copy as needed");
@@ -6236,10 +6486,10 @@ function CommitmentDetail({ item, reqs, vendors, onBack, onEdit, onGenerate, onT
       "Ref No.":r.refNo||"", Date:fmtDate(r.date), Site:r.site, Name:r.name,
       Amount:Number(r.amount)||0, "Payment Status":r.paymentStatus,
       "Paid On":fmtDate(r.paymentDate), "Amount Paid":r.paidAmount||"",
-      "Payment Mode":r.paymentMode||"", "UTR":r.utr||"",
+      "Payment Mode":r.paymentMode||"",
     }));
     const ws = XLSX.utils.json_to_sheet(rows);
-    ws["!cols"] = [{wch:16},{wch:12},{wch:16},{wch:22},{wch:14},{wch:14},{wch:12},{wch:14},{wch:14},{wch:22}];
+    ws["!cols"] = [{wch:16},{wch:12},{wch:16},{wch:22},{wch:14},{wch:14},{wch:12},{wch:14},{wch:14}];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "History");
     XLSX.writeFile(wb, `RentEMI_${String(item.name).replace(/[^A-Za-z0-9]+/g,"_")}.xlsx`);
@@ -6338,7 +6588,6 @@ function CommitmentDetail({ item, reqs, vendors, onBack, onEdit, onGenerate, onT
                 {r.paymentStatus}
               </span>
               <span style={{ fontSize:11, color:MUTED }}>{r.refNo}</span>
-              {r.utr && <span style={{ fontSize:11, color:MUTED }}>UTR {r.utr}</span>}
             </div>
           </div>
         ))}
@@ -6627,6 +6876,45 @@ function isInRegister(r){
 // A requisition that was settled inside a single larger payment. It stays on
 // file for the audit trail but must never be counted as money out a second time.
 function isRolledUp(r){ return !!r.coveredById; }
+// v6.26 Data Check: flags requisitions whose date(s) are very likely a typo or
+// import error, not a real business scenario. Every rule here is something no
+// genuine requisition should ever be: dated after today, dated implausibly long
+// ago (catches the classic Excel-serial-date bug this app has hit before - see
+// the build log - which lands a bad date in 1899/1900/1970), an invalid calendar
+// date (JS's native Date() silently rolls "2026-02-30" over into March instead
+// of rejecting it, so this is checked by hand), or a payment recorded before the
+// requisition that it pays was even raised. A blank date is not flagged here -
+// that's an incomplete-entry problem, not a wrong-date one.
+const DATA_CHECK_MIN_YEAR = 2015;
+function isValidISODate(s){
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s || "");
+  if (!m) return false;
+  const y = Number(m[1]), mo = Number(m[2]), da = Number(m[3]);
+  const dt = new Date(y, mo - 1, da);
+  return dt.getFullYear() === y && dt.getMonth() === mo - 1 && dt.getDate() === da;
+}
+function checkReqDateIssues(r, todayISO){
+  const issues = [];
+  const d = r.date || "", p = r.paymentDate || "";
+  const today = todayISO || todayStr();
+
+  if (d) {
+    if (!isValidISODate(d)) issues.push("Requisition date is not a valid calendar date");
+    else {
+      if (d > today) issues.push("Requisition date is in the future");
+      if (d.slice(0,4) < String(DATA_CHECK_MIN_YEAR)) issues.push(`Requisition date year looks implausible (before ${DATA_CHECK_MIN_YEAR})`);
+    }
+  }
+  if (p) {
+    if (!isValidISODate(p)) issues.push("Payment date is not a valid calendar date");
+    else {
+      if (p > today) issues.push("Payment date is in the future");
+      if (p.slice(0,4) < String(DATA_CHECK_MIN_YEAR)) issues.push(`Payment date year looks implausible (before ${DATA_CHECK_MIN_YEAR})`);
+      if (d && isValidISODate(d) && p < d) issues.push("Payment date is before the requisition date");
+    }
+  }
+  return issues;
+}
 // A register entry the company did not fund. A partner paid it, so it is still
 // owed back to them and belongs in the list of things a later payment can settle.
 // Money out comes from two places: the bank, and cash held at site.
@@ -6704,7 +6992,6 @@ function isPartnerPaid(r){
 function PaymentDetailsModal({ req, onCancel, onSave }){
   const [date, setDate] = useState(req.paymentDate || todayStr());
   const [mode, setMode] = useState(req.paymentMode || "");
-  const [utr, setUtr] = useState(req.utr || "");
   const [paid, setPaid] = useState(
     req.paidAmount === "" || req.paidAmount === undefined || req.paidAmount === null
       ? String(req.amount || "") : String(req.paidAmount));
@@ -6717,7 +7004,7 @@ function PaymentDetailsModal({ req, onCancel, onSave }){
     if (!date) { alert("Please enter the payment date."); return; }
     if (!mode) { alert("Please choose the payment mode."); return; }
     if (!paid || paidNum <= 0) { alert("Please enter the amount actually paid."); return; }
-    onSave({ paymentDate: date, paymentMode: mode, utr: utr.trim(), paidAmount: paidNum });
+    onSave({ paymentDate: date, paymentMode: mode, paidAmount: paidNum });
   }
 
   return (
@@ -6756,15 +7043,68 @@ function PaymentDetailsModal({ req, onCancel, onSave }){
           </div>
         )}
 
-        <Field label="UTR / Transaction Ref" hint="Leave blank if you don't have it yet — you can add it later or import it from the sheet accounts returns.">
-          <input style={inputStyle} value={utr} onChange={e=>setUtr(e.target.value)} placeholder="Optional for now" />
-        </Field>
-
         <div style={{ background:"#F7FBF8", border:`1px solid ${SAND}`, borderRadius:12, padding:12, marginBottom:16, fontSize:13, color:INK, lineHeight:1.5 }}>
           Saving this moves the entry out of Requisitions and into the Payment Register.
         </div>
 
         <BigButton icon="check" label="Save & Move to Register" onClick={submit} tone="green" full />
+        <button onClick={onCancel}
+          style={{ width:"100%", marginTop:10, padding:"14px 0", borderRadius:16, fontSize:15, fontWeight:600,
+            border:`1.5px solid ${SAND}`, background:SURFACE, color:MUTED, cursor:"pointer" }}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Bulk version of PaymentDetailsModal, for the To Pay screen's multi-select
+// "Register Payment" action — one shared date (required) and mode
+// (optional, left blank when it varies across the selection) applied to
+// every selected requisition at once. Deliberately simpler than the
+// single-requisition flow above: no per-row "amount actually paid", since
+// each requisition here is just marked Paid for its own billed amount — a
+// partial or extra payment still has to go through Record Payment on that
+// one requisition.
+function BulkPaymentModal({ reqs, onCancel, onSave }){
+  const [date, setDate] = useState(todayStr());
+  const [mode, setMode] = useState("");
+  const total = reqs.reduce((s,r)=>s+Number(r.amount||0), 0);
+
+  function submit(){
+    if (!date) { alert("Please enter the payment date."); return; }
+    onSave({ paymentDate: date, paymentMode: mode });
+  }
+
+  return (
+    <div onClick={onCancel}
+      style={{ position:"fixed", inset:0, zIndex:75, background:"rgba(24,35,53,0.45)", display:"flex", alignItems:"flex-end", justifyContent:"center" }}>
+      <div onClick={e=>e.stopPropagation()}
+        style={{ width:"100%", maxWidth:720, background:SURFACE, borderTopLeftRadius:24, borderTopRightRadius:24,
+          padding:"12px 20px 24px", maxHeight:"90vh", overflowY:"auto", boxShadow:"0 -4px 24px rgba(0,0,0,0.15)" }}>
+        <div style={{ width:40, height:4, borderRadius:999, background:SAND, margin:"0 auto 16px" }} />
+
+        <div style={{ fontWeight:700, fontSize:17, color:INK }}>Register {reqs.length} payment(s)</div>
+        <div style={{ fontSize:13, color:MUTED, marginTop:2, marginBottom:16 }}>
+          Total ₹{fmtINR(total)}
+        </div>
+
+        <Field label="Payment Date" required hint="Applied to all selected requisitions">
+          <input type="date" style={inputStyle} value={date} onChange={e=>setDate(e.target.value)} />
+        </Field>
+        <Field label="Payment Mode" hint="Optional — leave blank if it varies across the selection">
+          <select style={inputStyle} value={mode} onChange={e=>setMode(e.target.value)}>
+            <option value="">— choose —</option>
+            {PAYMENT_MODES.map(m => <option key={m} value={m}>{m}</option>)}
+          </select>
+        </Field>
+
+        <div style={{ background:"#F7FBF8", border:`1px solid ${SAND}`, borderRadius:12, padding:12, marginBottom:16, fontSize:13, color:INK, lineHeight:1.5 }}>
+          Each requisition is marked Paid for its own billed amount. For a partial or extra payment on a
+          single requisition, use Record Payment on that one instead.
+        </div>
+
+        <BigButton icon="check" label={`Mark ${reqs.length} as Paid`} onClick={submit} tone="green" full />
         <button onClick={onCancel}
           style={{ width:"100%", marginTop:10, padding:"14px 0", borderRadius:16, fontSize:15, fontWeight:600,
             border:`1.5px solid ${SAND}`, background:SURFACE, color:MUTED, cursor:"pointer" }}>
@@ -9791,7 +10131,7 @@ function CashTxnForm({ txn, cards, vendors, lists, setLists, onCancel, onSave })
 }
 
 /* ================= EMPLOYEE MASTER ================= */
-function EmployeesTab({ vendors, setVendors, reqs, setReqs, lists, setLists, showToast, goTo, openImport }){
+function EmployeesTab({ vendors, setVendors, reqs, setReqs, lists, setLists, showToast, goTo, openImport, sheets, syncSheets, sheetSyncBusy }){
   const [query, setQuery] = useState("");
   const [siteFilter, setSiteFilter] = useState("All");
   const [statusFilter, setStatusFilter] = useState("Active");
@@ -9859,6 +10199,17 @@ function EmployeesTab({ vendors, setVendors, reqs, setReqs, lists, setLists, sho
     setVendors(vendors.map(v => selected.has(v.id) ? { ...v, rollType: roll } : v));
     setSelected(new Set());
     showToast(`Set to ${roll}`);
+  }
+
+  // Mirrors the v6.24/v6.25 "Sync Now" buttons elsewhere — runs the same
+  // syncSheets() an "employees"-kind source's own Sync now button would,
+  // then lands on Sync from Google Sheets to review the result. Only
+  // employees (not vendors) sources, for the same reason VendorsTab's own
+  // syncNow filters to "vendors" only.
+  async function syncNow(){
+    const list = (sheets || []).filter(x => (x.kind || "requisitions") === "employees");
+    await syncSheets(list);
+    goTo && goTo("sheets");
   }
 
   function exportEmployees(){
@@ -9970,6 +10321,12 @@ function EmployeesTab({ vendors, setVendors, reqs, setReqs, lists, setLists, sho
             Export to Excel
           </button>
         </div>
+        <button onClick={syncNow} disabled={!!sheetSyncBusy}
+          style={{ borderRadius:16, padding:"14px 20px", fontSize:15, fontWeight:700,
+            background: sheetSyncBusy ? SAND : GREEN, color: sheetSyncBusy ? INK : "#fff", border:"none",
+            cursor: sheetSyncBusy ? "default" : "pointer" }}>
+          {sheetSyncBusy ? "Syncing…" : "Sync Now"}
+        </button>
       </div>
 
       <SortBar sortKey={sortKey} onSortKey={setSortKey} options={EMP_SORTS} desc={desc} onDesc={setDesc} />
@@ -10335,10 +10692,10 @@ function MonthlyStatementTab({ reqs, expenses, cashTxns, cards, showToast, goTo 
       "Ref No.":r.refNo||"", "Payment Date":fmtDate(r.paymentDate), Site:r.site, Category:r.category,
       "Sub-Category":r.subCategory, Name:r.name, "Requisition Amount":Number(r.amount)||0,
       "Amount Paid":Number(r.paidAmount || r.amount || 0), "Payment Mode":r.paymentMode||"",
-      "UTR":r.utr||"", "A/c No.":r.accNo||"", "IFSC Code":r.ifsc||"", Description:r.description||"",
+      "A/c No.":r.accNo||"", "IFSC Code":r.ifsc||"", Description:r.description||"",
     }));
     const pws = XLSX.utils.json_to_sheet(payRows);
-    pws["!cols"] = [{wch:16},{wch:14},{wch:16},{wch:14},{wch:14},{wch:22},{wch:16},{wch:14},{wch:14},{wch:22},{wch:18},{wch:14},{wch:28}];
+    pws["!cols"] = [{wch:16},{wch:14},{wch:16},{wch:14},{wch:14},{wch:22},{wch:16},{wch:14},{wch:14},{wch:18},{wch:14},{wch:28}];
     XLSX.utils.book_append_sheet(wb, pws, "Payments Made");
 
     const raisedRows = raised.map(r => ({
@@ -10429,6 +10786,30 @@ function MonthlyStatementTab({ reqs, expenses, cashTxns, cards, showToast, goTo 
         <div style={{ background:SURFACE, borderRadius:16, padding:20, marginBottom:14, border:`1px solid ${SAND}` }}>
           <div style={{ fontWeight:700, marginBottom:12, color:INK }}>By Payment Mode</div>
           <BarList data={byMode} color={INK} />
+        </div>
+      )}
+
+      {raised.length > 0 && (
+        <div style={{ background:SURFACE, borderRadius:16, padding:16, marginBottom:14, border:`1px solid ${SAND}` }}>
+          <div style={{ fontWeight:700, color:INK, fontSize:14, marginBottom:10 }}>Raised this month ({raised.length})</div>
+          {raised.slice(0,40).map((r,i) => {
+            const dateFlagged = checkReqDateIssues(r, todayStr()).length > 0;
+            return (
+              <div key={r.id} style={{ padding:"8px 0", borderTop: i? `1px solid ${SAND}`:"none" }}>
+                <div style={{ display:"flex", justifyContent:"space-between", gap:8 }}>
+                  <span style={{ fontWeight:600, fontSize:14, color:INK, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                    {dateFlagged && <span title="Suspect date — see Data Check in Settings" style={{ color:AMBER, marginRight:4 }}>⚠</span>}
+                    {r.name}
+                  </span>
+                  <span style={{ fontWeight:700, fontSize:14, color:INK, flexShrink:0 }}>₹{fmtINR(r.amount)}</span>
+                </div>
+                <div style={{ fontSize:12, color:MUTED, marginTop:2 }}>
+                  {fmtDate(r.date)} · {r.site} · {isInRegister(r) ? "Paid" : (r.paymentStatus || "Pending")}
+                </div>
+              </div>
+            );
+          })}
+          {raised.length > 40 && <div style={{ fontSize:12, color:MUTED, marginTop:8 }}>…and {raised.length-40} more in the export</div>}
         </div>
       )}
 
@@ -10997,6 +11378,8 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
               diesellogEntries: "Rows land in Diesel Log's Issued Log. Point the Tab field below at the exact sheet tab named \"Diesel Issued Log\" (Date, Machine, Category, Ownership, Diesel Issued (L), ...).",
               diesellogPurchases: "Rows land in Diesel Log's Purchases. Point the Tab field below at the exact sheet tab named \"Diesel Purchases\" (Date, Party, Litres, Amount (Rs), Payment Status).",
               diesellogMachines: "Rows land in Diesel Log's Machinery Master. Point the Tab field below at the exact sheet tab named \"Machinery Master\" (Machine, Category, Ownership, ...). A machine matching one already here by name is updated rather than duplicated.",
+              vendors: "Rows land in Ledgers, as vendors (Name, GSTIN, Address, Bank Details, ...) — the same Vendor Master sheet you'd otherwise bring in via Import from Excel. A vendor matching this GSTIN, or this exact name, is updated rather than duplicated; blank sheet cells never erase a detail already saved here.",
+              employees: "Rows land in Employee Master (Name, Employee Code, Designation, Salary, Bank Details, ...) — the same Employee Master sheet you'd otherwise bring in via Import from Excel. An employee matching this Employee Code, or this exact name, is updated rather than duplicated; blank sheet cells never erase a detail already saved here.",
             }[editing.kind || "requisitions"]}>
             <select style={inputStyle} value={editing.kind || "requisitions"}
               onChange={e=>setEditing({...editing, kind:e.target.value})}>
@@ -11007,6 +11390,8 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
               <option value="diesellogEntries">Diesel Log — Issued Log</option>
               <option value="diesellogPurchases">Diesel Log — Purchases</option>
               <option value="diesellogMachines">Diesel Log — Machinery Master</option>
+              <option value="vendors">Vendor Master</option>
+              <option value="employees">Employee Master</option>
             </select>
           </Field>
           <BigButton icon="check" label="Save Source" onClick={()=>saveSheet(editing)} tone="green" full
@@ -12087,11 +12472,11 @@ function ReceivablesTab({ reqs, setReqs, showToast, goTo }){
       "Requisition Amount":Number(r.amount)||0,
       "Amount Paid":Number(r.paidAmount)||0,
       "Excess (Receivable)":excess,
-      "Payment Date":fmtDate(r.paymentDate), "UTR":r.utr||"",
+      "Payment Date":fmtDate(r.paymentDate),
       "Status": r.recovered ? "Recovered" : "Outstanding",
     }));
     const ws = XLSX.utils.json_to_sheet(data);
-    ws["!cols"] = [{wch:16},{wch:22},{wch:16},{wch:18},{wch:14},{wch:18},{wch:14},{wch:22},{wch:14}];
+    ws["!cols"] = [{wch:16},{wch:22},{wch:16},{wch:18},{wch:14},{wch:18},{wch:14},{wch:14}];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Receivables");
     XLSX.writeFile(wb, `Receivables_${todayStr()}.xlsx`);
@@ -12285,12 +12670,11 @@ function RequisitionDetail({ req, vendors, reqs, setReqs, expenses, setExpenses,
         )}
       </div>
 
-      {(req.paymentDate || req.paymentMode || req.utr) && (
+      {(req.paymentDate || req.paymentMode) && (
         <div style={{ background:"#F7FBF8", borderRadius:16, padding:"4px 20px 16px", marginBottom:14, border:`1px solid ${SAND}` }}>
           <div style={{ paddingTop:16 }}><SectionLabel>Payment made</SectionLabel></div>
           <DetailRow label="Paid on" value={fmtDate(req.paymentDate)} />
           <DetailRow label="Mode" value={req.paymentMode} />
-          <DetailRow label="UTR" value={req.utr} copyable showToast={showToast} mono />
           <DetailRow label="Amount paid" value={req.paidAmount !== "" && req.paidAmount !== undefined ? `₹${fmtINR(req.paidAmount)}` : ""} />
           {excessPaid(req) > 0 && (
             <div style={{ marginTop:12, background:"#EEF0FE", border:`1px solid #3F6CA8`, borderRadius:12, padding:12, fontSize:13, color:INK, lineHeight:1.5 }}>
@@ -12914,7 +13298,6 @@ const REQ_TEMPLATE = [
   { key:"ifsc",          headers:["IFSC Code","IFSC"], upper:true },
   { key:"paymentDate",   headers:["Payment Date","Paid On"], date:true },
   { key:"paymentMode",   headers:["Payment Mode","Mode"] },
-  { key:"utr",           headers:["UTR","UTR No","Transaction ID"] },
 ];
 
 const MACHINE_TEMPLATE = [
@@ -12968,7 +13351,6 @@ const REGISTER_TEMPLATE = [
   { key:"paidBy",        headers:["Paid By","Paid Through","Paid From","Funded By","Payment By"] },
   { key:"paymentStatus", headers:["Payment Status","Status","Paid On","Payment"] },
   { key:"paymentMode",   headers:["Payment Mode","Mode"] },
-  { key:"utr",           headers:["UTR","UTR No","Transaction ID","Txn ID"] },
 ];
 
 const UTILITY_TEMPLATE = [
@@ -14512,7 +14894,7 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
   );
 }
 
-/* ================= PAYMENT REGISTER + UTR IMPORT ================= */
+/* ================= PAYMENT REGISTER ================= */
 function autoMapHeaders(headers, tpl){
   const map = {};
   tpl.forEach(f => {
@@ -14588,8 +14970,7 @@ function dupKey(r){
 function importDupKey(r){
   return [dupKey(r),
           String(r.description||"").trim().toLowerCase(),
-          String(r.refNo||"").trim().toLowerCase(),
-          String(r.utr||"").trim().toLowerCase()].join("|");
+          String(r.refNo||"").trim().toLowerCase()].join("|");
 }
 function normKey(k){ return String(k||"").toLowerCase().replace(/[^a-z0-9]/g,""); }
 function pickCol(row, candidates){
@@ -14775,10 +15156,6 @@ function DirectPaymentForm({ f, setF, vendors, lists, setLists, onCancel, onSave
             })}
           </div>
         </Field>
-
-        <Field label="UTR / transaction reference">
-          <input style={inputStyle} value={f.utr} onChange={e=>set("utr", e.target.value)} />
-        </Field>
       </div>
 
       <div style={{ background:SURFACE, borderRadius:20, padding:20, marginBottom:12, border:`1px solid ${SAND}`, boxShadow:SHADOW }}>
@@ -14819,6 +15196,7 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
   const [showDupes, setShowDupes] = useState(false);
   const [selected, setSelected] = useState(new Set());
   const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkPayOpen, setBulkPayOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [adding, setAdding] = useState(null);
   const [openReq, setOpenReq] = useState(null);
@@ -14894,9 +15272,9 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
       "Sub Category":r.subCategory||"", Name:r.name||"", Amount:Number(r.amount)||0,
       Description:r.description||"",
       "Payment Status": isInRegister(r) ? fmtDate(r.paymentDate) : "Pending",
-      "Payment Mode":r.paymentMode||"", UTR:r.utr||"",
+      "Payment Mode":r.paymentMode||"",
     })));
-    ws["!cols"] = [{wch:16},{wch:12},{wch:16},{wch:14},{wch:14},{wch:22},{wch:12},{wch:28},{wch:15},{wch:14},{wch:22}];
+    ws["!cols"] = [{wch:16},{wch:12},{wch:16},{wch:14},{wch:14},{wch:22},{wch:12},{wch:28},{wch:15},{wch:14}];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Payments");
     XLSX.writeFile(wb, `Payments_selected_${todayStr()}.xlsx`);
@@ -14908,6 +15286,34 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
     setReqs(reqs.map(r => r.id === payTarget.id ? { ...r, paymentStatus:"Paid", ...details } : r));
     setPayTarget(null);
     showToast("Moved to Payment Register");
+  }
+
+  // Marks every selected To Pay requisition as paid in one shot: one shared
+  // date (required) and mode (optional, blank when it varies) applied to
+  // all of them, each keeping its own billed amount as the amount paid — a
+  // partial/extra payment on a single requisition still goes through the
+  // per-requisition Record Payment flow, not this bulk one.
+  function markPaidBulk(details){
+    if (!selected.size) return;
+    const ids = new Set(selected);
+    setReqs(reqs.map(r => ids.has(r.id)
+      ? { ...r, paymentStatus:"Paid", paidAmount:r.amount, paymentDate:details.paymentDate, paymentMode:details.paymentMode }
+      : r));
+    const count = ids.size;
+    setSelected(new Set());
+    setBulkPayOpen(false);
+    setBulkOpen(false);
+    showToast(`${count} payment(s) registered`);
+  }
+
+  // Selecting rows only makes sense within the screen you selected them on —
+  // switching between To Pay and Paid clears any leftover selection so a
+  // bulk action never silently acts on rows from the screen you just left.
+  function switchMode(m){
+    setMode(m);
+    setSelected(new Set());
+    setBulkOpen(false);
+    setBulkPayOpen(false);
   }
 
   const months = useMemo(() => {
@@ -14924,13 +15330,12 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
       if (month !== "all" && d.slice(0,7) !== month) return false;
       if (site !== "all" && r.site !== site) return false;
       if (!matches(query, dateTerms(r.date, r.paymentDate), r.name, r.refNo, r.site, r.category, r.subCategory,
-                   r.description, r.amount, r.utr, r.paymentMode, r.paidBy)) return false;
+                   r.description, r.amount, r.paymentMode, r.paidBy)) return false;
       return true;
     }).sort((a,b) => (b.paymentDate||b.date||"").localeCompare(a.paymentDate||a.date||""));
   }, [paid, month, site, query]);
 
   const total = filtered.reduce((s,r)=>s+Number(r.amount||0), 0);
-  const missingUtr = filtered.filter(r => !r.utr).length;
 
   const bySite = useMemo(() => {
     const map = {};
@@ -14952,14 +15357,13 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
 
         const sample = rows[0];
         const cRef  = pickCol(sample, ["Ref No.","Ref No","RefNo","Reference","Ref"]);
-        const cUtr  = pickCol(sample, ["UTR","UTR No","UTR Number","Transaction ID","Txn ID","Reference No"]);
         const cDate = pickCol(sample, ["Payment Date","Paid On","Date of Payment","Txn Date"]);
         const cMode = pickCol(sample, ["Payment Mode","Mode","Payment Type"]);
         const cName = pickCol(sample, ["Name","Vendor","Party","Payee"]);
         const cAmt  = pickCol(sample, ["Amount","Amt","Paid Amount"]);
 
-        if (!cUtr && !cDate && !cMode) {
-          showToast("No UTR / Payment Date / Mode column found in that file", "error");
+        if (!cDate && !cMode) {
+          showToast("No Payment Date / Mode column found in that file", "error");
           return;
         }
 
@@ -14967,10 +15371,9 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
         const usedIds = new Set();
 
         rows.forEach((row, i) => {
-          const utr  = cUtr  ? String(row[cUtr]||"").trim()  : "";
           const pDate= cDate ? excelToDateStr(row[cDate])    : "";
           const mode = cMode ? String(row[cMode]||"").trim() : "";
-          if (!utr && !pDate && !mode) return;   // nothing to apply
+          if (!pDate && !mode) return;   // nothing to apply
 
           let candidates = [];
           const refVal = cRef ? String(row[cRef]||"").trim() : "";
@@ -14989,7 +15392,7 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
           const label = refVal || `${cName?row[cName]:"row"} ${cAmt?row[cAmt]:""}`.trim();
           if (candidates.length === 1) {
             usedIds.add(candidates[0].id);
-            matched.push({ target: candidates[0], utr, paymentDate: pDate, paymentMode: mode, label });
+            matched.push({ target: candidates[0], paymentDate: pDate, paymentMode: mode, label });
           } else if (candidates.length > 1) {
             ambiguous.push({ label, count: candidates.length, rowNum: i+2 });
           } else {
@@ -15015,7 +15418,6 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
       return {
         ...r,
         paymentStatus: "Paid",
-        utr: m.utr || r.utr,
         paymentDate: m.paymentDate || r.paymentDate || todayStr(),
         paymentMode: m.paymentMode || r.paymentMode,
       };
@@ -15032,11 +15434,11 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
       Category:r.category, "Sub Category":r.subCategory, Name:r.name,
       Amount:Number(r.amount)||0, Description:r.description||"",
       "Payment Status": isInRegister(r) ? fmtDate(r.paymentDate) : "Pending",
-      "Payment Mode":r.paymentMode||"", "UTR":r.utr||"",
+      "Payment Mode":r.paymentMode||"",
       "A/c No.":r.accNo||"", "IFSC Code":r.ifsc||"",
     }));
     const ws = XLSX.utils.json_to_sheet(data);
-    ws["!cols"] = [{wch:16},{wch:12},{wch:16},{wch:14},{wch:14},{wch:22},{wch:12},{wch:28},{wch:15},{wch:14},{wch:22},{wch:18},{wch:14}];
+    ws["!cols"] = [{wch:16},{wch:12},{wch:16},{wch:14},{wch:14},{wch:22},{wch:12},{wch:28},{wch:15},{wch:14},{wch:18},{wch:14}];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Payments Made");
     const tag = `${month==="all"?"All":month}${site==="all"?"":"_"+site.replace(/\s+/g,"")}`;
@@ -15074,7 +15476,7 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
               <div key={i} style={{ padding:"8px 0", borderTop: i? `1px solid ${SAND}`:"none" }}>
                 <div style={{ fontWeight:600, fontSize:14, color:INK }}>{m.target.name} · ₹{fmtINR(m.target.amount)}</div>
                 <div style={{ fontSize:12, color:MUTED, marginTop:2 }}>
-                  {m.target.refNo || "no ref"} → {fmtDate(m.paymentDate)||"date unchanged"} · {m.paymentMode||"mode unchanged"} · UTR {m.utr||"—"}
+                  {m.target.refNo || "no ref"} → {fmtDate(m.paymentDate)||"date unchanged"} · {m.paymentMode||"mode unchanged"}
                 </div>
               </div>
             ))}
@@ -15115,14 +15517,18 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
         {payTarget && (
           <PaymentDetailsModal req={payTarget} onCancel={()=>setPayTarget(null)} onSave={markPaid} />
         )}
+        {bulkPayOpen && (
+          <BulkPaymentModal reqs={toPay.filter(r=>selected.has(r.id))}
+            onCancel={()=>setBulkPayOpen(false)} onSave={markPaidBulk} />
+        )}
 
         <div style={{ display:"flex", gap:8, marginBottom:14 }}>
-          <button onClick={()=>setMode("topay")}
+          <button onClick={()=>switchMode("topay")}
             style={{ flex:1, padding:"11px 0", borderRadius:12, fontSize:14, fontWeight:700, cursor:"pointer",
               background:INK, color:"#fff", border:`1px solid ${INK}` }}>
             To Pay ({toPay.length})
           </button>
-          <button onClick={()=>setMode("register")}
+          <button onClick={()=>switchMode("register")}
             style={{ flex:1, padding:"11px 0", borderRadius:12, fontSize:14, fontWeight:600, cursor:"pointer",
               background:SURFACE, color:INK, border:`1px solid ${SAND}` }}>
             Paid ({paid.length})
@@ -15138,14 +15544,20 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
         {toPay.length === 0 ? (
           <EmptyState text="Nothing waiting to be paid. New requisitions appear here until you record the payment." />
         ) : (
-          <div style={{ display:"flex", flexDirection:"column", gap:8, marginBottom:20 }}>
+          <div style={{ display:"flex", flexDirection:"column", gap:8, marginBottom: selected.size ? 150 : 20 }}>
+            <SelectAllBar count={selected.size} total={toPay.length}
+              onToggleAll={()=>setSelected(selected.size===toPay.length ? new Set() : new Set(toPay.map(r=>r.id)))} />
             {toPay.map(r => {
               const age = daysUntil(r.date);
               const daysOld = age < 0 ? Math.abs(age) : 0;
               return (
-                <div key={r.id} style={{ background:SURFACE, borderRadius:16, padding:14, border:`1px solid ${SAND}`, boxShadow:SHADOW }}>
+                <div key={r.id} style={{ background:SURFACE, borderRadius:16, padding:14,
+                  border:`1px solid ${selected.has(r.id) ? AMBER : SAND}`, boxShadow:SHADOW }}>
                   <div style={{ display:"flex", justifyContent:"space-between", gap:8 }}>
-                    <div style={{ fontWeight:700, color:INK, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                    <SelectCheck on={selected.has(r.id)} onToggle={()=>setSelected(prev => {
+                      const n = new Set(prev); n.has(r.id) ? n.delete(r.id) : n.add(r.id); return n;
+                    })} />
+                    <div style={{ flex:1, minWidth:0, fontWeight:700, color:INK, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
                       {r.name || "Unnamed"}
                     </div>
                     <div style={{ fontWeight:700, color:INK, flexShrink:0 }}>₹{fmtINR(r.amount)}</div>
@@ -15197,6 +15609,30 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
           <BigButton icon="sheet" label="Requisitions" onClick={()=>goTo("export")} tone="ink" full />
           <BigButton icon="download" label="Import Payments" onClick={()=>goTo("import:register")} tone="ink" full />
         </div>
+
+        {selected.size > 0 && (() => {
+          const rows = toPay.filter(r => selected.has(r.id));
+          const total = rows.reduce((a,r)=>a+Number(r.amount||0), 0);
+          return (
+            <React.Fragment>
+              <BulkBar count={selected.size} subtitle={`Total ₹${fmtINR(total)}`}
+                onOptions={()=>setBulkOpen(true)} />
+              {bulkOpen && (
+                <ActionSheet
+                  title={`${selected.size} requisition(s) selected`}
+                  subtitle={`Total ₹${fmtINR(total)}`}
+                  onClose={()=>setBulkOpen(false)}
+                  actions={[
+                    { label:"Register Payment", icon:"check", onPress: ()=>{ setBulkOpen(false); setBulkPayOpen(true); } },
+                    { label:"Export to Excel", icon:"download", onPress: exportSelectedRows },
+                    { label:"Clear selection", icon:"close", onPress: ()=>setSelected(new Set()) },
+                    { label:`Delete all ${selected.size}`, icon:"trash", danger:true, onPress: deleteSelected },
+                  ]}
+                />
+              )}
+            </React.Fragment>
+          );
+        })()}
       </div>
     );
   }
@@ -15226,12 +15662,12 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
   return (
     <div>
       <div style={{ display:"flex", gap:8, marginBottom:14 }}>
-        <button onClick={()=>setMode("topay")}
+        <button onClick={()=>switchMode("topay")}
           style={{ flex:1, padding:"11px 0", borderRadius:12, fontSize:14, fontWeight:600, cursor:"pointer",
             background:SURFACE, color:INK, border:`1px solid ${SAND}` }}>
           To Pay ({toPay.length})
         </button>
-        <button onClick={()=>setMode("register")}
+        <button onClick={()=>switchMode("register")}
           style={{ flex:1, padding:"11px 0", borderRadius:12, fontSize:14, fontWeight:700, cursor:"pointer",
             background:INK, color:"#fff", border:`1px solid ${INK}` }}>
           Paid ({paid.length})
@@ -15257,7 +15693,7 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
             </div>
             <div style={{ fontSize:13, color:INK, lineHeight:1.6, marginBottom:12 }}>
               {dupes.length
-                ? "Ranked by how sure it is. A shared UTR or reference is certain. Same date, site, payee, amount and wording is very likely. Everything matching except the wording is only worth a look, since a second load or a second week's labour looks the same."
+                ? "Ranked by how sure it is. A shared reference is certain. Same date, site, payee, amount and wording is very likely. Everything matching except the wording is only worth a look, since a second load or a second week's labour looks the same."
                 : `${noRef.length} entr${noRef.length===1?"y":"ies"} have no reference number, so a repeat could slip in unnoticed.`}
             </div>
             <div style={{ display:"grid", gridTemplateColumns: (dupes.length && noRef.length) ? "1fr 1fr" : "1fr", gap:8 }}>
@@ -15316,7 +15752,7 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
                       <div style={{ fontSize:13, fontWeight:600, color:INK, overflow:"hidden",
                         textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{r.name}</div>
                       <div style={{ fontSize:11, color:MUTED, marginTop:2 }}>
-                        {r.refNo || "no ref"} · {fmtDate(r.paymentDate || r.date)}{r.utr ? ` · ${r.utr}` : ""}
+                        {r.refNo || "no ref"} · {fmtDate(r.paymentDate || r.date)}
                       </div>
                     </div>
                     <span className="num" style={{ fontWeight:700, color:INK, flexShrink:0 }}>₹{fmtINR(r.amount)}</span>
@@ -15382,7 +15818,7 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
       })()}
 
       <SearchBox value={query} onChange={setQuery}
-        placeholder="Search date, payee, reference, UTR, amount" />
+        placeholder="Search date, payee, reference, amount" />
 
       <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:14 }}>
         <Field label="Month">
@@ -15407,11 +15843,6 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
         <div style={{ fontSize:12, fontWeight:600, color:MUTED }}>Total paid</div>
         <div style={{ fontSize:26, fontWeight:700, color:INK }}>₹{fmtINR(total)}</div>
         <div style={{ fontSize:12, color:MUTED, marginTop:2 }}>{filtered.length} payment(s)</div>
-        {missingUtr > 0 && (
-          <div style={{ marginTop:10, fontSize:12, fontWeight:600, color:AMBER }}>
-            {missingUtr} payment(s) still without a UTR
-          </div>
-        )}
         {bySite.length > 1 && (
           <div style={{ marginTop:14, paddingTop:14, borderTop:`1px solid ${SAND}` }}>
             {bySite.map(([sname, amt]) => {
@@ -15431,6 +15862,13 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
           </div>
         )}
       </div>
+
+      <button onClick={()=>goTo("categorybreakdown")}
+        style={{ width:"100%", marginBottom:10, padding:"12px 0", borderRadius:14, fontSize:13.5, fontWeight:600,
+          background:"#EEF0FE", color:INK, border:`1px solid ${SAND}`, cursor:"pointer",
+          display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}>
+        <Icon name="sheet" size={15} /> View Category Breakdown (all-time, by category)
+      </button>
 
       <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:10 }}>
         <button onClick={()=>setAdding({ ...emptyReq, id:"", paymentDate: todayStr(), paymentMode:"NEFT" })}
@@ -15454,7 +15892,7 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
       <label style={{ display:"block", marginBottom:16 }}>
         <span style={{ display:"block", borderRadius:16, padding:"13px 20px", fontSize:14, fontWeight:600, textAlign:"center",
           background:SAND, color:INK, cursor:"pointer" }}>
-          Update UTRs from the sheet accounts returned
+          Update dates &amp; modes from the sheet accounts returned
         </span>
         <input type="file" accept=".xlsx,.xls,.csv" onChange={handleImport} style={{ display:"none" }} />
       </label>
@@ -15494,14 +15932,6 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
                 {r.paymentMode && (
                   <span style={{ fontSize:11, fontWeight:600, padding:"3px 8px", borderRadius:999, background:SAND, color:INK }}>{r.paymentMode}</span>
                 )}
-                {r.utr ? (
-                  <span onClick={()=>copyText(r.utr, "UTR", showToast)}
-                    style={{ fontSize:11, fontWeight:600, padding:"3px 8px", borderRadius:999, background:"#E6F7F2", color:GREEN, cursor:"pointer" }}>
-                    UTR {r.utr}
-                  </span>
-                ) : (
-                  <span style={{ fontSize:11, fontWeight:600, padding:"3px 8px", borderRadius:999, background:"#EEF0FE", color:AMBER }}>UTR missing</span>
-                )}
               </div>
             </div>
           ))}
@@ -15530,6 +15960,229 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
         );
       })()}
 
+    </div>
+  );
+}
+
+/* ================= CATEGORY BREAKDOWN ================= */
+// All-time (not one month) view of what's actually been PAID, grouped by
+// category — Rent, Purchase, Utility, Service, and so on — scoped to the
+// Payment Register specifically (paid requisitions only), not the broader
+// multi-source Site Summary. Drilling into a category lists every paid
+// transaction in it; both the summary and a drilled-down category export to
+// Excel.
+function CategoryBreakdownTab({ reqs, goTo }){
+  const [openCat, setOpenCat] = useState(null);
+
+  const paid = useMemo(() => reqs.filter(r => isInRegister(r) && !isRolledUp(r)), [reqs]);
+  const total = paid.reduce((s,r)=>s+Number(r.amount||0), 0);
+
+  const byCategory = useMemo(() => {
+    const map = new Map();
+    paid.forEach(r => {
+      const cat = String(r.category||"").trim() || "Uncategorised";
+      const cur = map.get(cat) || { category:cat, total:0, count:0 };
+      cur.total += Number(r.amount||0);
+      cur.count += 1;
+      map.set(cat, cur);
+    });
+    return [...map.values()].sort((a,b) => b.total - a.total);
+  }, [paid]);
+
+  function exportSummary(){
+    if (byCategory.length === 0) { return; }
+    const data = byCategory.map(c => ({
+      Category:c.category, "Payments":c.count, "Total Paid":c.total,
+      "Share of Total": total ? +((c.total/total)*100).toFixed(1) : 0,
+    }));
+    const ws = XLSX.utils.json_to_sheet(data);
+    ws["!cols"] = [{wch:22},{wch:12},{wch:16},{wch:14}];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Category Breakdown");
+    XLSX.writeFile(wb, `Category_Breakdown_AllTime_${todayStr()}.xlsx`);
+  }
+
+  function exportCategory(cat, rows){
+    const data = rows.map(r => ({
+      "Ref No.":r.refNo||"", Date:fmtDate(r.date), Site:r.site||"", Name:r.name||"",
+      "Sub Category":r.subCategory||"", Amount:Number(r.amount)||0, Description:r.description||"",
+      "Paid On": fmtDate(r.paymentDate), "Payment Mode":r.paymentMode||"",
+    }));
+    const ws = XLSX.utils.json_to_sheet(data);
+    ws["!cols"] = [{wch:16},{wch:12},{wch:16},{wch:22},{wch:14},{wch:12},{wch:28},{wch:14},{wch:14}];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, cat.slice(0,28) || "Category");
+    XLSX.writeFile(wb, `Category_${cat.replace(/[^a-z0-9]+/gi,"_")}_${todayStr()}.xlsx`);
+  }
+
+  if (openCat) {
+    const rows = paid
+      .filter(r => (String(r.category||"").trim() || "Uncategorised") === openCat)
+      .sort((a,b) => String(b.paymentDate||"").localeCompare(String(a.paymentDate||"")));
+    const catTotal = rows.reduce((s,r)=>s+Number(r.amount||0), 0);
+    return (
+      <div>
+        <button onClick={()=>setOpenCat(null)}
+          style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
+          <Icon name="back" size={16} /> Back to Category Breakdown
+        </button>
+
+        <div style={{ background:SURFACE, borderRadius:16, padding:20, marginBottom:14, border:`1.5px solid ${SAND}` }}>
+          <div style={{ fontSize:12, fontWeight:600, color:MUTED }}>{openCat}</div>
+          <div style={{ fontSize:26, fontWeight:700, color:INK }}>₹{fmtINR(catTotal)}</div>
+          <div style={{ fontSize:12, color:MUTED, marginTop:2 }}>{rows.length} payment(s), all-time</div>
+        </div>
+
+        <BigButton icon="sheet" label="Export This Category to Excel" onClick={()=>exportCategory(openCat, rows)} tone="green" full />
+
+        <div style={{ display:"flex", flexDirection:"column", gap:8, marginTop:14 }}>
+          {rows.map(r => (
+            <div key={r.id} style={{ background:SURFACE, borderRadius:16, padding:14, border:`1px solid ${SAND}`, boxShadow:SHADOW }}>
+              <div style={{ display:"flex", justifyContent:"space-between", gap:8 }}>
+                <div style={{ fontWeight:700, color:INK, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{r.name}</div>
+                <div style={{ fontWeight:700, color:INK, flexShrink:0 }}>₹{fmtINR(r.amount)}</div>
+              </div>
+              <div style={{ fontSize:12, color:MUTED, marginTop:3 }}>
+                {fmtDate(r.paymentDate)} · {r.site} · {r.refNo || "no ref"}{r.subCategory ? ` · ${r.subCategory}` : ""}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <button onClick={()=>goTo("dashboard")}
+        style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
+        <Icon name="back" size={16} /> Back to dashboard
+      </button>
+
+      <div style={{ background:SURFACE, borderRadius:16, padding:20, marginBottom:14, border:`1.5px solid ${SAND}` }}>
+        <div style={{ fontSize:12, fontWeight:600, color:MUTED }}>Total paid, all-time</div>
+        <div style={{ fontSize:26, fontWeight:700, color:INK }}>₹{fmtINR(total)}</div>
+        <div style={{ fontSize:12, color:MUTED, marginTop:2 }}>{paid.length} payment(s) across {byCategory.length} categor{byCategory.length===1?"y":"ies"}</div>
+      </div>
+
+      {byCategory.length === 0 ? (
+        <EmptyState text="Nothing paid yet — this fills in as requisitions are marked Paid in the Payment Register." />
+      ) : (
+        <React.Fragment>
+          <BigButton icon="sheet" label="Export Summary to Excel" onClick={exportSummary} tone="green" full />
+          <div style={{ display:"flex", flexDirection:"column", gap:8, marginTop:14, marginBottom:14 }}>
+            {byCategory.map(c => {
+              const pct = total ? (c.total/total)*100 : 0;
+              return (
+                <button key={c.category} onClick={()=>setOpenCat(c.category)}
+                  style={{ textAlign:"left", background:SURFACE, borderRadius:16, padding:14, border:`1px solid ${SAND}`,
+                    boxShadow:SHADOW, cursor:"pointer" }}>
+                  <div style={{ display:"flex", justifyContent:"space-between", gap:10, marginBottom:6 }}>
+                    <span style={{ fontWeight:700, color:INK }}>{c.category}</span>
+                    <span style={{ fontWeight:700, color:INK, flexShrink:0 }}>₹{fmtINR(c.total)}</span>
+                  </div>
+                  <div style={{ height:7, borderRadius:7, background:SAND, marginBottom:6 }}>
+                    <div style={{ height:7, borderRadius:7, background:AMBER, width:`${Math.min(100,pct)}%` }} />
+                  </div>
+                  <div style={{ fontSize:12, color:MUTED }}>
+                    {c.count} payment{c.count===1?"":"s"} · {pct.toFixed(1)}% of total paid
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </React.Fragment>
+      )}
+    </div>
+  );
+}
+
+// v6.26: Data Check — reachable from Settings, flags requisitions whose
+// dates look like a typo or import error (future-dated, implausibly old,
+// an invalid calendar date, or paid before it was even raised) rather than
+// a real business situation. Tapping a flagged row opens it directly in
+// the normal requisition edit form so the date can be corrected on the spot.
+function DataCheckTab({ reqs, setReqs, vendors, setVendors, expenses, setExpenses, lists, setLists, goTo, openImport, showToast }){
+  const [editingRow, setEditingRow] = useState(null);
+
+  const today = todayStr();
+  const flagged = useMemo(() => {
+    return reqs
+      .map(r => ({ r, issues: checkReqDateIssues(r, today) }))
+      .filter(x => x.issues.length > 0)
+      .sort((a,b) => String(b.r.date||"").localeCompare(String(a.r.date||"")));
+  }, [reqs, today]);
+
+  function exportFlagged(){
+    if (flagged.length === 0) return;
+    const data = flagged.map(({r, issues}) => ({
+      "Ref No.":r.refNo||"", Date:fmtDate(r.date), Site:r.site||"", Category:r.category||"",
+      Name:r.name||"", Amount:Number(r.amount)||0, "Payment Status":r.paymentStatus||"",
+      "Paid On":fmtDate(r.paymentDate), Issue: issues.join("; "),
+    }));
+    const ws = XLSX.utils.json_to_sheet(data);
+    ws["!cols"] = [{wch:16},{wch:12},{wch:16},{wch:14},{wch:22},{wch:12},{wch:14},{wch:14},{wch:50}];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Data Check");
+    XLSX.writeFile(wb, `Data_Check_${today}.xlsx`);
+    showToast && showToast(`Exported ${flagged.length} flagged requisition(s)`);
+  }
+
+  if (editingRow) {
+    return <RequisitionForm vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs}
+      expenses={expenses} setExpenses={setExpenses} lists={lists} setLists={setLists} goTo={goTo} openImport={openImport}
+      showToast={showToast} editItem={editingRow} onDone={()=>setEditingRow(null)} />;
+  }
+
+  return (
+    <div>
+      <button onClick={()=>goTo("dashboard")}
+        style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
+        <Icon name="back" size={16} /> Back to dashboard
+      </button>
+
+      <div style={{ background:SURFACE, borderRadius:16, padding:20, marginBottom:14, border:`1.5px solid ${flagged.length ? AMBER : SAND}` }}>
+        <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:6 }}>
+          <Icon name="alert" size={18} color={flagged.length ? AMBER : GREEN} />
+          <div style={{ fontSize:15, fontWeight:700, color:INK }}>
+            {flagged.length === 0 ? "No date issues found" : `${flagged.length} requisition${flagged.length===1?"":"s"} with a suspect date`}
+          </div>
+        </div>
+        <div style={{ fontSize:12.5, color:MUTED, lineHeight:1.6 }}>
+          Checks every requisition's date and payment date for a future date, an implausible
+          year (before {DATA_CHECK_MIN_YEAR} — the usual sign of an Excel import gone wrong), an
+          invalid calendar date, or a payment recorded before the requisition it pays was raised.
+          Tap any entry below to open and fix it.
+        </div>
+      </div>
+
+      {flagged.length === 0 ? (
+        <EmptyState text="Every requisition's dates look sound." />
+      ) : (
+        <React.Fragment>
+          <BigButton icon="sheet" label="Export Flagged List to Excel" onClick={exportFlagged} tone="amber" full />
+          <div style={{ display:"flex", flexDirection:"column", gap:8, marginTop:14 }}>
+            {flagged.map(({r, issues}) => (
+              <button key={r.id} onClick={()=>setEditingRow(r)}
+                style={{ textAlign:"left", background:SURFACE, borderRadius:16, padding:14, border:`1px solid ${SAND}`,
+                  boxShadow:SHADOW, cursor:"pointer" }}>
+                <div style={{ display:"flex", justifyContent:"space-between", gap:8 }}>
+                  <span style={{ fontWeight:700, color:INK, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{r.name || "(no name)"}</span>
+                  <span style={{ fontWeight:700, color:INK, flexShrink:0 }}>₹{fmtINR(r.amount)}</span>
+                </div>
+                <div style={{ fontSize:12, color:MUTED, marginTop:2 }}>
+                  {r.date || "no date"}{r.paymentDate ? ` · paid ${r.paymentDate}` : ""} · {r.site || "no site"} · {r.refNo || "no ref"}
+                </div>
+                <div style={{ marginTop:6, display:"flex", flexDirection:"column", gap:3 }}>
+                  {issues.map((msg, i) => (
+                    <div key={i} style={{ fontSize:12, color:AMBER, fontWeight:600 }}>⚠ {msg}</div>
+                  ))}
+                </div>
+              </button>
+            ))}
+          </div>
+        </React.Fragment>
+      )}
     </div>
   );
 }
@@ -15760,8 +16413,8 @@ function exportEverything({ vendors, reqs, recurring, expenses, cashTxns, cards,
     "Sub Category":r.subCategory||"", Name:r.name||"", Amount:Number(r.amount)||0,
     Description:r.description||"",
     "Payment Status": isInRegister(r) ? fmtDate(r.paymentDate) : (r.paymentStatus||"Pending"),
-    "Payment Mode":r.paymentMode||"", UTR:r.utr||"", "A/c No.":r.accNo||"", "IFSC Code":r.ifsc||"",
-  })), [{wch:14},{wch:16},{wch:12},{wch:14},{wch:14},{wch:14},{wch:24},{wch:12},{wch:28},{wch:15},{wch:13},{wch:22},{wch:20},{wch:14}]);
+    "Payment Mode":r.paymentMode||"", "A/c No.":r.accNo||"", "IFSC Code":r.ifsc||"",
+  })), [{wch:14},{wch:16},{wch:12},{wch:14},{wch:14},{wch:14},{wch:24},{wch:12},{wch:28},{wch:15},{wch:13},{wch:20},{wch:14}]);
 
   add("Rent and EMI", (recurring||[]).map(r => ({
     ID:r.id, Name:r.name||"", "Counts As":costGroupOf(r), Type:r.type||"", "Pay To":r.ownerName||"",
@@ -15839,7 +16492,7 @@ function exportEverything({ vendors, reqs, recurring, expenses, cashTxns, cards,
   showToast(`Exported ${wb.SheetNames.length - 1} sheet(s)`);
 }
 
-function SettingsTab({ settings, setSettings, vendors, reqs, recurring, expenses, sheets, cashTxns, cards, machines, diesel, utilities, lists, setLists, showToast, sync }){
+function SettingsTab({ settings, setSettings, vendors, reqs, recurring, expenses, sheets, cashTxns, cards, machines, diesel, utilities, lists, setLists, showToast, sync, goTo }){
   const [key, setKey] = useState(settings.gstApiKey);
   const { fsSupported, fileHandle, fileName, needsReconnect, dirty, lastSaved, saving,
           connectDataFile, reconnectDataFile, disconnectDataFile, saveToFile, applyRestoredData,
@@ -15847,6 +16500,11 @@ function SettingsTab({ settings, setSettings, vendors, reqs, recurring, expenses
           driveConnected, driveEmail, driveSyncing, driveLastSynced, driveError,
           driveFolderId, driveFolderName,
           connectDrive, disconnectDrive, driveSyncNow, driveChooseFolder } = sync;
+
+  const dataCheckCount = useMemo(() => {
+    const today = todayStr();
+    return reqs.filter(r => checkReqDateIssues(r, today).length > 0).length;
+  }, [reqs]);
 
   function saveApiKey(){ setSettings({...settings, gstApiKey:key}); showToast("Settings saved"); }
 
@@ -15992,8 +16650,12 @@ function SettingsTab({ settings, setSettings, vendors, reqs, recurring, expenses
                 {driveSyncing ? "Syncing…" : "Sync now"}
               </button>
             </div>
-            <p style={{ fontSize:13, color:MUTED, lineHeight:1.5, marginBottom:14 }}>
+            <p style={{ fontSize:13, color:MUTED, lineHeight:1.5, marginBottom:4 }}>
               Backup folder: <strong style={{ color:INK }}>{driveFolderName || "My Drive (root)"}</strong>
+            </p>
+            <p style={{ fontSize:13, color:MUTED, lineHeight:1.5, marginBottom:14 }}>
+              An Excel copy of the Payment List (everything paid, in one sheet) is kept up to date
+              in the same folder as <strong style={{ color:INK }}>Payment-List.xlsx</strong> — no separate export needed.
             </p>
           </React.Fragment>
         )}
@@ -16047,6 +16709,18 @@ function SettingsTab({ settings, setSettings, vendors, reqs, recurring, expenses
         <ReviewRow label="Expenses" value={expenses.length} />
         <ReviewRow label="Connected sheets" value={sheets.length} />
         <ReviewRow label="Cash entries" value={cashTxns.length} />
+      </div>
+
+      {/* ---- DATA CHECK ---- */}
+      <div style={{ background:SURFACE, borderRadius:20, padding:20, border:`1px solid ${dataCheckCount ? AMBER : SAND}`, boxShadow:SHADOW }}>
+        <SectionLabel>Data Check</SectionLabel>
+        <p style={{ fontSize:13, color:MUTED, lineHeight:1.65, marginBottom:14 }}>
+          Scans every requisition for a date that's very likely a typo or import mistake — a
+          future date, an implausible year, or a payment recorded before it was raised.
+          {dataCheckCount > 0 ? ` Currently flags ${dataCheckCount} requisition${dataCheckCount===1?"":"s"}.` : " Nothing flagged right now."}
+        </p>
+        <BigButton icon="alert" label={dataCheckCount ? `Review ${dataCheckCount} Flagged Requisition${dataCheckCount===1?"":"s"}` : "Open Data Check"}
+          onClick={()=>goTo && goTo("datacheck")} tone={dataCheckCount ? "amber" : "ink"} full />
       </div>
 
       {/* ---- EDIT IN EXCEL ---- */}
