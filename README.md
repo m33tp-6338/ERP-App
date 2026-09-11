@@ -1023,20 +1023,123 @@ Switching between the To Pay and Paid screens now also clears out any
 selection left over from the other screen, so a stale selection can't
 carry across by accident.
 
-## Verification for this update (v6.26)
+## Fixed: EMI rows landing under "Other" instead of "Instalment" (v6.27)
+
+**The bug.** Rent & EMI sorts every item into Rent, Instalment or Other
+using its "Counts As" value — explicit if your sheet sets one, guessed
+from the Type/Name text if not. The guess used to look for a keyword like
+"loan", "EMI" or "financ" anywhere in that text. A sheet whose EMI rows
+just carry a lender's name — "Bajaj Finserv", say, with no "loan" or
+"EMI" anywhere in the row — has no keyword to find, so those rows quietly
+landed under Other. A second, smaller bug made this worse: Type was being
+filled in with a default value *before* the guess ran, so in some cases
+the guess ran against that placeholder instead of your sheet's real
+(possibly blank) Type.
+
+**The fix.** Group detection now checks the app's own known Type values
+first — House Rent, Land Rent, Machinery Rent, Machinery Installment —
+which is an exact match and can never miss. Only a genuinely custom Type
+falls through to the keyword guess, which was also widened slightly (now
+also catches "nbfc"). The Type-defaulting order was fixed so the guess
+always sees your sheet's real value. One more knock-on effect is fixed
+alongside this: a payee that had been miscategorised this way was also
+being auto-created as an **Owner** ledger instead of a **Financier** —
+that's corrected too, since it flows from the same group detection.
+
+**What this doesn't fix on its own:** a sheet with no "Counts As" column
+at all is still a guess, however good the guess is now. See the new
+template below for the sure way to avoid this entirely.
+
+## New: Rent_and_EMI_Entry_Template.xlsx
+
+A cleaner Excel template for entering rent and EMI items by hand, built
+specifically around the bug above: its **Counts As** column is a locked
+dropdown — Rent, Instalment or Other — so there's nothing left to guess
+on import. It also has a Frequency dropdown, a Read Me tab explaining
+every column, and one filled-in example row of each Counts As value (one
+Rent, one Instalment) so the format is obvious at a glance. Fill it in,
+save it, then bring it in the same way as any other Excel file — Rent &
+EMI → **Import** — or point a live sync source at it (see below).
+
+The in-app "Import" template for Rent & EMI (`Template_Rentals_Installments.xlsx`,
+generated on demand from the app itself) got the same treatment in
+miniature — it now shows one example row of each Counts As value instead
+of only a Rent example, so even that quick template makes the point.
+
+## Sync from Google Sheets now also covers Rent & EMI (v6.27)
+
+Adding a source's "Syncs into" dropdown now also offers **Rent & EMI**,
+alongside every kind added in earlier versions. An item is matched by its
+exact Name — a match updates that existing item from the sheet (a blank
+sheet cell leaves the existing value alone); no match creates a new one,
+with a ledger auto-created for a payee that doesn't already have one
+(Owner for Rent/Other, Financier for Instalment) — the exact same rules
+Import from Excel already uses for Rent & EMI. Rent & EMI and Fixed Cost
+Summary each got their own **Sync Now** button.
+
+**This is one-way only: Drive → app, never the other direction.** Nothing
+the app changes about a rent/EMI item — settling an instalment, editing a
+due date — is ever written back to your Drive file. This was a deliberate
+choice, not a limitation nobody noticed: a genuine two-way sync means
+either rewriting the whole file on every sync (real risk of clobbering
+formulas or formatting you've added between syncs) or a proper cell-level
+sync via Google's separate Sheets API, which needs broader Google
+permissions than this app asks for today. One-way keeps the guarantee
+every other sync in this app already gives you — your source file is
+never at risk — and matches what you chose when this was discussed.
+
+## New: overdue rent/EMI items are flagged, not paid automatically (v6.27)
+
+When a rent/EMi item's due date passes, the app does **not** mark it paid
+by itself. Instead:
+
+- **Fixed Cost Summary** shows a "due date(s) passed" card listing every
+  overdue, active, unfinished item, each with its own **Confirm Paid**
+  button (or **Confirm all** for the whole list).
+- **Rent & EMI**'s own item rows show the same **Confirm Paid** button
+  once an item is overdue (next to the existing **Generate Now** button).
+
+Confirming adds a Paid requisition dated for the due date that passed and
+moves the schedule forward — advancing the next due date, and counting an
+instalment if the item is an EMI — exactly like generating a payment
+normally does. This was a deliberate choice too: automatically marking
+something paid the moment a date passes would mean the ledger changes
+without you ever seeing it happen, which breaks the guarantee every other
+import and sync in this app already gives you, that nothing is added
+without you confirming it. One tap is as close to "automatic" as this app
+gets on purpose.
+
+**Also fixed along the way:** the single-item "Generate Now" button on a
+Rent & EMI item's own detail screen was only counting an EMI as an
+instalment when its Type was the exact text "Machinery Installment" — a
+custom Type, or one brought in via sync/import, could silently skip
+incrementing "installments paid". It now checks the item's real Counts As
+group instead, the same check every other instalment-counting path in the
+app already uses.
+
+## Verification for this update (v6.27)
 
 Every item above was checked in this order before delivery: the app's
 inline script re-transforms cleanly through the same vendored Babel used
 to run it and `node --check`s cleanly on the output, twice; a dedicated
-Node unit test for each new piece of logic (vendor/employee sync
-matching, the Category Breakdown grouping, the Data Check date rules —
-50+ assertions across the three, each cross-checked to match the actual
-function bodies in `index.html`, not just a copy that might drift); and a
-headless-browser smoke test for each new screen and button, confirming
-real navigation, real data on screen, and zero JavaScript errors along
-the way.
+Node unit test for each new or changed piece of logic (the corrected
+Counts As detection — 18 assertions including the exact "Bajaj Finserv"
+scenario reported — and the due-date settlement math used by Confirm
+Paid/Confirm all, 7 further assertions, both cross-checked to match the
+actual function bodies in `index.html`, not just a copy that might
+drift); and the new Excel template was built, recalculated and re-opened
+to confirm its dropdowns, styling and example rows survived intact.
 
-`APP_VERSION` moved from 6.25 to 6.26, and the service worker's
-`CACHE_NAME` moved from v25 to v26, so installed copies pick up this
+`APP_VERSION` moved from 6.26 to 6.27, and the service worker's
+`CACHE_NAME` moved from v26 to v27, so installed copies pick up this
 update automatically the next time they're online (see "If the app isn't
 showing recent updates" above if one doesn't).
+
+**Verification note for a future session:** the Rent & EMI live sync kind
+was tested with the Node unit tests above and by re-reading the app's
+own source for every insertion point (`SYNC_KIND_META`, `buildPreview`,
+`applyPreview`, the "Syncs into" dropdown, `runAutoSheetSync`'s kind
+loop) — not yet against a real Google Sheet, since none exists yet for
+this kind. If you set up a real sheet using the new template and
+something doesn't look right after syncing it, that's the first thing to
+check next, the same note left for the v6.25 and v6.26 sync kinds above.

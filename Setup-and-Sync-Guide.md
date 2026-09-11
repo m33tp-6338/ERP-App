@@ -1,4 +1,4 @@
-# Business Ledger ERP — Setup & Sync Guide (v6.25)
+# Business Ledger ERP — Setup & Sync Guide (v6.27)
 
 A plain-language walkthrough for setting up the Excel-linking (Sync from
 Google Sheets) from scratch on your PC, and using it day to day. Written
@@ -313,6 +313,49 @@ cell blank in the sheet never erases something already saved in the
 app; it just leaves that field as it is. Ledgers and Employee Master
 each also got their own **Sync Now** button, same as every other
 section.
+
+## Part 8 — Syncing Rent & EMI too, and fixing the "EMI lands in Other" problem (v6.27)
+
+The same **Sync from Google Sheets** screen can now also sync **Rent &
+EMI** — no Google Sheet is set up for this yet, so this is here for when
+you're ready. Setup is the same shape as before: put your rent/EMI list
+in a Google Sheet (or keep it as an .xlsx in Drive), then **Add Source** →
+**Choose file** → pick it → set **Syncs into** to **Rent & EMI**. An item
+is matched by its exact Name — a match updates that item from the sheet
+(blank cells leave existing values alone); no match creates a new one,
+with a ledger auto-created for a payee that doesn't already have one.
+Rent & EMI and Fixed Cost Summary each also got their own **Sync Now**
+button.
+
+**Important: this direction only, Drive → app.** Nothing the app changes
+about a rent/EMI item is ever written back to your Drive file. A true
+two-way sync was asked about and looked into — it would mean either
+rewriting your whole file on every sync (risking your formulas and
+formatting) or a separate, broader Google permission for cell-level
+writes. One-way keeps your source file safe, which is what you chose
+when this was discussed.
+
+**The "EMI keeps landing in Other" problem you reported is fixed.** The
+app used to guess Rent vs. Instalment vs. Other from keywords in the
+Type/Name text, which missed an EMI row whose only identifying text was
+a lender's name (e.g. "Bajaj Finserv") with no "loan"/"EMI" anywhere in
+it. The app's own known Type values (House Rent, Machinery Installment,
+etc.) are now checked first — an exact match that can't miss — before
+falling back to any guess at all.
+
+**For entering data by hand, use the new template.** `Rent_and_EMI_Entry_Template.xlsx`
+(included alongside this guide) locks the "Counts As" column to a Rent /
+Instalment / Other dropdown, so there's nothing left to guess, ever. It
+has a Read Me tab and one example row of each type — the quickest start
+is the same as every other template: open it, read the Read Me tab,
+delete or keep the two yellow example rows (matching by Name updates
+them rather than duplicating), and fill in your real data.
+
+**One more thing worth knowing:** once a rent/EMI item's due date passes,
+Fixed Cost Summary and Rent & EMI now show a one-tap **Confirm Paid**
+button for it — this is not automatic; nothing is marked paid until you
+tap it. See README.md's "New: overdue rent/EMI items are flagged, not
+paid automatically" section for the full detail.
 
 ## One thing still open
 

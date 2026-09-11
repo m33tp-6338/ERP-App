@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.26";
+const APP_VERSION = "6.27";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -80,6 +80,13 @@ const GOOGLE_DRIVE_APP_ID = "60621934527";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.27", date:"2026-09-11", title:"Rent & EMI sync, a fixed Counts-As bug, and one-tap overdue confirmation", items:[
+    "Fixed: an EMI/instalment row could land under \"Other\" instead of \"Instalment\" on import — this happened when the sheet's Type/Name text had no recognisable keyword (e.g. a lender name like \"Bajaj Finserv\" with no \"loan\"/\"EMI\"/\"financ\" in it). Group detection now checks the app's own known Type values first (exact, can't miss), and only falls back to guessing for a genuinely custom Type. A related bug was also fixed: Type was being defaulted before the group was guessed, so the guess sometimes ran against a placeholder instead of your sheet's real (blank) value. This also fixed the same payee being auto-created as an Owner ledger instead of a Financier when an EMI was miscategorised this way.",
+    "New: Rent_and_EMI_Entry_Template.xlsx — a cleaner entry template with \"Counts As\" locked to a dropdown (Rent / Instalment / Other), so there's nothing left to guess. Includes a Read Me tab and one example row of each type. The in-app \"Import\" template for Rent & EMI also now shows one example of each Counts As value instead of only Rent.",
+    "New: Sync from Google Sheets now covers Rent & EMI — add a source and set \"Syncs into\" to \"Rent & EMI\". An item is matched by exact Name and updated in place if it already exists; a payee not already a ledger is auto-created (Owner for Rent/Other, Financier for Instalment), same as Import from Excel. This is one-way only — nothing the app changes is ever written back to your Drive file, so nothing in your sheet's formulas or formatting is ever at risk. Rent & EMI and Fixed Cost Summary each got their own \"Sync Now\" button.",
+    "New: when a rent/EMI item's due date passes, it's flagged — not marked paid automatically. Fixed Cost Summary shows a \"due date(s) passed\" list with a one-tap Confirm Paid per item (or Confirm all); Rent & EMI's item rows get the same button when overdue. Confirming adds a Paid requisition dated for the due date and moves the schedule forward, exactly like generating a payment normally does — nothing is ever added to the ledger without you tapping to confirm it first.",
+    "Fixed: the single-item \"Generate Now\" button on a Rent & EMI item's detail screen was only counting an EMI as an instalment when its Type was exactly \"Machinery Installment\" — a custom Type, or one brought in via sync/import, could silently skip incrementing \"installments paid\". It now checks the item's real Counts As group, matching every other instalment-counting path in the app.",
+  ]},
   { v:"6.26", date:"2026-09-10", title:"Vendor/Employee sync, Category Breakdown, Data Check, bulk To Pay actions, and more", items:[
     "Sync from Google Sheets now also covers Vendor Master and Employee Master — add a source and set \"Syncs into\" to either one. A vendor is matched by GSTIN or exact name and updated in place if it already exists; an employee is matched by Employee Code, ID, or exact name. Either way, a blank cell in your sheet never erases a value already saved in the app. Two new templates are included: Vendor_Master_Sync_Template.xlsx and Employee_Master_Sync_Template.xlsx. Ledgers and Employee Master each got their own \"Sync Now\" button too.",
     "New \"Category Breakdown\" report (Reports menu, and a link from Payment Register's Paid screen) — every payment ever made, all-time, grouped by category, with a running share-of-total bar. Tap a category to see its individual transactions and export just that category, or export the whole summary to Excel.",
@@ -941,6 +948,14 @@ const SYNC_KIND_META = {
     updateDesc: "An employee matching this Employee Code, or this exact name, already exists — its details are updated from the sheet (blank sheet cells leave the existing value alone) rather than adding a second entry.",
     updateSummary: (n) => `${n} updated`,
   },
+  recurring: {
+    label: "Rent & EMI", newLabel: "New rent/EMI items", itemLabel: "rent/EMI item",
+    describe: (d) => `${d.name || "—"}${d.costGroup ? ` · ${d.costGroup}` : ""} · ₹${fmtINR(d.amount)}${d.nextDueDate ? ` · due ${fmtDate(d.nextDueDate)}` : ""}`,
+    dupDesc: "No rent/EMI item in your sheet exactly duplicates one already here without changes.",
+    updateLabel: "Already in the app — will be updated",
+    updateDesc: "An item matching this exact Name already exists — its details are updated from the sheet (blank sheet cells leave the existing value alone) rather than adding a second entry.",
+    updateSummary: (n) => `${n} updated`,
+  },
 };
 function syncKindMeta(kind){ return SYNC_KIND_META[kind] || SYNC_KIND_META.requisitions; }
 
@@ -1164,9 +1179,17 @@ const emptyRecurring = { id:"", name:"", type:"House Rent", costGroup:"", vendor
 
 const COST_GROUPS = ["Rent", "Instalment", "Other"];
 // Guess from the type text, but the saved costGroup always wins.
+// v6.27: a sheet's Type column almost never matches every possible loan/EMI
+// wording (a lender name like "Bajaj Finserv" or "Cholamandalam" carries no
+// keyword at all), so a deterministic check against the app's own known Type
+// values runs first - this is exact and can never miss, unlike a regex guess.
+// Only a genuinely unrecognised/custom Type text falls through to the regex.
 function inferGroup(r){
-  const t = String(r.type || "") + " " + String(r.name || "");
-  if (/instal|emi|loan|financ|hypothec/i.test(t)) return "Instalment";
+  const type = String(r.type || "").trim();
+  if (type === "Machinery Installment") return "Instalment";
+  if (type === "House Rent" || type === "Land Rent" || type === "Machinery Rent") return "Rent";
+  const t = type + " " + String(r.name || "");
+  if (/instal|emi|loan|financ|hypothec|nbfc/i.test(t)) return "Instalment";
   if (/rent|lease|hire/i.test(t)) return "Rent";
   return "Other";
 }
@@ -1246,12 +1269,47 @@ function generateRequisitionFromRecurring(item, reqs, setReqs, recurring, setRec
   const updatedItem = { ...item };
   if (item.frequency === "One-time") { updatedItem.active = false; }
   else { updatedItem.nextDueDate = addInterval(item.nextDueDate, item.frequency); }
-  if (item.type === "Machinery Installment" && item.installmentsPaid !== "") {
+  // v6.27: was hardcoded to item.type === "Machinery Installment", which
+  // missed any instalment whose Type text differs (custom types, or rows
+  // brought in via sync/import) - isInstalment() checks the real costGroup
+  // exactly like every other instalment-counting path in the app now does.
+  if (isInstalment(item) && item.installmentsPaid !== "") {
     updatedItem.installmentsPaid = (Number(item.installmentsPaid)||0) + 1;
     if (Number(item.totalInstallments) && updatedItem.installmentsPaid >= Number(item.totalInstallments)) updatedItem.active = false;
   }
   setRecurring(recurring.map(r => r.id===item.id ? updatedItem : r));
   showToast(`Requisition created for ${item.name} — go to Export tab to send it`);
+}
+
+// v6.27: the one-tap "confirm paid" action for a rent/EMI item whose due
+// date has passed. Unlike generateRequisitionFromRecurring (which creates a
+// Pending requisition for the normal payment-register workflow), this
+// creates the requisition already Paid, dated for the due date that passed,
+// and settles the recurring item the same way a matched synced payment
+// would. It only ever runs when the user taps the button themselves — see
+// the "flag for one-tap confirmation" design decision in the Sync from
+// Google Sheets guidance: nothing is ever marked paid without the user
+// seeing and confirming it first.
+function confirmRecurringPaid(item, reqs, setReqs, recurring, setRecurring, showToast){
+  const dueDate = item.nextDueDate || todayStr();
+  const record = {
+    ...emptyReq, id: uid(), refNo: nextRefNo(reqs), date: dueDate, site: item.site,
+    category: item.category || item.type, subCategory: item.subCategory,
+    vendorId: item.vendorId, name: item.ownerName || item.name, amount: item.amount,
+    description: `Recurring — ${item.type}${item.frequency!=="One-time" ? " ("+item.frequency+")" : ""}`,
+    paymentStatus: "Paid", paymentDate: todayStr(), accNo: item.accNo, ifsc: item.ifsc,
+    exported:false, createdAt: Date.now(), recurringId: item.id,
+  };
+  setReqs([...reqs, record]);
+  const updatedItem = { ...item };
+  if (item.frequency === "One-time") { updatedItem.active = false; }
+  else { updatedItem.nextDueDate = addInterval(item.nextDueDate, item.frequency); }
+  if (isInstalment(item) && item.installmentsPaid !== "") {
+    updatedItem.installmentsPaid = (Number(item.installmentsPaid)||0) + 1;
+    if (Number(item.totalInstallments) && updatedItem.installmentsPaid >= Number(item.totalInstallments)) updatedItem.active = false;
+  }
+  setRecurring(recurring.map(r => r.id===item.id ? updatedItem : r));
+  showToast(`${item.name} marked paid for ${fmtDate(dueDate)}`);
 }
 
 /* ---------- storage (localStorage, this device only) ---------- */
@@ -3178,7 +3236,7 @@ function ERPApp(){
     }
 
     const tpl = kind === "expenses" ? EXPENSE_TEMPLATE : kind === "cash" ? CASH_TEMPLATE : kind === "diesel" ? DIESEL_TEMPLATE
-      : kind === "vendors" ? VENDOR_TEMPLATE : kind === "employees" ? EMPLOYEE_TEMPLATE : REQ_TEMPLATE;
+      : kind === "vendors" ? VENDOR_TEMPLATE : kind === "employees" ? EMPLOYEE_TEMPLATE : kind === "recurring" ? RECURRING_TEMPLATE : REQ_TEMPLATE;
     const headers = [...new Set(collected.flatMap(c => Object.keys(c.row)))]
       .filter(h => h !== "__file" && h !== "__folder");
     const map = autoMapHeaders(headers, tpl);
@@ -3401,6 +3459,48 @@ function ERPApp(){
         toAdd.push({ data:{ ...emptyVendor, ...out, ledgerType:"Employee",
           empStatus: out.empStatus || "Active", rollType: out.rollType || "On Roll",
           payType: out.payType || "Fixed", sites: siteList, id: uid() }, source:c.source });
+      });
+      queueResult({ kind, toAdd, toUpdate, duplicates, errors, failures, missing, map, headers, list, fileReport, skippedFiles, seenFiles, notes });
+      return;
+    }
+
+    if (kind === "recurring") {
+      // Mirrors ImportTab's own "recurring" row handling exactly (id match
+      // first, then an exact Name match; same costGroup/frequency inference
+      // as a manual Import from Excel — see inferGroup's v6.27 notes above).
+      // This is deliberately READ-ONLY from the sheet: nothing the app ever
+      // changes about a rent/EMI item (settling an instalment, editing a due
+      // date) is written back to the Drive file — see SYNC_KIND_META.recurring
+      // and the "Syncs into" hint text for why.
+      const toUpdate = [];
+      const types = (lists && lists.types) ? lists.types : DEFAULT_LISTS.types;
+      collected.forEach((c, i) => {
+        const { out, problems } = mapRowGeneric(c.row, tpl, map);
+        if (problems.length) { errors.push({ source:c.source, rowNum:i+2, why:`missing ${problems.join(", ")}` }); return; }
+
+        if (!COST_GROUPS.includes(out.costGroup)) {
+          out.costGroup = inferGroup(out);
+          out._costGroupInferred = true;
+        }
+        if (!out.type) out.type = types[0] || "House Rent";
+        if (!FREQUENCIES.includes(out.frequency)) {
+          const f = String(out.frequency||"").toLowerCase();
+          out.frequency = f.indexOf("quarter")>=0 ? "Quarterly"
+            : f.indexOf("half")>=0 ? "Half-Yearly"
+            : f.indexOf("year")>=0 || f.indexOf("annual")>=0 ? "Yearly"
+            : f.indexOf("one")>=0 ? "One-time"
+            : "Monthly";
+        }
+
+        const idKey = String(out.id||"").trim();
+        const idHit = idKey ? recurring.find(r => r.id === idKey) : null;
+        if (idHit) { toUpdate.push({ existing:idHit, data:out, source:c.source }); return; }
+
+        const existing = recurring.find(r =>
+          String(r.name||"").trim().toLowerCase() === String(out.name||"").trim().toLowerCase());
+        if (existing) { toUpdate.push({ existing, data:out, source:c.source }); return; }
+
+        toAdd.push({ data:out, source:c.source });
       });
       queueResult({ kind, toAdd, toUpdate, duplicates, errors, failures, missing, map, headers, list, fileReport, skippedFiles, seenFiles, notes });
       return;
@@ -3739,6 +3839,96 @@ function ERPApp(){
       return;
     }
 
+    if (preview.kind === "recurring") {
+      // Same merge rule as vendors/employees above, plus the same
+      // auto-create-a-ledger behaviour ImportTab's recurring commit uses
+      // (Owner for Rent/Other, Financier for Instalment) — see makeLedger
+      // in ImportTab for the identical logic this mirrors.
+      let next = [...recurring];
+      (preview.toUpdate||[]).forEach(u => {
+        next = next.map(r => r.id === u.existing.id
+          ? { ...r, ...Object.fromEntries(Object.entries(u.data).filter(([k,val]) => k !== "_costGroupInferred" && val !== "" && val !== undefined)) }
+          : r);
+      });
+
+      const newOwners = [];
+      const findLedger = (nm) => {
+        const t = String(nm||"").trim().toLowerCase();
+        if (!t) return null;
+        return vendors.find(v => String(v.name||"").trim().toLowerCase() === t)
+            || newOwners.find(v => String(v.name||"").trim().toLowerCase() === t) || null;
+      };
+      const makeLedger = (payTo, row) => {
+        let vend = findLedger(payTo);
+        if (vend) return vend;
+        const group = costGroupOf(row);
+        vend = { ...emptyVendor, id: uid(), name: payTo,
+                 ledgerType: group === "Instalment" ? "Financier" : "Owner",
+                 accNo: row.accNo || "", ifsc: row.ifsc || "", category: row.type || "" };
+        newOwners.push(vend);
+        return vend;
+      };
+
+      let inferredCount = 0;
+      [...preview.toAdd.map(a=>a.data), ...(preview.toUpdate||[]).map(u=>u.data)].forEach(d => {
+        if (d._costGroupInferred) inferredCount++;
+      });
+
+      const added = preview.toAdd.map((a, idx) => {
+        const d = { ...a.data };
+        delete d._costGroupInferred;
+        const payTo = String(d.payTo || "").trim();
+        delete d.payTo;
+        const vend = payTo ? makeLedger(payTo, d) : null;
+        return {
+          ...emptyRecurring, ...d,
+          id: uid(),
+          vendorId: vend ? vend.id : "",
+          ownerName: vend ? vend.name : payTo,
+          accNo: d.accNo || (vend ? vend.accNo : ""),
+          ifsc: d.ifsc || (vend ? vend.ifsc : ""),
+          active: true,
+          createdAt: Date.now() + idx,
+        };
+      });
+
+      // rows that merely updated an existing entry still need their payee on file
+      next = next.map(r => {
+        const upd = (preview.toUpdate||[]).find(u => u.existing.id === r.id);
+        if (!upd) return r;
+        const payTo = String(upd.data.payTo || r.ownerName || "").trim();
+        if (!payTo) return r;
+        const vend = makeLedger(payTo, { ...r, ...upd.data });
+        return { ...r, vendorId: r.vendorId || vend.id, ownerName: payTo };
+      });
+
+      setRecurring([...next, ...added]);
+      if (newOwners.length) setVendors([...vendors, ...newOwners]);
+
+      const L = lists || DEFAULT_LISTS;
+      const nl = { ...L, sites:[...(L.sites||[])], categories:[...(L.categories||[])],
+                   subCategories:{...(L.subCategories||{})}, types:[...(L.types||DEFAULT_LISTS.types)] };
+      [...added, ...(preview.toUpdate||[]).map(u=>u.data)].forEach(d => {
+        if (d.site && !nl.sites.includes(d.site)) nl.sites.push(d.site);
+        if (d.category && !nl.categories.includes(d.category)) nl.categories.push(d.category);
+        if (d.type && !nl.types.includes(d.type)) nl.types.push(d.type);
+        if (d.category && d.subCategory) {
+          const cur = nl.subCategories[d.category] || [];
+          if (!cur.includes(d.subCategory)) nl.subCategories[d.category] = [...cur, d.subCategory].sort();
+        }
+      });
+      nl.sites.sort(); nl.categories.sort();
+      setLists(nl);
+
+      setSheets(sheets.map(x => (preview.list || []).some(l => l.id === x.id) ? { ...x, lastSync: stamp } : x));
+      const updCount = (preview.toUpdate||[]).length;
+      showToast(`${added.length} rent/EMI item(s) added${updCount ? ` · ${updCount} updated` : ""}`
+        + `${newOwners.length ? ` · ${newOwners.length} ledger(s) created` : ""}`
+        + `${inferredCount ? ` · ${inferredCount} group-guessed, please check` : ""}`);
+      setSheetPreviewQueue(q => q.slice(1));
+      return;
+    }
+
     const added = [];
     const recurringUpdates = [];
     preview.toAdd.forEach((a, idx) => {
@@ -3987,9 +4177,11 @@ function ERPApp(){
           sheets={sheets} syncSheets={syncSheets} sheetSyncBusy={sheetSyncBusy} />}
         {tab==="requisition" && <RequisitionForm vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} expenses={expenses} setExpenses={setExpenses} lists={lists} setLists={setLists} goTo={navigate} openImport={openImport} showToast={showToast} />}
         {tab==="export" && <ExportTab reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} expenses={expenses} setExpenses={setExpenses} goTo={navigate} openImport={openImport} showToast={showToast} sheets={sheets} syncSheets={syncSheets} sheetSyncBusy={sheetSyncBusy} />}
-        {tab==="recurring" && <RecurringTab vendors={vendors} setVendors={setVendors} recurring={recurring} setRecurring={setRecurring} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
+        {tab==="recurring" && <RecurringTab vendors={vendors} setVendors={setVendors} recurring={recurring} setRecurring={setRecurring} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport}
+          sheets={sheets} syncSheets={syncSheets} sheetSyncBusy={sheetSyncBusy} />}
         {tab==="import" && <ImportTab focusKind={importFocus} clearFocus={()=>setImportFocus("")} presetCardId={importCardHint} vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} recurring={recurring} setRecurring={setRecurring} expenses={expenses} setExpenses={setExpenses} cards={cards} setCards={setCards} cashTxns={cashTxns} setCashTxns={setCashTxns} machines={machines} setMachines={setMachines} diesel={diesel} setDiesel={setDiesel} utilities={utilities} setUtilities={setUtilities} attendance={attendance} setAttendance={setAttendance} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} />}
-        {tab==="fixedcost" && <FixedCostTab recurring={recurring} vendors={vendors} machines={machines} showToast={showToast} goTo={navigate} />}
+        {tab==="fixedcost" && <FixedCostTab recurring={recurring} setRecurring={setRecurring} vendors={vendors} machines={machines} reqs={reqs} setReqs={setReqs} showToast={showToast} goTo={navigate}
+          sheets={sheets} syncSheets={syncSheets} sheetSyncBusy={sheetSyncBusy} />}
         {tab==="categorybreakdown" && <CategoryBreakdownTab reqs={reqs} goTo={navigate} />}
         {tab==="datacheck" && <DataCheckTab reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} expenses={expenses} setExpenses={setExpenses} lists={lists} setLists={setLists} goTo={navigate} openImport={openImport} showToast={showToast} />}
         {tab==="changelog" && <ChangelogTab settings={settings} setSettings={setSettings} goTo={navigate} />}
@@ -6411,6 +6603,14 @@ function RecurringTab({ vendors, setVendors, recurring, setRecurring, reqs, setR
                   <button onClick={(e)=>{e.stopPropagation(); toggleActive(item);}} style={{ fontSize:12, fontWeight:600, padding:"8px 10px", borderRadius:10, background:SAND, color:INK, border:"none", cursor:"pointer" }}>
                     {item.active ? "Pause" : "Resume"}
                   </button>
+                  {item.active && days < 0 && !finished && (
+                    <button onClick={(e)=>{e.stopPropagation();
+                      if (!confirm(`Mark ${item.name} paid for ${fmtDate(item.nextDueDate)}? This adds a Paid requisition and moves the due date forward.`)) return;
+                      confirmRecurringPaid(item, reqs, setReqs, recurring, setRecurring, showToast);}}
+                      style={{ fontSize:12, fontWeight:700, padding:"8px 12px", borderRadius:10, background:RED, color:"#fff", border:"none", cursor:"pointer" }}>
+                      Confirm Paid
+                    </button>
+                  )}
                   {item.active && (
                     <button onClick={(e)=>{e.stopPropagation(); generateRequisitionFromRecurring(item, reqs, setReqs, recurring, setRecurring, showToast);}}
                       style={{ fontSize:12, fontWeight:700, padding:"8px 12px", borderRadius:10, background:GREEN, color:"#fff", border:"none", cursor:"pointer" }}>
@@ -7116,9 +7316,62 @@ function BulkPaymentModal({ reqs, onCancel, onSave }){
 }
 
 /* ================= FIXED COST SUMMARY ================= */
-function FixedCostTab({ recurring, vendors, machines, showToast, goTo }){
+function FixedCostTab({ recurring, setRecurring, vendors, machines, reqs, setReqs, showToast, goTo, sheets, syncSheets, sheetSyncBusy }){
   const [showWorking, setShowWorking] = useState(true);
   const sp = useMemo(() => commitmentSplit(recurring), [recurring]);
+
+  // v6.27: items whose due date has already passed. Nothing here is marked
+  // paid automatically — each one needs the one tap on "Confirm Paid" below,
+  // same guarantee as every other import/sync in the app: nothing touches
+  // the ledger without the user seeing and confirming it first.
+  const dueForConfirmation = useMemo(() => (recurring||[]).filter(r =>
+    r.active !== false && !instalmentDone(r) && daysUntil(r.nextDueDate) < 0
+  ).sort((a,b) => (a.nextDueDate||"").localeCompare(b.nextDueDate||"")), [recurring]);
+
+  function confirmOne(item){
+    if (!confirm(`Mark ${item.name} paid for ${fmtDate(item.nextDueDate)}? This adds a Paid requisition and moves the due date forward.`)) return;
+    confirmRecurringPaid(item, reqs, setReqs, recurring, setRecurring, showToast);
+  }
+  function confirmAll(){
+    if (!dueForConfirmation.length) return;
+    if (!confirm(`Mark all ${dueForConfirmation.length} overdue item(s) paid? This adds a Paid requisition for each and moves each due date forward.`)) return;
+    let curReqs = reqs, curRec = recurring;
+    dueForConfirmation.forEach(item => {
+      const live = curRec.find(x => x.id === item.id) || item;
+      const before = curReqs.length;
+      // confirmRecurringPaid takes/returns via setters, so thread state through manually here
+      const dueDate = live.nextDueDate || todayStr();
+      const record = {
+        ...emptyReq, id: uid(), refNo: nextRefNo(curReqs), date: dueDate, site: live.site,
+        category: live.category || live.type, subCategory: live.subCategory,
+        vendorId: live.vendorId, name: live.ownerName || live.name, amount: live.amount,
+        description: `Recurring — ${live.type}${live.frequency!=="One-time" ? " ("+live.frequency+")" : ""}`,
+        paymentStatus: "Paid", paymentDate: todayStr(), accNo: live.accNo, ifsc: live.ifsc,
+        exported:false, createdAt: Date.now() + before, recurringId: live.id,
+      };
+      curReqs = [...curReqs, record];
+      const upd = { ...live };
+      if (live.frequency === "One-time") upd.active = false;
+      else upd.nextDueDate = addInterval(live.nextDueDate, live.frequency);
+      if (isInstalment(live) && live.installmentsPaid !== "") {
+        upd.installmentsPaid = (Number(live.installmentsPaid)||0) + 1;
+        if (Number(live.totalInstallments) && upd.installmentsPaid >= Number(live.totalInstallments)) upd.active = false;
+      }
+      curRec = curRec.map(x => x.id === live.id ? upd : x);
+    });
+    setReqs(curReqs);
+    setRecurring(curRec);
+    showToast(`${dueForConfirmation.length} item(s) marked paid`);
+  }
+
+  // Mirrors the v6.24/v6.25 "Sync Now" buttons elsewhere — runs the sync for
+  // "recurring"-kind sources only, then takes you to the results.
+  async function syncNow(){
+    const list = (sheets || []).filter(x => (x.kind || "requisitions") === "recurring");
+    if (!list.length) { showToast("No Rent & EMI sync source set up yet — add one in Sync from Google Sheets", "error"); return; }
+    await syncSheets(list);
+    goTo && goTo("sheets");
+  }
 
   const staff = useMemo(
     () => (vendors||[]).filter(v => (v.ledgerType||"") === "Employee" && (v.empStatus||"Active") !== "Left"),
@@ -7235,6 +7488,41 @@ function FixedCostTab({ recurring, vendors, machines, showToast, goTo }){
           })}
         </div>
       </div>
+
+      {dueForConfirmation.length > 0 && (
+        <div style={{ background:"#FDECEE", border:`1.5px solid ${RED}`, borderRadius:18, padding:16, marginBottom:14 }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
+            <div style={{ fontWeight:700, color:INK, fontSize:14 }}>
+              {dueForConfirmation.length} due date{dueForConfirmation.length===1?"":"s"} has passed
+            </div>
+            {dueForConfirmation.length > 1 && (
+              <button onClick={confirmAll}
+                style={{ fontSize:12.5, fontWeight:700, padding:"7px 12px", borderRadius:10, background:RED, color:"#fff", border:"none", cursor:"pointer" }}>
+                Confirm all
+              </button>
+            )}
+          </div>
+          <div style={{ fontSize:12.5, color:INK, marginBottom:10, lineHeight:1.5 }}>
+            Nothing is marked paid on its own — tap to confirm each one actually got paid. This adds a Paid requisition and moves the due date forward.
+          </div>
+          {dueForConfirmation.slice(0,20).map(item => (
+            <div key={item.id} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:10,
+              padding:"8px 0", borderTop:`1px solid rgba(0,0,0,0.06)` }}>
+              <div style={{ minWidth:0 }}>
+                <div style={{ fontSize:13.5, fontWeight:600, color:INK, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{item.name}</div>
+                <div style={{ fontSize:11.5, color:MUTED, marginTop:2 }}>
+                  ₹{fmtINR(item.amount)} · {Math.abs(daysUntil(item.nextDueDate))} day(s) overdue
+                </div>
+              </div>
+              <button onClick={()=>confirmOne(item)}
+                style={{ fontSize:12, fontWeight:700, padding:"8px 12px", borderRadius:10, background:INK, color:"#fff", border:"none", cursor:"pointer", flexShrink:0 }}>
+                Confirm Paid
+              </button>
+            </div>
+          ))}
+          {dueForConfirmation.length > 20 && <div style={{ fontSize:12, color:MUTED, marginTop:8 }}>…and {dueForConfirmation.length-20} more — see Rent &amp; EMI, Overdue filter.</div>}
+        </div>
+      )}
 
       <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:14 }}>
         <div style={{ background:SURFACE, borderRadius:18, padding:16, border:`1px solid ${SAND}`, boxShadow:SHADOW }}>
@@ -7353,7 +7641,15 @@ function FixedCostTab({ recurring, vendors, machines, showToast, goTo }){
         </React.Fragment>
       )}
 
-      <BigButton icon="download" label="Export Fixed Cost Summary" onClick={exportFixed} tone="green" full />
+      <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+        <BigButton icon="download" label="Export Fixed Cost Summary" onClick={exportFixed} tone="green" full />
+        <button onClick={syncNow} disabled={!!sheetSyncBusy}
+          style={{ borderRadius:16, padding:"14px 20px", fontSize:15, fontWeight:700,
+            background: sheetSyncBusy ? SAND : GREEN, color: sheetSyncBusy ? INK : "#fff", border:"none",
+            cursor: sheetSyncBusy ? "default" : "pointer" }}>
+          {sheetSyncBusy ? "Syncing…" : "Sync Rent & EMI Now"}
+        </button>
+      </div>
     </div>
   );
 }
@@ -11380,6 +11676,7 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
               diesellogMachines: "Rows land in Diesel Log's Machinery Master. Point the Tab field below at the exact sheet tab named \"Machinery Master\" (Machine, Category, Ownership, ...). A machine matching one already here by name is updated rather than duplicated.",
               vendors: "Rows land in Ledgers, as vendors (Name, GSTIN, Address, Bank Details, ...) — the same Vendor Master sheet you'd otherwise bring in via Import from Excel. A vendor matching this GSTIN, or this exact name, is updated rather than duplicated; blank sheet cells never erase a detail already saved here.",
               employees: "Rows land in Employee Master (Name, Employee Code, Designation, Salary, Bank Details, ...) — the same Employee Master sheet you'd otherwise bring in via Import from Excel. An employee matching this Employee Code, or this exact name, is updated rather than duplicated; blank sheet cells never erase a detail already saved here.",
+              recurring: "Rows land in Rent & EMI (Name, Type, Counts As, Pay To, Amount, Frequency, Next Due Date, ...) — the same sheet you'd otherwise bring in via Import from Excel. An item matching this exact Name is updated rather than duplicated; blank sheet cells never erase a detail already saved here. This is read-only from the sheet — nothing the app changes (like marking a payment done) is ever written back to your Drive file. Feeds Fixed Cost Summary automatically once synced.",
             }[editing.kind || "requisitions"]}>
             <select style={inputStyle} value={editing.kind || "requisitions"}
               onChange={e=>setEditing({...editing, kind:e.target.value})}>
@@ -11392,6 +11689,7 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
               <option value="diesellogMachines">Diesel Log — Machinery Master</option>
               <option value="vendors">Vendor Master</option>
               <option value="employees">Employee Master</option>
+              <option value="recurring">Rent & EMI</option>
             </select>
           </Field>
           <BigButton icon="check" label="Save Source" onClick={()=>saveSheet(editing)} tone="green" full
@@ -13452,7 +13750,9 @@ const RECURRING_TEMPLATE = [
 
   { key:"name",              headers:["Name","Description","Particulars","Title"], required:true },
   { key:"type",              headers:["Type","Category Type","Rental Type"] },
-  { key:"costGroup",         headers:["Counts As","Cost Group","Rent or Instalment","Group"] },
+  // v6.27: "Group" was dropped from this list - too generic, risked an exact-match
+  // collision with an unrelated column in a real sheet (e.g. a vendor "Group").
+  { key:"costGroup",         headers:["Counts As","Cost Group","Rent or Instalment"] },
   { key:"payTo",             headers:["Pay To","Owner","Landlord","Party","Vendor","Name of Owner"] },
   { key:"amount",            headers:["Amount","Rent","Installment","EMI","Monthly Amount"], number:true, required:true },
   { key:"frequency",         headers:["Frequency","Cycle","Periodicity"] },
@@ -13552,9 +13852,14 @@ function downloadTemplate(kind){
     return;
   }
   if (kind === "recurring") {
-    const ex = ["Office Rent - Mr Sharma","House Rent","Rent","Mr Sharma",25000,"Monthly",todayStr(),
+    // v6.27: show one example of EACH "Counts As" value (not just Rent) so
+    // it's obvious an EMI/installment row must be marked "Instalment" here -
+    // this is what was silently relied on for group detection before.
+    const exRent = ["Office Rent - Mr Sharma","House Rent","Rent","Mr Sharma",25000,"Monthly",todayStr(),
                 "Head Office","Rent","Office Rent","50100123456789","HDFC0001234","",""];
-    const ws0 = XLSX.utils.aoa_to_sheet([headers, ex]);
+    const exEmi = ["JCB Loan - Bajaj Finserv","Machinery Installment","Instalment","Bajaj Finserv",18500,"Monthly",todayStr(),
+                "Head Office","Instalment","Machinery EMI","50100987654321","BAJA0001234",24,3];
+    const ws0 = XLSX.utils.aoa_to_sheet([headers, exRent, exEmi]);
     ws0["!cols"] = headers.map(h => ({ wch: Math.max(16, h.length + 4) }));
     const wb0 = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb0, ws0, "Rentals");
@@ -13957,6 +14262,16 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
       }
 
       if (kind === "recurring") {
+        // v6.27: infer the cost group from the row's REAL type/name text
+        // before out.type gets defaulted below — inferring after the
+        // default would guess against a synthetic "House Rent" fallback
+        // instead of the sheet's actual (possibly blank) data. Flag rows
+        // that had no explicit Counts As value so the import summary can
+        // tell the user how many were guessed and worth a quick check.
+        if (!COST_GROUPS.includes(out.costGroup)) {
+          out.costGroup = inferGroup(out);
+          out._costGroupInferred = true;
+        }
         const types = (lists && lists.types) ? lists.types : DEFAULT_LISTS.types;
         if (!out.type) out.type = types[0] || "House Rent";
         if (!FREQUENCIES.includes(out.frequency)) {
@@ -13967,7 +14282,6 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
             : f.indexOf("one")>=0 ? "One-time"
             : "Monthly";
         }
-        if (!COST_GROUPS.includes(out.costGroup)) out.costGroup = inferGroup(out);
         const idHit = byId(recurring, out.id);
         if (idHit) { toUpdate.push({ existing:idHit, data:out, rowNum:i+offset }); return; }
         const existing = recurring.find(r =>
@@ -14290,7 +14604,7 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
       let next = [...recurring];
       kept.toUpdate.forEach(u => {
         next = next.map(r => r.id === u.existing.id
-          ? { ...r, ...Object.fromEntries(Object.entries(u.data).filter(([,v]) => v !== "" && v !== undefined)) }
+          ? { ...r, ...Object.fromEntries(Object.entries(u.data).filter(([k,v]) => k !== "_costGroupInferred" && v !== "" && v !== undefined)) }
           : r);
       });
       // Any payee not already a ledger is created as an Owner, so it shows up
@@ -14316,9 +14630,18 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
         return vend;
       };
 
+      // Rows whose sheet had no explicit "Counts As" value got their group
+      // guessed by inferGroup() - worth a quick manual check, so tally them
+      // for the summary toast before the temp flag is stripped off.
+      let inferredCount = 0;
+      [...kept.toAdd.map(a=>a.data), ...kept.toUpdate.map(u=>u.data)].forEach(d => {
+        if (d._costGroupInferred) inferredCount++;
+      });
+
       const added = [];
       kept.toAdd.forEach(a => {
         const d = { ...a.data };
+        delete d._costGroupInferred;
         const payTo = String(d.payTo || "").trim();
         delete d.payTo;
         const vend = payTo ? makeLedger(payTo, d) : null;
@@ -14362,7 +14685,7 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
       nl.sites.sort(); nl.categories.sort();
       setLists(nl);
 
-      showToast(`${added.length} added, ${kept.toUpdate.length} updated${newOwners.length ? ` · ${newOwners.length} ledger(s) created` : ""}`);
+      showToast(`${added.length} added, ${kept.toUpdate.length} updated${newOwners.length ? ` · ${newOwners.length} ledger(s) created` : ""}${inferredCount ? ` · ${inferredCount} group-guessed, please check` : ""}`);
       setPreview(null);
       setMapping(null);
       return;
