@@ -727,6 +727,64 @@ function sendSelectedRowsBack() {
   instead — editing an existing Requisition there already works today and is
   the reliable way to correct something that's already made it into the app.
 
+## New in v6.28: pushing payment dates from the app back into Master
+
+Until now, every sync in this section — Payment to be done, Master, Office
+Master, all of it — only ever read **from** Drive **into** the app. As of
+v6.28, a source of kind **Requisitions** can be turned into a write-back
+target: edit the source and turn on **"Push payments here when marked
+Paid."** From then on, the moment a plain requisition (not Salary, not
+Rent & EMI) is marked Paid in the app — however it got there, including
+from a sync — its Payment Date (and Payment Status, if that column exists)
+is written straight into the matching row of that source's file: matched
+the same way the read side already matches a row (date + site + name +
+amount + description), so it lands in the right place without you doing
+anything. No matching row → a new one is appended at the bottom instead,
+filled in from what the app already knows.
+
+**Turn this on for your Master source only — leave it off for Payment to be
+done.** Payment to be done is meant to stay the intake list; Master is your
+paid-record ledger, which is exactly what this keeps up to date automatically
+instead of you copying rows across by hand.
+
+**A source's file gets rewritten whole, every push — there's no other way
+the app's Drive permission allows.** Every other row, every other tab in
+that same file (Payment to be done, Office Master, whatever else shares the
+workbook), every formula and format is round-tripped untouched by the same
+library the app already uses to read your sheets — only the one cell (or
+one new row) actually changes. The practical upshot: avoid editing that
+exact file in Google Sheets at the very moment a push happens — whichever
+save lands last wins. This has not been exercised against a live Google
+account from where it was built, so keep a backup copy of Master until
+you've watched a few pushes land correctly, the same caution as anything
+new touching a file you depend on.
+
+**Payments already marked Paid before you turn this on** aren't pushed
+retroactively on their own — a **"Push N paid requisition(s) to Master
+now"** button appears on the source's card once the toggle is on, which
+backfills everything eligible in one go (this is how the payments already
+made through 11 September, mentioned when this was asked for, get into
+Master without re-entering them).
+
+**Made a mistake?** Two ways to fix it, depending on where you catch it:
+- **Caught it in the app** (wrong date confirmed, shouldn't have been
+  marked Paid yet): open the requisition, Change status → **Pending**. This
+  clears the app's own stale Payment Date/Mode/Amount so it's ready to
+  correct and re-confirm — and if it had already been pushed to Master, the
+  same Payment Date cell there is cleared automatically to match, no extra
+  step.
+- **Caught it in the sheet** (a row landed in Master that needs editing,
+  and you'd rather do that from Sheets than the app): this is exactly what
+  the existing **"Send selected row(s) back to Payment to be done"** Apps
+  Script menu item above already does — select the row(s) on Master, ERP
+  Tools → Send selected row(s) back, and they land back on Payment to be
+  done as Pending, ready to edit. Its own documented limitation still
+  applies here too: if the app already has this as a paid Requisition (very
+  likely, since it's what put the row in Master in the first place), sending
+  it back in Sheets does **not** touch that app record — go change it from
+  Pending in the app as well (the paragraph above), so the app and Master
+  agree once you're done, rather than each showing something different.
+
 ## Payroll: fixed salaries and attendance-based pay
 
 A new **Payroll** tab handles the two different ways staff get paid, instead
@@ -974,6 +1032,22 @@ alongside the existing "Payments this month"), listing every requisition
 raised in the selected month — with a small ⚠ next to any entry Data
 Check has also flagged, so a bad date is visible right where you're
 already reviewing the month.
+
+## New in v6.28: Monthly Statement's Paid total broken out by category
+
+Monthly Statement's single **Paid** total is now also shown split into a
+**Payments by category** card: **Payment Requisition**, **Salary**,
+**Rent**, **Instalment** — the same split, plus a separate **Card
+expense** total (every Cash & Card module Spend this month, cash-in-hand
+included — this one isn't a Requisitions total at all, so it's shown apart
+from the other four rather than folded in). The first four always add up
+to exactly the same Paid figure shown above them; this is purely a
+different view of the same numbers, meant to be checked line by line
+against a sheet that already keeps these categories apart. Salary is
+whatever Payroll generated; Rent and Instalment come from what each Rent &
+EMI item's own Counts As is set to. Exporting the statement to Excel
+carries the same breakdown into the Summary tab, plus a Statement Group
+column on Payments Made so every row's category is visible there too.
 
 ## UTR field removed
 

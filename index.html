@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.27";
+const APP_VERSION = "6.28";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -80,6 +80,12 @@ const GOOGLE_DRIVE_APP_ID = "60621934527";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.28", date:"2026-09-11", title:"Master write-back, and a 4-way payment breakdown on Monthly Statement", items:[
+    "New: a sync source of kind Requisitions can now be turned into a write-back target — edit the source and turn on \"Push payments here when marked Paid\". The moment a plain requisition (not Salary, not Rent & EMI) is marked Paid in the app — however it got there, including a sheet sync — its Payment Date (and Payment Status, if that column exists) is written into the matching row of that source's Drive file. No matching row found → a new one is added at the bottom instead, filled in from what the app knows. This was built for Master specifically — the guidance in the field says to leave it off for Payment to be done. A \"Push N paid requisition(s) to Master now\" button on the source card backfills anything already Paid before this existed.",
+    "New: reverting a requisition from Paid back to Pending (Requisition Detail → Change status) now clears its stale Payment Date/Mode/Amount so it behaves like a genuine pending item again, ready to correct and re-confirm. If that payment had already been pushed to Master, the same Payment Date cell is cleared there too, automatically.",
+    "This always rewrites the whole Drive file, the only way the app's drive.file permission allows — every other row, tab, formula and format is left as SheetJS round-trips it, but avoid editing that exact sheet in Drive at the same moment a push happens (whichever save lands last wins). Not exercised against a live Google account from where it was built — keep a backup of Master until a few pushes have been watched landing correctly.",
+    "New: Monthly Statement's single \"Paid\" total is now also broken out as Payment Requisition / Salary / Rent / Instalment (matching how Salary and Rent & EMI-generated requisitions are already tagged internally), plus a separate Card expense total (every Cash & Card module Spend this month, cash-in-hand included) — so the app's numbers can be checked line by line against a sheet that already keeps these apart. The exported statement's Summary tab gets the same breakdown, and Payments Made gets a Statement Group column.",
+  ]},
   { v:"6.27", date:"2026-09-11", title:"Rent & EMI sync, a fixed Counts-As bug, and one-tap overdue confirmation", items:[
     "Fixed: an EMI/instalment row could land under \"Other\" instead of \"Instalment\" on import — this happened when the sheet's Type/Name text had no recognisable keyword (e.g. a lender name like \"Bajaj Finserv\" with no \"loan\"/\"EMI\"/\"financ\" in it). Group detection now checks the app's own known Type values first (exact, can't miss), and only falls back to guessing for a genuinely custom Type. A related bug was also fixed: Type was being defaulted before the group was guessed, so the guess sometimes ran against a placeholder instead of your sheet's real (blank) value. This also fixed the same payee being auto-created as an Owner ledger instead of a Financier when an EMI was miscategorised this way.",
     "New: Rent_and_EMI_Entry_Template.xlsx — a cleaner entry template with \"Counts As\" locked to a dropdown (Rent / Instalment / Other), so there's nothing left to guess. Includes a Read Me tab and one example row of each type. The in-app \"Import\" template for Rent & EMI also now shows one example of each Counts As value instead of only Rent.",
@@ -1656,6 +1662,90 @@ async function driveReadFileById(fileId, token, tabHint, resourceKey, raw){
   const rows = XLSX.utils.sheet_to_json(ws, { defval: "", raw: !!raw });
   return { ok: true, sheet: sheetName, rows, fileName: meta.name, modifiedTime: meta.modifiedTime };
 }
+
+// v6.28: "Master write-back" — reads the whole workbook object (not the
+// flattened rows/values driveReadFileById returns above) so that writing a
+// single Payment Date back later leaves every other cell, tab, formula and
+// style exactly as SheetJS round-trips it. The drive.file scope this app
+// uses everywhere only ever allows a full-file replace (there is no
+// cell-level write available without switching to the separate, broader-
+// permission Google Sheets API) — this is the same constraint documented
+// on driveSyncNow's own ERP-Data.json backup above, just applied to the
+// user's own Master file instead of the app's backup file. See the
+// "Master write-back" section of the project doc for the full reasoning
+// and the trade-offs the user chose when this was built.
+async function driveReadWorkbookForWrite(fileId, token, tabHint, resourceKey){
+  let metaRes = await driveApiFetch(
+    `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,trashed,modifiedTime,mimeType,resourceKey,shortcutDetails&supportsAllDrives=true`,
+    token, { headers: resourceKeyHeader(fileId, resourceKey) }
+  );
+  let meta = await metaRes.json();
+  if (meta.mimeType === GOOGLE_SHORTCUT_MIME && meta.shortcutDetails && meta.shortcutDetails.targetId) {
+    const targetId = meta.shortcutDetails.targetId;
+    const targetKey = meta.shortcutDetails.targetResourceKey || resourceKey;
+    metaRes = await driveApiFetch(
+      `https://www.googleapis.com/drive/v3/files/${targetId}?fields=id,name,trashed,modifiedTime,mimeType,resourceKey&supportsAllDrives=true`,
+      token, { headers: resourceKeyHeader(targetId, targetKey) }
+    );
+    meta = await metaRes.json();
+    fileId = targetId;
+    resourceKey = targetKey;
+  }
+  if (meta.trashed) {
+    throw new Error(`"${meta.name || "This file"}" has been deleted (moved to Trash) in Google Drive — edit this source and choose the file again.`);
+  }
+  const isGoogleSheet = meta.mimeType === GOOGLE_SHEET_MIME;
+  if (!isGoogleSheet && String(meta.mimeType || "").indexOf("application/vnd.google-apps.") === 0) {
+    throw new Error(`"${meta.name}" is a Google file that isn't a spreadsheet — pick a Google Sheet or an Excel file instead.`);
+  }
+  const fileRes = await driveApiFetch(
+    isGoogleSheet
+      ? `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`
+      : `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`,
+    token, { headers: resourceKeyHeader(fileId, resourceKey) }
+  );
+  const buf = await fileRes.arrayBuffer();
+  let wb;
+  try {
+    wb = XLSX.read(buf, { type: "array", cellDates: false, cellStyles: true });
+  } catch (e) {
+    throw new Error(`"${meta.name}" could not be read back for writing — try Sync now first to confirm the file is still reachable.`);
+  }
+  if (!wb.SheetNames.length) throw new Error(`"${meta.name}" has no sheets.`);
+  const wantedTab = String(tabHint || "").trim().toLowerCase();
+  let sheetName = wantedTab && wb.SheetNames.find(n => n.toLowerCase() === wantedTab);
+  if (!sheetName && wantedTab) sheetName = wb.SheetNames.find(n => n.toLowerCase().indexOf(wantedTab) >= 0);
+  if (!sheetName && wantedTab) throw new Error(`"${meta.name}" has no tab named "${tabHint}" — found: ${wb.SheetNames.join(", ")}.`);
+  if (!sheetName) sheetName = wb.SheetNames.find(n => n.toLowerCase() !== "read me") || wb.SheetNames[0];
+  return { wb, sheetName, fileId, resourceKey, fileName: meta.name, isGoogleSheet };
+}
+
+// Writes a workbook object back to the same Drive file id. For an uploaded
+// .xlsx this is a plain media PATCH, same shape as the ERP-Data.json backup
+// upload above. For a live Google Sheet, Drive only converts the uploaded
+// bytes into the Sheet's own content when the request is a multipart
+// upload carrying metadata that restates the target mimeType — a bare
+// media-only PATCH does not reliably trigger that conversion — so that form
+// is used whenever the source file is a native Google Sheet.
+async function driveWriteWorkbookBack(fileId, token, resourceKey, wb, isGoogleSheet){
+  const out = XLSX.write(wb, { type: "array", bookType: "xlsx" });
+  const blob = new Blob([out], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  if (isGoogleSheet) {
+    const form = new FormData();
+    form.append("metadata", new Blob([JSON.stringify({ mimeType: GOOGLE_SHEET_MIME })], { type: "application/json" }));
+    form.append("file", blob);
+    await driveApiFetch(
+      `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart&supportsAllDrives=true`,
+      token, { method: "PATCH", headers: resourceKeyHeader(fileId, resourceKey), body: form }
+    );
+  } else {
+    await driveApiFetch(
+      `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media&supportsAllDrives=true`,
+      token, { method: "PATCH", headers: resourceKeyHeader(fileId, resourceKey), body: blob }
+    );
+  }
+}
+
 function payloadCounts(d){
   const c = d.counts || {};
   return {
@@ -3113,6 +3203,168 @@ function ERPApp(){
     markDirty();
   }, [showToast, markDirty]);
 
+  // --- v6.28: "Master write-back" --------------------------------------
+  // Pushes a requisition's Payment Date (and Payment Status, where that
+  // column exists) into whichever Sync-from-Google-Sheets source(s) of
+  // kind "requisitions" have been marked "Push payments here when marked
+  // Paid" in the source editor — see SheetSyncTab. Deliberately narrow,
+  // matching what was asked for:
+  //   - only ever fires for a plain requisition (never a Salary/Payroll
+  //     one, never a Rent & EMI-generated one — neither of those comes
+  //     from Master/Payment to be done in the first place, so pushing
+  //     them there would just create nonsense rows);
+  //   - only ever writes the payment fields into a row matched by the
+  //     same identity the read side already uses (see masterRowKey) —
+  //     nothing else already in Master is ever touched;
+  //   - is always best-effort — a Drive error here is shown as a toast
+  //     but never blocks or undoes the app's own "mark Paid", which has
+  //     already happened locally by the time this runs.
+  const [masterPushBusy, setMasterPushBusy] = useState(false);
+  const isMasterEligible = useCallback((r) => (
+    !!r && r.paymentStatus === "Paid" && !r.recurringId && r.category !== "Salary"
+  ), []);
+
+  const pushPaymentsToMaster = useCallback(async (candidates, opts) => {
+    const targets = (sheets||[]).filter(sh => sh.kind === "requisitions" && sh.pushPaymentDates && sh.fileId);
+    if (!targets.length) {
+      if (opts && opts.manual) showToast("No source is set to receive payments — edit your Master source and turn that on first", "error");
+      return;
+    }
+    if (!candidates || !candidates.length) return;
+    if (!driveConnected) {
+      if (opts && opts.manual) showToast("Connect Google Drive first", "error");
+      return;
+    }
+    setMasterPushBusy(true);
+    const patches = {};
+    let updatedCount = 0, addedCount = 0, failedCount = 0;
+    try {
+      const token = await driveGetFreshToken(false);
+      for (const sh of targets) {
+        let loaded;
+        try {
+          loaded = await driveReadWorkbookForWrite(sh.fileId, token, sh.tab, sh.resourceKey);
+        } catch (e) {
+          candidates.forEach(r => { patches[r.id] = { masterPushStatus:"failed", masterPushError: e.message || "could not open the file" }; });
+          failedCount += candidates.length;
+          showToast(`Couldn't open "${sh.name}" to update it — ${e.message || "try Sync now to check it's still reachable"}`, "error");
+          continue;
+        }
+        const ws = loaded.wb.Sheets[loaded.sheetName];
+        const attempted = [];
+        candidates.forEach(r => {
+          const result = writePaymentIntoSheet(ws, r);
+          if (result.ok) attempted.push({ r, action: result.action });
+          else { patches[r.id] = { masterPushStatus:"failed", masterPushError: result.reason }; failedCount++; }
+        });
+        if (!attempted.length) continue;
+        try {
+          await driveWriteWorkbookBack(sh.fileId, token, sh.resourceKey, loaded.wb, loaded.isGoogleSheet);
+          attempted.forEach(({ r, action }) => {
+            patches[r.id] = { masterPushStatus:"pushed", masterFileId: sh.fileId, masterSourceId: sh.id, masterTab: loaded.sheetName };
+            if (action === "added") addedCount++; else updatedCount++;
+          });
+        } catch (e) {
+          attempted.forEach(({ r }) => { patches[r.id] = { masterPushStatus:"failed", masterPushError: e.message || "could not save to Drive" }; });
+          failedCount += attempted.length;
+          showToast(`Couldn't save the update to "${sh.name}" — ${e.message || "try again"}`, "error");
+        }
+      }
+    } catch (e) {
+      showToast("Couldn't reach Google Drive to update Master — try again", "error");
+      setMasterPushBusy(false);
+      return;
+    }
+    setMasterPushBusy(false);
+    if (Object.keys(patches).length) setReqs(reqs.map(r => patches[r.id] ? { ...r, ...patches[r.id] } : r));
+    if (updatedCount || addedCount) {
+      showToast(`Master updated — ${[updatedCount && `${updatedCount} payment date(s) updated`, addedCount && `${addedCount} row(s) added`].filter(Boolean).join(", ")}`);
+    } else if (failedCount && opts && opts.manual) {
+      showToast("Nothing could be pushed to Master — check the source's status below for why", "error");
+    }
+  }, [sheets, driveConnected, driveGetFreshToken, reqs, setReqs, showToast]);
+
+  // The reverse — used when a requisition the app had already pushed is
+  // reverted out of Paid (see RequisitionDetail's setStatus), so a mistake
+  // caught in the app is also undone in Master, not just here.
+  const clearPaymentsFromMaster = useCallback(async (candidates) => {
+    const withTarget = (candidates||[]).filter(r => r.masterFileId && r.masterSourceId);
+    if (!withTarget.length) return;
+    if (!driveConnected) return; // best-effort only — the app's own revert already happened
+    setMasterPushBusy(true);
+    const patches = {};
+    try {
+      const token = await driveGetFreshToken(false);
+      const bySource = {};
+      withTarget.forEach(r => { (bySource[r.masterSourceId] = bySource[r.masterSourceId] || []).push(r); });
+      for (const sourceId of Object.keys(bySource)) {
+        const sh = (sheets||[]).find(x => x.id === sourceId);
+        const rows = bySource[sourceId];
+        if (!sh || !sh.fileId) { rows.forEach(r => { patches[r.id] = { masterPushStatus:"", masterFileId:"", masterSourceId:"", masterTab:"" }; }); continue; }
+        let loaded;
+        try {
+          loaded = await driveReadWorkbookForWrite(sh.fileId, token, sh.tab, sh.resourceKey);
+        } catch (e) {
+          showToast(`Couldn't reach "${sh.name}" to clear it there — reverted here, but Master still shows this Paid until you retry`, "error");
+          continue;
+        }
+        const ws = loaded.wb.Sheets[loaded.sheetName];
+        let changed = false;
+        rows.forEach(r => {
+          const result = clearPaymentInSheet(ws, r);
+          if (result.ok) { changed = true; patches[r.id] = { masterPushStatus:"", masterFileId:"", masterSourceId:"", masterTab:"" }; }
+        });
+        if (changed) {
+          try {
+            await driveWriteWorkbookBack(sh.fileId, token, sh.resourceKey, loaded.wb, loaded.isGoogleSheet);
+          } catch (e) {
+            rows.forEach(r => { delete patches[r.id]; });
+            showToast(`Couldn't save the clear to "${sh.name}" — Master may still show this as Paid`, "error");
+          }
+        }
+      }
+    } catch (e) {
+      showToast("Couldn't reach Google Drive to update Master", "error");
+    } finally {
+      setMasterPushBusy(false);
+    }
+    if (Object.keys(patches).length) setReqs(reqs.map(r => patches[r.id] ? { ...r, ...patches[r.id] } : r));
+  }, [sheets, driveConnected, driveGetFreshToken, reqs, setReqs, showToast]);
+
+  // Backfill for payments already marked Paid before this feature existed
+  // (or from before a Master push source was set up) — reachable from a
+  // button in SheetSyncTab next to the source.
+  const pushAllEligiblePaidToMaster = useCallback(() => {
+    const eligible = (reqs||[]).filter(r => isMasterEligible(r) && r.masterPushStatus !== "pushed");
+    if (!eligible.length) { showToast("Nothing to push — every eligible paid requisition already matches Master"); return; }
+    pushPaymentsToMaster(eligible, { manual:true });
+  }, [reqs, isMasterEligible, pushPaymentsToMaster, showToast]);
+
+  // Detects a requisition that just became Paid (push it to Master) or
+  // just came back out of Paid having previously been pushed (clear it
+  // from Master) by diffing reqs against its own previous value — this
+  // runs regardless of which screen made the change (Requisition Detail,
+  // the To Pay screen's bulk "Register Payment", a sheet sync marking a
+  // Pending row Paid, ...), so nothing needs to call the push directly.
+  const prevReqsForMasterRef = React.useRef(reqs);
+  useEffect(() => {
+    const prev = prevReqsForMasterRef.current;
+    prevReqsForMasterRef.current = reqs;
+    if (!driveConnected) return;
+    const hasPushTarget = (sheets||[]).some(sh => sh.kind === "requisitions" && sh.pushPaymentDates && sh.fileId);
+    if (!hasPushTarget) return;
+    const prevById = new Map(prev.map(r => [r.id, r]));
+    const justPaid = [], justReverted = [];
+    reqs.forEach(r => {
+      const before = prevById.get(r.id);
+      const wasPaid = !!before && before.paymentStatus === "Paid";
+      if (r.paymentStatus === "Paid" && !wasPaid && isMasterEligible(r) && r.masterPushStatus !== "pushed") justPaid.push(r);
+      if (wasPaid && r.paymentStatus !== "Paid" && r.masterFileId) justReverted.push(r);
+    });
+    if (justPaid.length) pushPaymentsToMaster(justPaid, { manual:false });
+    if (justReverted.length) clearPaymentsFromMaster(justReverted);
+  }, [reqs, driveConnected, sheets, isMasterEligible, pushPaymentsToMaster, clearPaymentsFromMaster]);
+
   // --- Sync from Google Sheets: shared logic ---
   // Lifted up from SheetSyncTab (rather than kept as local state/functions
   // there) specifically so an automatic check can run the exact same code
@@ -4202,9 +4454,9 @@ function ERPApp(){
         {tab==="employees" && <EmployeesTab vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport}
           sheets={sheets} syncSheets={syncSheets} sheetSyncBusy={sheetSyncBusy} />}
         {tab==="payroll" && <PayrollTab vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} attendance={attendance} setAttendance={setAttendance} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
-        {tab==="statement" && <MonthlyStatementTab reqs={reqs} expenses={expenses} cashTxns={cashTxns} cards={cards} showToast={showToast} goTo={navigate} />}
+        {tab==="statement" && <MonthlyStatementTab reqs={reqs} expenses={expenses} cashTxns={cashTxns} cards={cards} recurring={recurring} showToast={showToast} goTo={navigate} />}
         {tab==="sitesummary" && <SiteSummaryTab reqs={reqs} expenses={expenses} cashTxns={cashTxns} cards={cards} diesel={diesel} utilities={utilities} machines={machines} vendors={vendors} showToast={showToast} goTo={navigate} />}
-        {tab==="sheets" && <SheetSyncTab sheets={sheets} setSheets={setSheets} reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} expenses={expenses} setExpenses={setExpenses} recurring={recurring} setRecurring={setRecurring} sync={syncProps} busy={sheetSyncBusy} previewQueue={sheetPreviewQueue} syncSheets={syncSheets} testConnection={testConnection} applyPreview={applyPreview} dismissPreview={()=>setSheetPreviewQueue(q=>q.slice(1))} />}
+        {tab==="sheets" && <SheetSyncTab sheets={sheets} setSheets={setSheets} reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} expenses={expenses} setExpenses={setExpenses} recurring={recurring} setRecurring={setRecurring} sync={syncProps} busy={sheetSyncBusy} previewQueue={sheetPreviewQueue} syncSheets={syncSheets} testConnection={testConnection} applyPreview={applyPreview} dismissPreview={()=>setSheetPreviewQueue(q=>q.slice(1))} pushAllEligiblePaidToMaster={pushAllEligiblePaidToMaster} masterPushBusy={masterPushBusy} isMasterEligible={isMasterEligible} />}
         {tab==="expenses" && <ExpensesTab expenses={expenses} setExpenses={setExpenses} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
         {tab==="receivables" && <ReceivablesTab reqs={reqs} setReqs={setReqs} showToast={showToast} goTo={navigate} />}
         {tab==="payments" && <PaymentRegisterTab reqs={reqs} setReqs={setReqs} vendors={vendors} expenses={expenses} setExpenses={setExpenses} cashTxns={cashTxns} cards={cards} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} />}
@@ -10937,7 +11189,30 @@ function TotalRow({ label, value, color, bold }){
   );
 }
 
-function MonthlyStatementTab({ reqs, expenses, cashTxns, cards, showToast, goTo }){
+function MonthlyStatementTab({ reqs, expenses, cashTxns, cards, recurring, showToast, goTo }){
+  const recurringById = useMemo(() => new Map((recurring||[]).map(r=>[r.id, r])), [recurring]);
+
+  // v6.28: which of the four ways-of-paying a settled requisition counts
+  // toward on this page — Payment Requisition / Salary / Rent / Instalment
+  // — since the app's own single "Paid" total blends all of them together
+  // while the user's own sheet tracks them separately. Salary is
+  // discriminated by category (how Payroll tags every requisition it
+  // generates — see PayrollTab.genRecord). Rent and Instalment are
+  // discriminated by looking up the parent Rent & EMI item's own Counts As
+  // (costGroupOf) via recurringId, falling back to reading the
+  // requisition's own saved Category text the same way for a recurring
+  // item since deleted. Anything else — including everything synced in
+  // from Payment to be done / Master — is an ordinary Payment Requisition.
+  function statementGroup(r){
+    if (r.category === "Salary") return "Salary";
+    if (r.recurringId) {
+      const parent = recurringById.get(r.recurringId);
+      const group = parent ? costGroupOf(parent) : inferGroup({ type:r.category, name:r.name });
+      return group === "Rent" ? "Rent" : "Instalment"; // "Other" (rare) counts as Instalment
+    }
+    return "Payment Requisition";
+  }
+
   const months = useMemo(() => {
     const set = new Set();
     reqs.forEach(r => { if (r.date) set.add(r.date.slice(0,7)); if (r.paymentDate) set.add(r.paymentDate.slice(0,7)); });
@@ -10960,6 +11235,21 @@ function MonthlyStatementTab({ reqs, expenses, cashTxns, cards, showToast, goTo 
   const cashSpend = useMemo(
     () => combinedSpending(reqs, cashTxns, month, "all", cards), [reqs, cashTxns, month, cards]);
 
+  // v6.28: the "Paid" total split the way the user's own sheet tracks it —
+  // see statementGroup above. Card expense is not a requisition category at
+  // all; it's every Cash & Card module Spend this month (cash-in-hand
+  // included, per the September breakdown ask), so it reuses cashSpend.cash
+  // rather than filtering `settled`.
+  const paymentReqSettled = useMemo(()=>settled.filter(r=>statementGroup(r)==="Payment Requisition"), [settled, recurringById]);
+  const salarySettled = useMemo(()=>settled.filter(r=>statementGroup(r)==="Salary"), [settled, recurringById]);
+  const rentSettled = useMemo(()=>settled.filter(r=>statementGroup(r)==="Rent"), [settled, recurringById]);
+  const instalmentSettled = useMemo(()=>settled.filter(r=>statementGroup(r)==="Instalment"), [settled, recurringById]);
+  const paymentReqTotal = paymentReqSettled.reduce((s,r)=>s+Number(r.paidAmount || r.amount || 0),0);
+  const salaryTotal = salarySettled.reduce((s,r)=>s+Number(r.paidAmount || r.amount || 0),0);
+  const rentTotal = rentSettled.reduce((s,r)=>s+Number(r.paidAmount || r.amount || 0),0);
+  const instalmentTotal = instalmentSettled.reduce((s,r)=>s+Number(r.paidAmount || r.amount || 0),0);
+  const cardExpenseTotal = cashSpend.cash;
+
   const bySite = useMemo(()=>groupSum(settled, r=>r.site), [settled]);
   const byCategory = useMemo(()=>groupSum(settled, r=>r.category), [settled]);
   const byMode = useMemo(()=>groupSum(settled, r=>r.paymentMode||"Not recorded"), [settled]);
@@ -10974,6 +11264,11 @@ function MonthlyStatementTab({ reqs, expenses, cashTxns, cards, showToast, goTo 
       { Item:"Value raised", Value: raisedTotal },
       { Item:"Payments made", Value: settled.length },
       { Item:"Value paid", Value: paidTotal },
+      { Item:"  — Payment Requisition", Value: paymentReqTotal },
+      { Item:"  — Salary", Value: salaryTotal },
+      { Item:"  — Rent", Value: rentTotal },
+      { Item:"  — Instalment", Value: instalmentTotal },
+      { Item:"Card expense (Cash & Card, all of it — not a Requisitions total)", Value: cardExpenseTotal },
       { Item:"Cash spent at sites", Value: cashSpend.cash },
       { Item:"All money out (bank + cash, refills counted once)", Value: cashSpend.total },
       { Item:"Still outstanding from this month", Value: outstanding },
@@ -10989,9 +11284,10 @@ function MonthlyStatementTab({ reqs, expenses, cashTxns, cards, showToast, goTo 
       "Sub-Category":r.subCategory, Name:r.name, "Requisition Amount":Number(r.amount)||0,
       "Amount Paid":Number(r.paidAmount || r.amount || 0), "Payment Mode":r.paymentMode||"",
       "A/c No.":r.accNo||"", "IFSC Code":r.ifsc||"", Description:r.description||"",
+      "Statement Group": statementGroup(r),
     }));
     const pws = XLSX.utils.json_to_sheet(payRows);
-    pws["!cols"] = [{wch:16},{wch:14},{wch:16},{wch:14},{wch:14},{wch:22},{wch:16},{wch:14},{wch:14},{wch:18},{wch:14},{wch:28}];
+    pws["!cols"] = [{wch:16},{wch:14},{wch:16},{wch:14},{wch:14},{wch:22},{wch:16},{wch:14},{wch:14},{wch:18},{wch:14},{wch:28},{wch:18}];
     XLSX.utils.book_append_sheet(wb, pws, "Payments Made");
 
     const raisedRows = raised.map(r => ({
@@ -11061,6 +11357,22 @@ function MonthlyStatementTab({ reqs, expenses, cashTxns, cards, showToast, goTo 
           register is counted once, not twice.
           Paid is counted on the payment date, raised on the requisition date, so a requisition
           from last month paid this month appears under Paid here.
+        </div>
+      </div>
+
+      <div style={{ background:SURFACE, borderRadius:16, padding:20, marginBottom:14, border:`1px solid ${SAND}` }}>
+        <SectionLabel>Payments by category</SectionLabel>
+        <div style={{ fontSize:12, color:MUTED, marginBottom:10, lineHeight:1.6 }}>
+          The Paid total above, split the way your own sheet tracks it — so the two can be checked
+          line by line. The first four add up to Paid; Card expense is separate (it comes from
+          Cash & Card, not from Requisitions).
+        </div>
+        <TotalRow label={`Payment Requisition (${paymentReqSettled.length})`} value={paymentReqTotal} />
+        <TotalRow label={`Salary (${salarySettled.length})`} value={salaryTotal} />
+        <TotalRow label={`Rent (${rentSettled.length})`} value={rentTotal} />
+        <TotalRow label={`Instalment (${instalmentSettled.length})`} value={instalmentTotal} />
+        <div style={{ marginTop:10, paddingTop:10, borderTop:`1px solid ${SAND}` }}>
+          <TotalRow label={`Card expense (${cashSpend.cashCount})`} value={cardExpenseTotal} color={AMBER} />
         </div>
       </div>
 
@@ -11416,7 +11728,8 @@ function SiteSummaryTab({ reqs, expenses, cashTxns, cards, diesel, utilities, ma
 const FREQUENCIES = ["Monthly","Quarterly","Half-Yearly","Yearly","One-time"];
 
 function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, lists, setLists, showToast, goTo,
-  expenses, setExpenses, recurring, setRecurring, sync, busy, previewQueue, syncSheets, testConnection, applyPreview, dismissPreview }){
+  expenses, setExpenses, recurring, setRecurring, sync, busy, previewQueue, syncSheets, testConnection, applyPreview, dismissPreview,
+  pushAllEligiblePaidToMaster, masterPushBusy, isMasterEligible }){
   const { driveConnected, connectDrive, driveChooseSourceFile,
     driveImportFolderId, driveImportFolderName, driveChooseImportFolder, clearDriveImportFolder } = sync;
   const [editing, setEditing] = useState(null);
@@ -11667,7 +11980,7 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
               onChange={e=>setEditing({...editing, tab:e.target.value})} placeholder="e.g. Office Master" />
           </Field>
           <Field label="Syncs into" hint={{
-              requisitions: "Rows land in Requisitions — use this both for Payment to be done and for Master. A filled-in Payment Date sends that row straight to the Payment Register. Re-syncing later, after a row that first came in Pending gets its Payment Date filled in, now updates that same requisition to Paid instead of skipping it or adding it twice — so it's safe to add both Payment to be done and Master as separate sources and sync either or both, in any order.",
+              requisitions: "Rows land in Requisitions — use this both for Payment to be done and for Master. A filled-in Payment Date sends that row straight to the Payment Register. Re-syncing later, after a row that first came in Pending gets its Payment Date filled in, now updates that same requisition to Paid instead of skipping it or adding it twice — so it's safe to add both Payment to be done and Master as separate sources and sync either or both, in any order. \"Push payments here when marked Paid\" below turns this into a write-back target as well — see that field for what it does.",
               expenses: "Rows land in Expenses — use this for a sheet like Office Master (Date, Expense Type, Paid By, Amount, ...).",
               cash: "Rows land in Cash & Card (Date, Card, Type or Debit/Credit, Amount, Description, ...). A card named in the sheet that doesn't exist yet is created automatically. Safe to re-sync as long as new entries are added at the bottom of the sheet, not inserted in the middle.",
               diesel: "Rows land in Diesel & Machinery, in the same one-sheet-with-a-Type-column format as Import from Excel (Date, Type, Site, Machine, Litres, ...). A machine named in the sheet that doesn't exist yet is created automatically.",
@@ -11692,6 +12005,21 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
               <option value="recurring">Rent & EMI</option>
             </select>
           </Field>
+
+          {(editing.kind || "requisitions") === "requisitions" && (
+            <Field label="Push payments here when marked Paid"
+              hint="Turn this on for your Master source only (leave it off for Payment to be done) — it's how request #1 in the September asks gets done. The moment a plain requisition (not Salary, not Rent & EMI) is marked Paid in the app — however it got there, including from a sync — the app writes that Payment Date (and Payment Status, if this sheet has that column) into the matching row here. No match found → a new row is added at the bottom instead. Everything else in this file — every other row, tab, formula and format — is left alone. This always rewrites the whole file (the only way Drive allows here), so avoid editing this exact sheet in Drive at the same moment a push happens — whichever save lands last wins. Since this hasn't been exercised against a live Google account from where it was built, keep a backup copy of Master until you've watched a few pushes land correctly.">
+              <button type="button" onClick={()=>setEditing({...editing, pushPaymentDates: !editing.pushPaymentDates})}
+                style={{ width:"100%", textAlign:"left", padding:"12px 14px", borderRadius:12, display:"flex", alignItems:"center", gap:10,
+                  background: editing.pushPaymentDates ? "#E6F7F2" : SAND, border:`1.5px solid ${editing.pushPaymentDates ? GREEN : SAND}`, cursor:"pointer" }}>
+                <Icon name={editing.pushPaymentDates ? "check" : "download"} size={16} color={editing.pushPaymentDates ? GREEN : INK} />
+                <span style={{ fontSize:14, fontWeight:600, color:INK, flex:1 }}>
+                  {editing.pushPaymentDates ? "On — payments push here" : "Off — read-only, like before"}
+                </span>
+              </button>
+            </Field>
+          )}
+
           <BigButton icon="check" label="Save Source" onClick={()=>saveSheet(editing)} tone="green" full
             disabled={!editing.name.trim() || !!sourceProblem(editing)} />
           {(!editing.name.trim() || !!sourceProblem(editing)) && (
@@ -11838,6 +12166,11 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
                     <div style={{ fontSize:12, marginTop:2, color: sh.fileId ? MUTED : RED, fontWeight: sh.fileId ? 400 : 700, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
                       {sh.fileId ? `File: ${sh.fileName || "chosen file"}` : "No file chosen yet — edit this source to pick one"}
                     </div>
+                    {sh.kind === "requisitions" && sh.pushPaymentDates && (
+                      <div style={{ fontSize:12, marginTop:4, color:GREEN, fontWeight:600 }}>
+                        ⇄ Payments push here when marked Paid
+                      </div>
+                    )}
                   </div>
                   <div style={{ display:"flex", gap:8, flexShrink:0 }}>
                     <button onClick={()=>setEditing(sh)} style={{ padding:8, borderRadius:12, background:SAND, border:"none", cursor:"pointer" }}>
@@ -11907,6 +12240,18 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
                     Sync now
                   </button>
                 </div>
+
+                {sh.kind === "requisitions" && sh.pushPaymentDates && (() => {
+                  const pendingCount = (reqs||[]).filter(r => isMasterEligible && isMasterEligible(r) && r.masterPushStatus !== "pushed").length;
+                  return (
+                    <button onClick={pushAllEligiblePaidToMaster} disabled={!!masterPushBusy}
+                      style={{ width:"100%", marginTop:8, padding:"11px 0", borderRadius:12, fontSize:14, fontWeight:700,
+                        background: masterPushBusy ? SAND : "#EEF0FE", color: masterPushBusy ? INK : "#3F6CA8",
+                        border:`1.5px solid ${masterPushBusy ? SAND : "#3F6CA8"}`, cursor: masterPushBusy ? "default":"pointer" }}>
+                      {masterPushBusy ? "Pushing…" : pendingCount > 0 ? `Push ${pendingCount} paid requisition(s) to Master now` : "Push paid requisitions to Master now"}
+                    </button>
+                  );
+                })()}
               </div>
             );
           })}
@@ -12885,7 +13230,21 @@ function RequisitionDetail({ req, vendors, reqs, setReqs, expenses, setExpenses,
 
   function setStatus(newStatus){
     if (newStatus === "Paid") { setAskPayment(true); return; }
-    setReqs(reqs.map(r => r.id === req.id ? { ...r, paymentStatus: newStatus } : r));
+    setReqs(reqs.map(r => {
+      if (r.id !== req.id) return r;
+      const next = { ...r, paymentStatus: newStatus };
+      // v6.28: reverting out of Paid clears the payment-specific fields so
+      // this behaves like a genuine pending item again — ready to correct
+      // and re-confirm — instead of quietly carrying a stale date/amount
+      // from a mistaken payment. If this requisition had already been
+      // pushed to Master, ERPApp's reqs-diff effect notices paymentDate
+      // disappearing here (together with masterFileId still being set)
+      // and clears that same cell in Master to match.
+      if (r.paymentStatus === "Paid" && newStatus !== "Paid") {
+        next.paymentDate = ""; next.paymentMode = ""; next.paidAmount = "";
+      }
+      return next;
+    }));
     showToast(`Marked ${newStatus}`);
   }
 
@@ -12922,6 +13281,14 @@ function RequisitionDetail({ req, vendors, reqs, setReqs, expenses, setExpenses,
           {req.exported && <span style={{ fontSize:12, fontWeight:600, padding:"5px 12px", borderRadius:999, background:SAND, color:INK }}>Exported</span>}
           {isInRegister(req) && <span style={{ fontSize:12, fontWeight:600, padding:"5px 12px", borderRadius:999, background:"#E6F7F2", color:GREEN }}>In Payment Register</span>}
           {req.isReimbursement && <span style={{ fontSize:12, fontWeight:600, padding:"5px 12px", borderRadius:999, background:"#EEF0FE", color:AMBER }}>Reimbursement</span>}
+          {req.masterPushStatus === "pushed" && (
+            <span style={{ fontSize:12, fontWeight:600, padding:"5px 12px", borderRadius:999, background:"#E6F7F2", color:GREEN }}>✓ Pushed to Master</span>
+          )}
+          {req.masterPushStatus === "failed" && (
+            <span title={req.masterPushError || ""} style={{ fontSize:12, fontWeight:600, padding:"5px 12px", borderRadius:999, background:"#FDECEE", color:RED }}>
+              ⚠ Master push failed
+            </span>
+          )}
         </div>
       </div>
 
@@ -15295,6 +15662,112 @@ function importDupKey(r){
           String(r.description||"").trim().toLowerCase(),
           String(r.refNo||"").trim().toLowerCase()].join("|");
 }
+
+// v6.28: "Master write-back" — identity key for matching a requisition
+// against a row in the Master / Payment-to-be-done sheet when pushing a
+// payment date back. Deliberately the same fields, normalised the same
+// way, as the local sheetDupKey used inside the live-sync closure (so a
+// row the read side would recognise is the same row the write side finds)
+// — kept as its own module-level copy since that one is defined inline
+// there; if that logic ever changes, change this to match.
+function masterRowKey(r){
+  return [dupKey(r), String(r.description||"").trim().toLowerCase()].join("|");
+}
+
+// Scans a worksheet (already loaded whole via driveReadWorkbookForWrite)
+// for the row matching a requisition's identity. Returns the header row,
+// the REQ_TEMPLATE column map (header text per field, "" where that column
+// doesn't exist in this sheet), the full grid, and the 0-based data-row
+// index within it (-1 if no match).
+function findMasterRowMatch(ws, targetReq){
+  const aoa = XLSX.utils.sheet_to_json(ws, { header:1, defval:"", raw:false });
+  if (!aoa.length) return { aoa, headerRow:[], colMap:{}, rowIdx:-1 };
+  const headerRow = aoa[0].map(h => String(h==null ? "" : h).trim());
+  const colMap = autoMapHeaders(headerRow, REQ_TEMPLATE);
+  const targetKey = masterRowKey(targetReq);
+  for (let i = 1; i < aoa.length; i++) {
+    const rowObj = {};
+    headerRow.forEach((h, ci) => { if (h) rowObj[h] = aoa[i][ci]; });
+    const { out } = mapRowGeneric(rowObj, REQ_TEMPLATE, colMap);
+    settleRequisitionDates(out);
+    if (masterRowKey(out) === targetKey) return { aoa, headerRow, colMap, rowIdx:i };
+  }
+  return { aoa, headerRow, colMap, rowIdx:-1 };
+}
+
+// Writes one requisition's Payment Date (and Payment Status, if that
+// column exists in this sheet) into the matching row of a Master
+// worksheet, or appends a brand-new row when no match is found — per the
+// "add a new row if none exists" choice made for this feature. Mutates
+// `ws` in place; touches nothing else in the sheet, and nothing in any
+// other tab (those live untouched on the same `wb` object this `ws` came
+// from). Returns what happened so the caller can summarise it.
+function writePaymentIntoSheet(ws, req){
+  const { aoa, headerRow, colMap, rowIdx } = findMasterRowMatch(ws, req);
+  if (!headerRow.length) return { ok:false, reason:"the sheet is empty" };
+  if (!colMap.paymentDate) return { ok:false, reason:"no Payment Date column found in this sheet" };
+  const dateCol = headerRow.indexOf(colMap.paymentDate);
+  const statusCol = colMap.paymentStatus ? headerRow.indexOf(colMap.paymentStatus) : -1;
+  // Amount is written as a real numeric cell (t:"n"), not text — a text
+  // value in that column would silently drop out of any SUM/total formula
+  // already in the user's sheet. Every other field here is free-form text
+  // in a typical requisition sheet, so those stay t:"s".
+  const setCell = (r, c, v, numeric) => {
+    if (c < 0 || v === "" || v === undefined || v === null) return;
+    ws[XLSX.utils.encode_cell({ r, c })] = numeric ? { t:"n", v:Number(v) } : { t:"s", v:String(v) };
+  };
+  const extendRef = (rMax, cMax) => {
+    const cur = ws["!ref"] ? XLSX.utils.decode_range(ws["!ref"]) : { s:{r:0,c:0}, e:{r:0,c:0} };
+    cur.e.r = Math.max(cur.e.r, rMax);
+    cur.e.c = Math.max(cur.e.c, cMax);
+    ws["!ref"] = XLSX.utils.encode_range(cur);
+  };
+
+  if (rowIdx >= 0) {
+    setCell(rowIdx, dateCol, fmtDate(req.paymentDate));
+    if (statusCol >= 0) setCell(rowIdx, statusCol, "Paid");
+    return { ok:true, action:"updated" };
+  }
+
+  const newRowIdx = aoa.length;
+  const put = (key, val, numeric) => {
+    const header = colMap[key];
+    if (!header) return;
+    setCell(newRowIdx, headerRow.indexOf(header), val, numeric);
+  };
+  put("date", fmtDate(req.date));
+  put("site", req.site);
+  put("category", req.category);
+  put("subCategory", req.subCategory);
+  put("name", req.name);
+  put("amount", Number(req.amount||0) || "", true);
+  put("description", req.description);
+  put("paymentDate", fmtDate(req.paymentDate));
+  put("paymentStatus", "Paid");
+  put("paymentMode", req.paymentMode);
+  put("accNo", req.accNo);
+  put("ifsc", req.ifsc);
+  extendRef(newRowIdx, headerRow.length - 1);
+  return { ok:true, action:"added" };
+}
+
+// The reverse of writePaymentIntoSheet — clears a Payment Date (and, if
+// present, sets Payment Status back to Pending) for a requisition the app
+// itself had previously pushed, so reverting a mistaken "Paid" in the app
+// also undoes what was pushed to Master. Only ever called for a
+// requisition carrying masterFileId — proof the app, not the user by
+// hand, wrote that cell — see the reqs-diff effect in ERPApp.
+function clearPaymentInSheet(ws, req){
+  const { headerRow, colMap, rowIdx } = findMasterRowMatch(ws, req);
+  if (rowIdx < 0) return { ok:false, reason:"that row is no longer in this sheet" };
+  if (!colMap.paymentDate) return { ok:false, reason:"no Payment Date column found in this sheet" };
+  const dateCol = headerRow.indexOf(colMap.paymentDate);
+  const statusCol = colMap.paymentStatus ? headerRow.indexOf(colMap.paymentStatus) : -1;
+  if (dateCol >= 0) delete ws[XLSX.utils.encode_cell({ r:rowIdx, c:dateCol })];
+  if (statusCol >= 0) ws[XLSX.utils.encode_cell({ r:rowIdx, c:statusCol })] = { t:"s", v:"Pending" };
+  return { ok:true };
+}
+
 function normKey(k){ return String(k||"").toLowerCase().replace(/[^a-z0-9]/g,""); }
 function pickCol(row, candidates){
   const keys = Object.keys(row);
