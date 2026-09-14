@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.29";
+const APP_VERSION = "6.30";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -80,6 +80,11 @@ const GOOGLE_DRIVE_APP_ID = "60621934527";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.30", date:"2026-09-14", title:"Fixed: pushing a payment to Master dropped its Ref No./PR Number", items:[
+    "Fixed: since v6.28, pushing a paid requisition to Master (\"Push payments here when marked Paid\") never wrote the app's own auto-generated Ref No. into Master's Ref No./PR Number column — a brand-new row always arrived with that cell blank, and it stayed blank forever, forcing it to be typed in by hand every single time. It's now written automatically whenever a new row is added, matched to whatever that column is actually called in your sheet (works with \"Ref No.\", \"Ref. No.\", \"Ref No\", or \"Reference\" — matching already ignored punctuation and spacing, no header change needed).",
+    "Fixed: an existing Master row the app updates (flips to Paid, fills in the Payment Date) now also gets its Ref No./PR Number filled in automatically if that cell is currently blank — covers a row that landed in Master some other way, for instance through the \"Move paid rows to Master\" Apps Script menu item, which has no way to know the app's Ref No. and always leaves it empty. A cell that already has something in it — typed by hand or from an earlier push — is never touched or overwritten.",
+    "Net effect: once a Master push source is set up, no future row should ever need its Ref No./PR Number re-typed by hand again.",
+  ]},
   { v:"6.29", date:"2026-09-14", title:"Tick/untick rows before a Requisitions sync goes in", items:[
     "New: the \"Check before importing\" screen for a Requisitions sync source (Payment to be done / Master) now lets you tick or untick each row before you tap Import — same tap-to-toggle checkboxes, \"Tick all\"/\"Untick all\", and strike-through-when-unticked style already used on Import from Excel's own review screen. Everything starts ticked, exactly like today, so a normal sync where you want everything needs no extra taps — this only matters the moment you want to leave one row out.",
     "Covers both sections of a Requisitions sync preview: new rows about to be added, and existing Pending rows about to be flipped to Paid. A row left unticked is not saved at all — not added, not updated — and the Import button's count and label update live to match what's actually ticked. Unticking every row disables Import and shows \"Nothing ticked\", the same guard Import from Excel already has.",
@@ -15833,6 +15838,7 @@ function writePaymentIntoSheet(ws, req){
   if (!colMap.paymentDate) return { ok:false, reason:"no Payment Date column found in this sheet" };
   const dateCol = headerRow.indexOf(colMap.paymentDate);
   const statusCol = colMap.paymentStatus ? headerRow.indexOf(colMap.paymentStatus) : -1;
+  const refNoCol = colMap.refNo ? headerRow.indexOf(colMap.refNo) : -1;
   // Amount is written as a real numeric cell (t:"n"), not text — a text
   // value in that column would silently drop out of any SUM/total formula
   // already in the user's sheet. Every other field here is free-form text
@@ -15851,6 +15857,17 @@ function writePaymentIntoSheet(ws, req){
   if (rowIdx >= 0) {
     setCell(rowIdx, dateCol, fmtDate(req.paymentDate));
     if (statusCol >= 0) setCell(rowIdx, statusCol, "Paid");
+    // v6.30: backfill Ref No./PR Number on an EXISTING Master row, but only
+    // when that cell is still blank — e.g. a row the "Move paid rows to
+    // Master" Apps Script menu item added (it always leaves this blank,
+    // since it has no way to know the app's auto-generated Ref No.). Never
+    // overwrites a value already sitting there, including one someone
+    // typed in by hand — this is a fill-in-the-gap, not a takeover of a
+    // field the sheet may be tracking independently.
+    if (refNoCol >= 0 && req.refNo) {
+      const existingRefNo = String((aoa[rowIdx] && aoa[rowIdx][refNoCol]) || "").trim();
+      if (!existingRefNo) setCell(rowIdx, refNoCol, req.refNo);
+    }
     return { ok:true, action:"updated" };
   }
 
@@ -15860,6 +15877,13 @@ function writePaymentIntoSheet(ws, req){
     if (!header) return;
     setCell(newRowIdx, headerRow.indexOf(header), val, numeric);
   };
+  // v6.30: the app's own auto-generated Ref No. (what the field is called
+  // on a Requisition record) is written on a brand-new Master row too —
+  // this was missing since v6.28, which silently dropped it, leaving every
+  // new row's Ref No./PR Number column blank and forcing it to be re-typed
+  // by hand every time. See the matching backfill above for a row that
+  // already existed.
+  put("refNo", req.refNo);
   put("date", fmtDate(req.date));
   put("site", req.site);
   put("category", req.category);

@@ -579,6 +579,8 @@ function onOpen() {
     .createMenu("ERP Tools")
     .addItem("Move paid rows to Master", "movePaidRowsToMaster")
     .addItem("Send selected row(s) back to Payment to be done", "sendSelectedRowsBack")
+    .addSeparator()
+    .addItem("Sort Master oldest → newest", "sortMasterByDate")
     .addToUi();
 }
 
@@ -703,6 +705,41 @@ function sendSelectedRowsBack() {
   master.deleteRows(startRow, numRows);
   ui.alert(moved + " row(s) sent back to \"Payment to be done\". Payment Status was cleared, so it shows as Pending again until you re-enter the payment date.");
 }
+
+function sortMasterByDate() {
+  var ui = SpreadsheetApp.getUi();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var master = ss.getSheetByName("Master");
+  if (!master) {
+    ui.alert("Could not find the \"Master\" tab — check the tab name matches exactly.");
+    return;
+  }
+  var lastRow = master.getLastRow();
+  var lastCol = master.getLastColumn();
+  if (lastRow < 3) {
+    ui.alert("Master doesn't have enough rows to sort yet.");
+    return;
+  }
+  var headers = master.getRange(1, 1, 1, lastCol).getValues()[0];
+  var col = {};
+  headers.forEach(function (h, i) { col[String(h).trim()] = i; });
+  if (!("Date" in col)) {
+    ui.alert("Master is missing a \"Date\" column — check the header row hasn't been changed.");
+    return;
+  }
+  var resp = ui.alert(
+    "Sort Master oldest → newest",
+    "This reorders every row on Master by Date, oldest at the top. Nothing is added, removed, or " +
+    "changed — only the row order. Before your first sort, it's worth right-clicking the Master tab " +
+    "→ Duplicate, so you have today's order saved as a backup just in case. Continue?",
+    ui.ButtonSet.YES_NO
+  );
+  if (resp !== ui.Button.YES) return;
+
+  var range = master.getRange(2, 1, lastRow - 1, lastCol);
+  range.sort({ column: col["Date"] + 1, ascending: true });
+  ui.alert("Master sorted, oldest payment first. Run this again any time — for example after pasting in a fresh export that came in newest-first.");
+}
 ```
 
 **Using it:**
@@ -726,6 +763,23 @@ function sendSelectedRowsBack() {
   Fix an already-synced payment directly in the app's own Requisitions tab
   instead — editing an existing Requisition there already works today and is
   the reliable way to correct something that's already made it into the app.
+- **Sort Master oldest → newest:** ERP Tools → **Sort Master oldest →
+  newest**. Reorders every row on Master by the Date column, oldest at the
+  top — nothing is added, removed, or edited, only the row order changes.
+  This exists because the v6.28 "push payments to Master" feature (see
+  above) always adds a new row at the **bottom** of Master — so if Master is
+  sorted newest-first (which is how it comes out of some Excel exports),
+  every push from the app would land in the wrong chronological spot. Run
+  this once to put Master in true date order, and the app's pushes will then
+  keep landing in the right place on their own. If you ever paste in a fresh
+  export that comes in newest-first again, just run this again — it's meant
+  to be reusable, not a one-time fix. **Before your very first run**, it's
+  worth checking whether any other tab in this workbook has a formula that
+  points at a specific Master cell by fixed address (something like
+  `='Master'!F42`) rather than a range formula like `SUMIF`/`QUERY` — a
+  sort moves the data but not that kind of fixed reference, so it would end
+  up pointing at the wrong row afterwards. If everything reading Master uses
+  a range formula, this is completely safe.
 
 ## New in v6.28: pushing payment dates from the app back into Master
 
@@ -814,6 +868,32 @@ still bring in everything shown on that screen, exactly as before. If you
 find you want the same tick/untick control on one of those too, it's a
 smaller follow-on than this was (the reusable checkbox pattern already
 exists in two places now), just ask.
+
+## Fixed in v6.30: Master push was dropping the Ref No./PR Number
+
+If you use the Master push feature (see "New in v6.28" above), every row it
+touched in Master used to lose its Ref No./PR Number:
+
+- A **brand-new row** the push added always left that cell blank — the app
+  never wrote its own auto-generated Ref No. into it, so it had to be typed
+  in by hand afterwards, every time.
+- An **existing row already sitting in Master with that cell blank** — for
+  instance one added by the "Move paid rows to Master" Apps Script menu
+  item, which has no way to know the app's Ref No. either — never got
+  filled in when the app later updated that row's Payment Date.
+
+Both are fixed. A new row now carries the Ref No. from the moment it's
+added. An existing row with a blank Ref No./PR Number cell gets it filled
+in the next time the app touches that row (for example, when it flips to
+Paid). This matches whatever that column is actually called in your sheet
+— "Ref No.", "Ref. No.", "Ref No", or "Reference" all resolve to the same
+field, since header matching already ignores punctuation and spacing.
+
+**A cell that already has something in it is never touched.** Whether you
+typed it in by hand or it came from an earlier push, the app only ever
+fills in a blank — it does not overwrite. So nothing you've already tagged
+needs to be redone, and going forward, no new row should ever need its Ref
+No./PR Number re-typed again.
 
 ## Payroll: fixed salaries and attendance-based pay
 
