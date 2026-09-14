@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.28";
+const APP_VERSION = "6.29";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -80,6 +80,11 @@ const GOOGLE_DRIVE_APP_ID = "60621934527";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.29", date:"2026-09-14", title:"Tick/untick rows before a Requisitions sync goes in", items:[
+    "New: the \"Check before importing\" screen for a Requisitions sync source (Payment to be done / Master) now lets you tick or untick each row before you tap Import — same tap-to-toggle checkboxes, \"Tick all\"/\"Untick all\", and strike-through-when-unticked style already used on Import from Excel's own review screen. Everything starts ticked, exactly like today, so a normal sync where you want everything needs no extra taps — this only matters the moment you want to leave one row out.",
+    "Covers both sections of a Requisitions sync preview: new rows about to be added, and existing Pending rows about to be flipped to Paid. A row left unticked is not saved at all — not added, not updated — and the Import button's count and label update live to match what's actually ticked. Unticking every row disables Import and shows \"Nothing ticked\", the same guard Import from Excel already has.",
+    "Scoped to Requisitions sync only for now, since that is the screen it was asked for — Expenses, Cash & Card, Diesel & Machinery, Diesel Log, Vendor/Employee Master and Rent & EMI sync previews are unchanged and still bring in everything shown, same as before.",
+  ]},
   { v:"6.28", date:"2026-09-11", title:"Master write-back, and a 4-way payment breakdown on Monthly Statement", items:[
     "New: a sync source of kind Requisitions can now be turned into a write-back target — edit the source and turn on \"Push payments here when marked Paid\". The moment a plain requisition (not Salary, not Rent & EMI) is marked Paid in the app — however it got there, including a sheet sync — its Payment Date (and Payment Status, if that column exists) is written into the matching row of that source's Drive file. No matching row found → a new one is added at the bottom instead, filled in from what the app knows. This was built for Master specifically — the guidance in the field says to leave it off for Payment to be done. A \"Push N paid requisition(s) to Master now\" button on the source card backfills anything already Paid before this existed.",
     "New: reverting a requisition from Paid back to Pending (Requisition Detail → Change status) now clears its stale Payment Date/Mode/Amount so it behaves like a genuine pending item again, ready to correct and re-confirm. If that payment had already been pushed to Master, the same Payment Date cell is cleared there too, automatically.",
@@ -2561,6 +2566,20 @@ function ERPApp(){
   // automatic on-open check — see runAutoSheetSync further down) ---
   const [sheetSyncBusy, setSheetSyncBusy] = useState("");
   const [sheetPreviewQueue, setSheetPreviewQueue] = useState([]); // one queued preview per kind ("requisitions"/"expenses") waiting to be reviewed
+  // Per-row tick/untick on the Requisitions sync preview (v6.29) — mirrors
+  // ImportTab's own skip Set exactly (same "a<idx>"/"u<idx>" key scheme), but
+  // scoped to kind==="requisitions" only, per the user's confirmed scope.
+  // Lives here (not in SheetSyncTab) so applyPreview, also defined in this
+  // component, can read it directly when building what actually gets saved.
+  const [sheetSkip, setSheetSkip] = useState(new Set());
+  const sheetSkipPrevPreviewRef = React.useRef(null);
+  useEffect(() => {
+    const cur = sheetPreviewQueue[0] || null;
+    if (cur !== sheetSkipPrevPreviewRef.current) {
+      sheetSkipPrevPreviewRef.current = cur;
+      setSheetSkip(new Set());
+    }
+  }, [sheetPreviewQueue]);
   const autoSyncRanRef = React.useRef(false);
   const lastAutoSyncAtRef = React.useRef(0);
   // Always-current mirror of `sheets`, kept in sync by the effect right
@@ -4181,9 +4200,19 @@ function ERPApp(){
       return;
     }
 
+    // Rows the person unticked on this preview (requisitions only — the one
+    // sync kind this selection UI covers, per the confirmed v6.29 scope) are
+    // left out entirely, same rule as ImportTab's own "apply" below.
+    const keptToAdd = preview.toAdd.filter((_, n) => !sheetSkip.has("a" + n));
+    const keptToUpdate = (preview.toUpdate || []).filter((_, n) => !sheetSkip.has("u" + n));
+    if (!keptToAdd.length && !keptToUpdate.length) {
+      showToast("Nothing is ticked", "error");
+      return;
+    }
+
     const added = [];
     const recurringUpdates = [];
-    preview.toAdd.forEach((a, idx) => {
+    keptToAdd.forEach((a, idx) => {
       const d = { ...a.data };
       const recurMatchId = d.__recurringMatchId;
       delete d.__recurringMatchId;
@@ -4218,7 +4247,7 @@ function ERPApp(){
     // Payment Date now filled in get marked Paid on that same existing record —
     // not added again as a second row. Applied in the same setReqs call as the
     // brand-new rows so the list only re-renders once.
-    const updatePatches = new Map((preview.toUpdate || []).map(u => [u.id, u.patch]));
+    const updatePatches = new Map(keptToUpdate.map(u => [u.id, u.patch]));
     setReqs([
       ...reqs.map(r => updatePatches.has(r.id) ? { ...r, ...updatePatches.get(r.id) } : r),
       ...added,
@@ -4249,7 +4278,7 @@ function ERPApp(){
       + (updatedCount ? ` · ${updatedCount} marked Paid` : "")
       + (recurringUpdates.length ? ` · ${recurringUpdates.length} Rent & EMI item(s) updated` : ""));
     setSheetPreviewQueue(q => q.slice(1));
-  }, [sheetPreviewQueue, expenses, setExpenses, lists, setLists, sheets, setSheets, showToast, reqs, setReqs, vendors, setVendors, recurring, setRecurring,
+  }, [sheetPreviewQueue, sheetSkip, expenses, setExpenses, lists, setLists, sheets, setSheets, showToast, reqs, setReqs, vendors, setVendors, recurring, setRecurring,
       cards, setCards, cashTxns, setCashTxns, machines, setMachines, diesel, setDiesel,
       dieselLog, setDieselLog, dieselLogPurchases, setDieselLogPurchases, dieselLogMachines, setDieselLogMachines]);
 
@@ -4456,7 +4485,7 @@ function ERPApp(){
         {tab==="payroll" && <PayrollTab vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} attendance={attendance} setAttendance={setAttendance} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
         {tab==="statement" && <MonthlyStatementTab reqs={reqs} expenses={expenses} cashTxns={cashTxns} cards={cards} recurring={recurring} showToast={showToast} goTo={navigate} />}
         {tab==="sitesummary" && <SiteSummaryTab reqs={reqs} expenses={expenses} cashTxns={cashTxns} cards={cards} diesel={diesel} utilities={utilities} machines={machines} vendors={vendors} showToast={showToast} goTo={navigate} />}
-        {tab==="sheets" && <SheetSyncTab sheets={sheets} setSheets={setSheets} reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} expenses={expenses} setExpenses={setExpenses} recurring={recurring} setRecurring={setRecurring} sync={syncProps} busy={sheetSyncBusy} previewQueue={sheetPreviewQueue} syncSheets={syncSheets} testConnection={testConnection} applyPreview={applyPreview} dismissPreview={()=>setSheetPreviewQueue(q=>q.slice(1))} pushAllEligiblePaidToMaster={pushAllEligiblePaidToMaster} masterPushBusy={masterPushBusy} isMasterEligible={isMasterEligible} />}
+        {tab==="sheets" && <SheetSyncTab sheets={sheets} setSheets={setSheets} reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} expenses={expenses} setExpenses={setExpenses} recurring={recurring} setRecurring={setRecurring} sync={syncProps} busy={sheetSyncBusy} previewQueue={sheetPreviewQueue} syncSheets={syncSheets} testConnection={testConnection} applyPreview={applyPreview} dismissPreview={()=>setSheetPreviewQueue(q=>q.slice(1))} pushAllEligiblePaidToMaster={pushAllEligiblePaidToMaster} masterPushBusy={masterPushBusy} isMasterEligible={isMasterEligible} skip={sheetSkip} setSkip={setSheetSkip} />}
         {tab==="expenses" && <ExpensesTab expenses={expenses} setExpenses={setExpenses} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
         {tab==="receivables" && <ReceivablesTab reqs={reqs} setReqs={setReqs} showToast={showToast} goTo={navigate} />}
         {tab==="payments" && <PaymentRegisterTab reqs={reqs} setReqs={setReqs} vendors={vendors} expenses={expenses} setExpenses={setExpenses} cashTxns={cashTxns} cards={cards} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} />}
@@ -11729,7 +11758,7 @@ const FREQUENCIES = ["Monthly","Quarterly","Half-Yearly","Yearly","One-time"];
 
 function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, lists, setLists, showToast, goTo,
   expenses, setExpenses, recurring, setRecurring, sync, busy, previewQueue, syncSheets, testConnection, applyPreview, dismissPreview,
-  pushAllEligiblePaidToMaster, masterPushBusy, isMasterEligible }){
+  pushAllEligiblePaidToMaster, masterPushBusy, isMasterEligible, skip, setSkip }){
   const { driveConnected, connectDrive, driveChooseSourceFile,
     driveImportFolderId, driveImportFolderName, driveChooseImportFolder, clearDriveImportFolder } = sync;
   const [editing, setEditing] = useState(null);
@@ -11866,45 +11895,129 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
           </div>
         )}
 
-        {preview.toAdd.length > 0 && (
+        {preview.toAdd.length > 0 && (() => {
+          // Per-row tick/untick (v6.29) is scoped to Requisitions only, per
+          // the confirmed scope — every other sync kind keeps its original
+          // plain, non-selectable list exactly as before.
+          const selectable = preview.kind === "requisitions";
+          const keptCount = selectable ? preview.toAdd.filter((_,n)=>!skip.has("a"+n)).length : preview.toAdd.length;
+          const allOn = keptCount === preview.toAdd.length;
+          const rowBody = (a) => (
+            <React.Fragment>
+              {syncKindMeta(preview.kind).describe(a.data)}
+              {a.data.dateFromPayment && (
+                <span style={{ color:AMBER, fontWeight:600 }}> · date taken from payment</span>
+              )}
+              {a.data.__recurringMatchId && (
+                <span style={{ color:GREEN, fontWeight:600 }}> · settles Rent & EMI</span>
+              )}
+            </React.Fragment>
+          );
+          return (
           <div style={{ background:SURFACE, borderRadius:16, padding:16, marginBottom:16, border:`1px solid ${SAND}` }}>
-            <div style={{ fontWeight:700, color:GREEN, fontSize:14, marginBottom:10 }}>Will be added ({preview.toAdd.length})</div>
-            {preview.toAdd.slice(0,30).map((a,i) => (
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:10, marginBottom: selectable ? 4 : 10 }}>
+              <div style={{ fontWeight:700, color:GREEN, fontSize:14 }}>
+                Will be added ({keptCount}{selectable && keptCount !== preview.toAdd.length ? ` of ${preview.toAdd.length}` : ""})
+              </div>
+              {selectable && (
+                <button onClick={()=>setSkip(prev => {
+                    const n = new Set(prev);
+                    if (allOn) preview.toAdd.forEach((_,x)=>n.add("a"+x));
+                    else preview.toAdd.forEach((_,x)=>n.delete("a"+x));
+                    return n;
+                  })}
+                  style={{ fontSize:12.5, fontWeight:700, color:AMBER, background:"none", border:"none", cursor:"pointer", padding:0 }}>
+                  {allOn ? "Untick all" : "Tick all"}
+                </button>
+              )}
+            </div>
+            {selectable && (
+              <div style={{ fontSize:12, color:MUTED, marginBottom:10, lineHeight:1.5 }}>
+                Untick anything you do not want brought in.
+              </div>
+            )}
+            {(selectable ? preview.toAdd : preview.toAdd.slice(0,30)).map((a,i) => selectable ? (
+              <div key={i} onClick={()=>setSkip(prev => {
+                  const n = new Set(prev); n.has("a"+i) ? n.delete("a"+i) : n.add("a"+i); return n;
+                })}
+                style={{ display:"flex", alignItems:"flex-start", gap:10, padding:"8px 0", cursor:"pointer",
+                  borderTop: i? `1px solid ${SAND}`:"none", fontSize:13, color:INK,
+                  opacity: skip.has("a"+i) ? 0.4 : 1 }}>
+                <div style={{ width:19, height:19, borderRadius:5, flexShrink:0, marginTop:1,
+                  display:"flex", alignItems:"center", justifyContent:"center",
+                  background: skip.has("a"+i) ? SURFACE : AMBER,
+                  border:`2px solid ${skip.has("a"+i) ? "#C7D0DE" : AMBER}` }}>
+                  {!skip.has("a"+i) && <Icon name="check" size={11} color="#fff" />}
+                </div>
+                <div style={{ flex:1, minWidth:0, textDecoration: skip.has("a"+i) ? "line-through" : "none" }}>
+                  {rowBody(a)}
+                </div>
+              </div>
+            ) : (
               <div key={i} style={{ padding:"7px 0", borderTop: i? `1px solid ${SAND}`:"none", fontSize:13, color:INK }}>
-                {syncKindMeta(preview.kind).describe(a.data)}
-                {a.data.dateFromPayment && (
-                  <span style={{ color:AMBER, fontWeight:600 }}> · date taken from payment</span>
-                )}
-                {a.data.__recurringMatchId && (
-                  <span style={{ color:GREEN, fontWeight:600 }}> · settles Rent & EMI</span>
-                )}
+                {rowBody(a)}
               </div>
             ))}
-            {preview.toAdd.length > 30 && <div style={{ fontSize:12, color:MUTED, marginTop:8 }}>…and {preview.toAdd.length-30} more</div>}
+            {!selectable && preview.toAdd.length > 30 && <div style={{ fontSize:12, color:MUTED, marginTop:8 }}>…and {preview.toAdd.length-30} more</div>}
           </div>
-        )}
+          ); })()}
 
-        {preview.toUpdate && preview.toUpdate.length > 0 && (
+        {preview.toUpdate && preview.toUpdate.length > 0 && (() => {
+          const selectable = preview.kind === "requisitions";
+          const keptCount = selectable ? preview.toUpdate.filter((_,n)=>!skip.has("u"+n)).length : preview.toUpdate.length;
+          const allOn = keptCount === preview.toUpdate.length;
+          const rowBody = (u) => preview.kind === "requisitions"
+            ? <React.Fragment>
+                <strong>{u.existing.name}</strong> · ₹{fmtINR(u.existing.amount)}
+                <span style={{ color:MUTED }}> · {u.existing.site || u.source}</span>
+                <span style={{ color:AMBER, fontWeight:600 }}> · Pending → Paid</span>
+                {u.patch.paymentDate && <span style={{ color:MUTED }}> · paid {fmtDate(u.patch.paymentDate)}</span>}
+              </React.Fragment>
+            : syncKindMeta(preview.kind).describe(u.existing);
+          return (
           <div style={{ background:SURFACE, borderRadius:16, padding:16, marginBottom:16, border:`1.5px solid ${GREEN}` }}>
-            <div style={{ fontWeight:700, color:GREEN, fontSize:14, marginBottom:6 }}>{syncKindMeta(preview.kind).updateLabel} ({preview.toUpdate.length})</div>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:10, marginBottom:6 }}>
+              <div style={{ fontWeight:700, color:GREEN, fontSize:14 }}>
+                {syncKindMeta(preview.kind).updateLabel} ({keptCount}{selectable && keptCount !== preview.toUpdate.length ? ` of ${preview.toUpdate.length}` : ""})
+              </div>
+              {selectable && (
+                <button onClick={()=>setSkip(prev => {
+                    const n = new Set(prev);
+                    if (allOn) preview.toUpdate.forEach((_,x)=>n.add("u"+x));
+                    else preview.toUpdate.forEach((_,x)=>n.delete("u"+x));
+                    return n;
+                  })}
+                  style={{ fontSize:12.5, fontWeight:700, color:AMBER, background:"none", border:"none", cursor:"pointer", padding:0 }}>
+                  {allOn ? "Untick all" : "Tick all"}
+                </button>
+              )}
+            </div>
             <div style={{ fontSize:12, color:MUTED, marginBottom:10, lineHeight:1.5 }}>
               {syncKindMeta(preview.kind).updateDesc}
             </div>
-            {preview.toUpdate.slice(0,30).map((u,i) => (
+            {(selectable ? preview.toUpdate : preview.toUpdate.slice(0,30)).map((u,i) => selectable ? (
+              <div key={i} onClick={()=>setSkip(prev => {
+                  const n = new Set(prev); n.has("u"+i) ? n.delete("u"+i) : n.add("u"+i); return n;
+                })}
+                style={{ display:"flex", alignItems:"center", gap:10, padding:"7px 0", cursor:"pointer",
+                  borderTop: i? `1px solid ${SAND}`:"none", fontSize:13, color:INK,
+                  opacity: skip.has("u"+i) ? 0.4 : 1, textDecoration: skip.has("u"+i) ? "line-through" : "none" }}>
+                <div style={{ width:19, height:19, borderRadius:5, flexShrink:0,
+                  display:"flex", alignItems:"center", justifyContent:"center",
+                  background: skip.has("u"+i) ? SURFACE : AMBER,
+                  border:`2px solid ${skip.has("u"+i) ? "#C7D0DE" : AMBER}` }}>
+                  {!skip.has("u"+i) && <Icon name="check" size={11} color="#fff" />}
+                </div>
+                <span>{rowBody(u)}</span>
+              </div>
+            ) : (
               <div key={i} style={{ padding:"7px 0", borderTop: i? `1px solid ${SAND}`:"none", fontSize:13, color:INK }}>
-                {preview.kind === "requisitions"
-                  ? <React.Fragment>
-                      <strong>{u.existing.name}</strong> · ₹{fmtINR(u.existing.amount)}
-                      <span style={{ color:MUTED }}> · {u.existing.site || u.source}</span>
-                      <span style={{ color:AMBER, fontWeight:600 }}> · Pending → Paid</span>
-                      {u.patch.paymentDate && <span style={{ color:MUTED }}> · paid {fmtDate(u.patch.paymentDate)}</span>}
-                    </React.Fragment>
-                  : syncKindMeta(preview.kind).describe(u.existing)}
+                {rowBody(u)}
               </div>
             ))}
-            {preview.toUpdate.length > 30 && <div style={{ fontSize:12, color:MUTED, marginTop:8 }}>…and {preview.toUpdate.length-30} more</div>}
+            {!selectable && preview.toUpdate.length > 30 && <div style={{ fontSize:12, color:MUTED, marginTop:8 }}>…and {preview.toUpdate.length-30} more</div>}
           </div>
-        )}
+          ); })()}
 
         {preview.duplicates.length > 0 && (
           <div style={{ background:SURFACE, borderRadius:16, padding:16, marginBottom:16, border:`1.5px solid ${AMBER}` }}>
@@ -11932,16 +12045,28 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
           </div>
         )}
 
+        {preview.kind === "requisitions" && skip.size > 0 && (
+          <div style={{ background:"#EEF0FE", border:`1px solid ${AMBER}`, borderRadius:14, padding:13,
+            marginBottom:12, fontSize:13, color:INK, lineHeight:1.6 }}>
+            You have unticked <strong>{skip.size}</strong> row(s). They will be left out of this sync and
+            nothing about them is saved.
+          </div>
+        )}
+
         {(() => {
           const meta = syncKindMeta(preview.kind);
-          const updCount = (preview.toUpdate && preview.toUpdate.length) || 0;
-          const nothing = preview.toAdd.length === 0 && updCount === 0;
+          const selectable = preview.kind === "requisitions";
+          const keptAdd = selectable ? preview.toAdd.filter((_,n)=>!skip.has("a"+n)).length : preview.toAdd.length;
+          const keptUpd = selectable
+            ? (preview.toUpdate||[]).filter((_,n)=>!skip.has("u"+n)).length
+            : ((preview.toUpdate && preview.toUpdate.length) || 0);
+          const nothing = keptAdd === 0 && keptUpd === 0;
           const parts = [];
-          if (preview.toAdd.length) parts.push(`${preview.toAdd.length} new ${meta.itemLabel}(s)`);
-          if (updCount) parts.push(meta.updateSummary ? meta.updateSummary(updCount) : `${updCount} updated`);
+          if (keptAdd) parts.push(`${keptAdd} new ${meta.itemLabel}(s)`);
+          if (keptUpd) parts.push(meta.updateSummary ? meta.updateSummary(keptUpd) : `${keptUpd} updated`);
           return (
             <BigButton icon="check"
-              label={nothing ? "Nothing new to import" : `Import — ${parts.join(" · ")}`}
+              label={nothing ? (selectable ? "Nothing ticked" : "Nothing new to import") : `Import — ${parts.join(" · ")}`}
               onClick={applyPreview} tone="green" full disabled={nothing} />
           );
         })()}

@@ -785,6 +785,36 @@ Master without re-entering them).
   Pending in the app as well (the paragraph above), so the app and Master
   agree once you're done, rather than each showing something different.
 
+## New in v6.29: tick/untick rows before a Requisitions sync goes in
+
+The **"Check before importing"** screen you see after **Sync now** on a
+Requisitions source (Payment to be done / Master) now lets you tick or
+untick each row before you tap Import — the exact same tap-anywhere
+checkbox, **Tick all / Untick all**, and strike-through-when-unticked
+behaviour that **Import from Excel**'s own review screen has always had.
+
+Everything starts ticked, same as before, so a normal sync where you want
+everything brought in needs no extra taps at all — this only comes into
+play the moment you spot a row you don't want. Untick it, and it's left
+out completely: not added if it's a new row, not flipped to Paid if it's
+an existing Pending one being matched. The Import button's row count and
+label update live to reflect only what's still ticked, and unticking
+every single row disables Import and shows "Nothing ticked" instead of
+letting you import nothing by mistake.
+
+This covers both sections of a Requisitions sync preview — **Will be
+added** and **Already exists — will be updated** — and, on that source,
+it works the same whether the sync ran manually (Sync now) or was queued
+automatically by the app's background check.
+
+**Scoped to Requisitions sync only, for now** — this is the screen it was
+asked for. Expenses, Cash & Card, Diesel & Machinery, Diesel Log, Vendor
+Master, Employee Master, and Rent & EMI sync previews are unchanged and
+still bring in everything shown on that screen, exactly as before. If you
+find you want the same tick/untick control on one of those too, it's a
+smaller follow-on than this was (the reusable checkbox pattern already
+exists in two places now), just ask.
+
 ## Payroll: fixed salaries and attendance-based pay
 
 A new **Payroll** tab handles the two different ways staff get paid, instead
