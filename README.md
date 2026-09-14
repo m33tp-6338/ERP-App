@@ -895,6 +895,31 @@ fills in a blank — it does not overwrite. So nothing you've already tagged
 needs to be redone, and going forward, no new row should ever need its Ref
 No./PR Number re-typed again.
 
+## New in v6.31: Payment Register's "sheet accounts returned" import now reads a live Google Sheet too
+
+Payment Register has always had a button — below "Import past payments from
+Excel" — for bringing payment dates and modes back in from the sheet your
+accounts team returns. Until now, that button only opened your **device's**
+own file picker, which can only see real files already saved on your
+device. This was never a bug or a regression — that picker was simply never
+connected to Google Drive — but it did mean a live Google Sheet you keep in
+Drive had to be downloaded as Excel first, every single time, before it
+could be picked here.
+
+Fixed: once Google Drive is connected (see "Google Drive backup setup"
+above), a second button appears —
+**"…or pick the live Google Sheet accounts sent back"**. It opens the exact
+same Drive picker used throughout Sync from Google Sheets (so both real
+Excel files and native Google Sheets are selectable), reads the file the
+same well-tested way, and feeds the result into the same Ref No. /
+Name+Amount matching this screen already used. The original
+device-file-picker button is unchanged and still there for a file you've
+already downloaded — the new button is purely an added option, not a
+replacement.
+
+If Google Drive isn't connected yet, only the original button shows, same
+as before.
+
 ## Payroll: fixed salaries and attendance-based pay
 
 A new **Payroll** tab handles the two different ways staff get paid, instead

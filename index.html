@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.30";
+const APP_VERSION = "6.31";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -80,6 +80,11 @@ const GOOGLE_DRIVE_APP_ID = "60621934527";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.31", date:"2026-09-14", title:"Payment Register's \"sheet accounts returned\" import can now read a live Google Sheet directly", items:[
+    "New: on Payment Register, next to \"Update dates & modes from a downloaded sheet accounts returned\", a second button appears once Google Drive is connected — \"…or pick the live Google Sheet accounts sent back\". It opens the same Drive picker already used in Sync from Google Sheets (Google Sheets and Excel files both selectable), reads it the same well-tested way, and feeds it into the exact same Ref No./Name+Amount matching this screen already did.",
+    "Why: this import has always used a plain device file picker, which can only see real files already on your device — it was never connected to Google Drive, so a live Google Sheet you keep in Drive (never downloaded) could not be selected there. That's not new or a regression; it just meant downloading the sheet as Excel first, every time, before it could be used here.",
+    "The original file-picker button still works exactly as before, unchanged, for a file you've already downloaded — the new option is purely additional. Nothing about Sync from Google Sheets or the Master write-back changed in this update.",
+  ]},
   { v:"6.30", date:"2026-09-14", title:"Fixed: pushing a payment to Master dropped its Ref No./PR Number", items:[
     "Fixed: since v6.28, pushing a paid requisition to Master (\"Push payments here when marked Paid\") never wrote the app's own auto-generated Ref No. into Master's Ref No./PR Number column — a brand-new row always arrived with that cell blank, and it stayed blank forever, forcing it to be typed in by hand every single time. It's now written automatically whenever a new row is added, matched to whatever that column is actually called in your sheet (works with \"Ref No.\", \"Ref. No.\", \"Ref No\", or \"Reference\" — matching already ignored punctuation and spacing, no header change needed).",
     "Fixed: an existing Master row the app updates (flips to Paid, fills in the Payment Date) now also gets its Ref No./PR Number filled in automatically if that cell is currently blank — covers a row that landed in Master some other way, for instance through the \"Move paid rows to Master\" Apps Script menu item, which has no way to know the app's Ref No. and always leaves it empty. A cell that already has something in it — typed by hand or from an earlier push — is never touched or overwritten.",
@@ -4493,7 +4498,7 @@ function ERPApp(){
         {tab==="sheets" && <SheetSyncTab sheets={sheets} setSheets={setSheets} reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} expenses={expenses} setExpenses={setExpenses} recurring={recurring} setRecurring={setRecurring} sync={syncProps} busy={sheetSyncBusy} previewQueue={sheetPreviewQueue} syncSheets={syncSheets} testConnection={testConnection} applyPreview={applyPreview} dismissPreview={()=>setSheetPreviewQueue(q=>q.slice(1))} pushAllEligiblePaidToMaster={pushAllEligiblePaidToMaster} masterPushBusy={masterPushBusy} isMasterEligible={isMasterEligible} skip={sheetSkip} setSkip={setSheetSkip} />}
         {tab==="expenses" && <ExpensesTab expenses={expenses} setExpenses={setExpenses} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
         {tab==="receivables" && <ReceivablesTab reqs={reqs} setReqs={setReqs} showToast={showToast} goTo={navigate} />}
-        {tab==="payments" && <PaymentRegisterTab reqs={reqs} setReqs={setReqs} vendors={vendors} expenses={expenses} setExpenses={setExpenses} cashTxns={cashTxns} cards={cards} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} />}
+        {tab==="payments" && <PaymentRegisterTab reqs={reqs} setReqs={setReqs} vendors={vendors} expenses={expenses} setExpenses={setExpenses} cashTxns={cashTxns} cards={cards} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} sync={syncProps} />}
         {tab==="company" && <CompanyTab company={company} setCompany={setCompany} showToast={showToast} />}
         {tab==="settings" && <SettingsTab settings={settings} setSettings={setSettings} vendors={vendors} reqs={reqs} recurring={recurring} expenses={expenses} sheets={sheets} cashTxns={cashTxns} cards={cards} machines={machines} diesel={diesel} utilities={utilities} lists={lists} setLists={setLists} showToast={showToast} sync={syncProps} goTo={navigate} />}
       </main>
@@ -16132,10 +16137,11 @@ function DirectPaymentForm({ f, setF, vendors, lists, setLists, onCancel, onSave
   );
 }
 
-function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cashTxns, cards, lists, setLists, showToast, goTo }){
+function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cashTxns, cards, lists, setLists, showToast, goTo, sync }){
   const [month, setMonth] = useState("all");
   const [site, setSite] = useState("all");
   const [preview, setPreview] = useState(null);
+  const [drivePicking, setDrivePicking] = useState(false);
   const [mode, setMode] = useState("topay");     // topay | register
   const [payTarget, setPayTarget] = useState(null);
   const [showDupes, setShowDupes] = useState(false);
@@ -16288,6 +16294,62 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
     return Object.entries(map).sort((a,b)=>b[1]-a[1]);
   }, [filtered]);
 
+  // Shared by both import paths below (a local file picked from this device,
+  // or a file read straight from Google Drive) — matches sheet rows against
+  // existing requisitions by Ref No. first, then Name+Amount, and queues the
+  // result as a preview exactly the same way regardless of where the rows
+  // came from.
+  function matchImportedRows(rows, fileName){
+    if (!rows || rows.length === 0) { showToast("That sheet has no rows", "error"); return; }
+
+    const sample = rows[0];
+    const cRef  = pickCol(sample, ["Ref No.","Ref No","RefNo","Reference","Ref"]);
+    const cDate = pickCol(sample, ["Payment Date","Paid On","Date of Payment","Txn Date"]);
+    const cMode = pickCol(sample, ["Payment Mode","Mode","Payment Type"]);
+    const cName = pickCol(sample, ["Name","Vendor","Party","Payee"]);
+    const cAmt  = pickCol(sample, ["Amount","Amt","Paid Amount"]);
+
+    if (!cDate && !cMode) {
+      showToast("No Payment Date / Mode column found in that file", "error");
+      return;
+    }
+
+    const matched = [], unmatched = [], ambiguous = [];
+    const usedIds = new Set();
+
+    rows.forEach((row, i) => {
+      const pDate= cDate ? excelToDateStr(row[cDate])    : "";
+      const mode = cMode ? String(row[cMode]||"").trim() : "";
+      if (!pDate && !mode) return;   // nothing to apply
+
+      let candidates = [];
+      const refVal = cRef ? String(row[cRef]||"").trim() : "";
+      if (refVal) {
+        candidates = reqs.filter(r => r.refNo && r.refNo.toLowerCase() === refVal.toLowerCase());
+      } else if (cName && cAmt) {
+        const nm = String(row[cName]||"").trim().toLowerCase();
+        const amt = Number(String(row[cAmt]).replace(/[^0-9.\-]/g,""));
+        candidates = reqs.filter(r =>
+          String(r.name||"").trim().toLowerCase() === nm &&
+          Math.abs(Number(r.amount||0) - amt) < 0.01 &&
+          !usedIds.has(r.id)
+        );
+      }
+
+      const label = refVal || `${cName?row[cName]:"row"} ${cAmt?row[cAmt]:""}`.trim();
+      if (candidates.length === 1) {
+        usedIds.add(candidates[0].id);
+        matched.push({ target: candidates[0], paymentDate: pDate, paymentMode: mode, label });
+      } else if (candidates.length > 1) {
+        ambiguous.push({ label, count: candidates.length, rowNum: i+2 });
+      } else {
+        unmatched.push({ label, rowNum: i+2 });
+      }
+    });
+
+    setPreview({ matched, unmatched, ambiguous, usedRef: !!cRef, fileName });
+  }
+
   function handleImport(e){
     const file = e.target.files[0];
     e.target.value = "";
@@ -16298,59 +16360,42 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
         const wb = XLSX.read(ev.target.result, { type:"array" });
         const ws = wb.Sheets[wb.SheetNames[0]];
         const rows = XLSX.utils.sheet_to_json(ws, { defval:"" });
-        if (rows.length === 0) { showToast("That sheet has no rows", "error"); return; }
-
-        const sample = rows[0];
-        const cRef  = pickCol(sample, ["Ref No.","Ref No","RefNo","Reference","Ref"]);
-        const cDate = pickCol(sample, ["Payment Date","Paid On","Date of Payment","Txn Date"]);
-        const cMode = pickCol(sample, ["Payment Mode","Mode","Payment Type"]);
-        const cName = pickCol(sample, ["Name","Vendor","Party","Payee"]);
-        const cAmt  = pickCol(sample, ["Amount","Amt","Paid Amount"]);
-
-        if (!cDate && !cMode) {
-          showToast("No Payment Date / Mode column found in that file", "error");
-          return;
-        }
-
-        const matched = [], unmatched = [], ambiguous = [];
-        const usedIds = new Set();
-
-        rows.forEach((row, i) => {
-          const pDate= cDate ? excelToDateStr(row[cDate])    : "";
-          const mode = cMode ? String(row[cMode]||"").trim() : "";
-          if (!pDate && !mode) return;   // nothing to apply
-
-          let candidates = [];
-          const refVal = cRef ? String(row[cRef]||"").trim() : "";
-          if (refVal) {
-            candidates = reqs.filter(r => r.refNo && r.refNo.toLowerCase() === refVal.toLowerCase());
-          } else if (cName && cAmt) {
-            const nm = String(row[cName]||"").trim().toLowerCase();
-            const amt = Number(String(row[cAmt]).replace(/[^0-9.\-]/g,""));
-            candidates = reqs.filter(r =>
-              String(r.name||"").trim().toLowerCase() === nm &&
-              Math.abs(Number(r.amount||0) - amt) < 0.01 &&
-              !usedIds.has(r.id)
-            );
-          }
-
-          const label = refVal || `${cName?row[cName]:"row"} ${cAmt?row[cAmt]:""}`.trim();
-          if (candidates.length === 1) {
-            usedIds.add(candidates[0].id);
-            matched.push({ target: candidates[0], paymentDate: pDate, paymentMode: mode, label });
-          } else if (candidates.length > 1) {
-            ambiguous.push({ label, count: candidates.length, rowNum: i+2 });
-          } else {
-            unmatched.push({ label, rowNum: i+2 });
-          }
-        });
-
-        setPreview({ matched, unmatched, ambiguous, usedRef: !!cRef, fileName: file.name });
+        matchImportedRows(rows, file.name);
       } catch(err){
         showToast("Could not read that file — is it a valid Excel file?", "error");
       }
     };
     reader.readAsArrayBuffer(file);
+  }
+
+  // v6.31: lets this same "sheet accounts returned" import read a live
+  // Google Sheet directly, instead of forcing a manual download-as-Excel
+  // first. Before this, the only file input here was a plain <input
+  // type="file">, which is the browser's own OS file dialog — it can never
+  // show a Google Sheet that hasn't been downloaded, since that dialog only
+  // sees real files on disk. This reuses the exact same Drive picker and
+  // file reader (driveChooseSourceFile / driveReadFileById) already proven
+  // in Sync from Google Sheets, so a native Sheet picked here is converted
+  // and read the same well-tested way, then fed into the same matching
+  // logic above.
+  async function handleImportFromDrive(){
+    if (!sync || !sync.driveConnected) {
+      showToast("Connect Google Drive first, in Settings > Sync from Google Sheets", "error");
+      return;
+    }
+    setDrivePicking(true);
+    try {
+      const picked = await sync.driveChooseSourceFile();
+      if (!picked) return;
+      const token = await sync.driveGetFreshToken(false);
+      const data = await driveReadFileById(picked.id, token, "", picked.resourceKey, false);
+      if (!data || data.ok === false) throw new Error((data && data.error) || "That file could not be read");
+      matchImportedRows(data.rows, data.fileName || picked.name);
+    } catch (err) {
+      showToast(err.message || "Could not read that file from Google Drive", "error");
+    } finally {
+      setDrivePicking(false);
+    }
   }
 
   function applyImport(){
@@ -16834,13 +16879,23 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
         Import past payments from Excel
       </button>
 
-      <label style={{ display:"block", marginBottom:16 }}>
-        <span style={{ display:"block", borderRadius:16, padding:"13px 20px", fontSize:14, fontWeight:600, textAlign:"center",
-          background:SAND, color:INK, cursor:"pointer" }}>
-          Update dates &amp; modes from the sheet accounts returned
-        </span>
-        <input type="file" accept=".xlsx,.xls,.csv" onChange={handleImport} style={{ display:"none" }} />
-      </label>
+      <div style={{ marginBottom:16 }}>
+        <label style={{ display:"block", marginBottom: sync && sync.driveConnected ? 8 : 0 }}>
+          <span style={{ display:"block", borderRadius:16, padding:"13px 20px", fontSize:14, fontWeight:600, textAlign:"center",
+            background:SAND, color:INK, cursor:"pointer" }}>
+            Update dates &amp; modes from a downloaded sheet accounts returned
+          </span>
+          <input type="file" accept=".xlsx,.xls,.csv" onChange={handleImport} style={{ display:"none" }} />
+        </label>
+        {sync && sync.driveConnected && (
+          <button onClick={handleImportFromDrive} disabled={drivePicking}
+            style={{ display:"block", width:"100%", borderRadius:16, padding:"13px 20px", fontSize:14, fontWeight:600, textAlign:"center",
+              background: drivePicking ? SAND : "#EEF0FE", color: drivePicking ? INK : "#3F6CA8",
+              border:`1.5px solid ${drivePicking ? SAND : "#3F6CA8"}`, cursor: drivePicking ? "default" : "pointer" }}>
+            {drivePicking ? "Opening picker…" : "…or pick the live Google Sheet accounts sent back"}
+          </button>
+        )}
+      </div>
 
       {filtered.length === 0 ? (
         <EmptyState text="No completed payments for this filter yet. Mark requisitions as Paid, or import the sheet accounts sends back." />
