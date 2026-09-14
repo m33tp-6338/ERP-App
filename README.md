@@ -920,6 +920,51 @@ replacement.
 If Google Drive isn't connected yet, only the original button shows, same
 as before.
 
+## Fixed in v6.32: the Drive import above could get stuck on the wrong tab, and Export now sorts oldest to newest
+
+Two small fixes on Payment Register:
+
+- The v6.31 "…or pick the live Google Sheet accounts sent back" button
+  could fail with **"No Payment Date / Mode column found"** if the picked
+  file has more than one tab — common here, since the same workbook often
+  holds "Payment to be done" and "Master" as separate tabs — and the wrong
+  one got read (it reads the first tab that isn't named "Read Me" when you
+  don't say otherwise). It now tells you exactly which tab it read and what
+  columns were on it, and lets you type the correct tab name to retry
+  immediately, instead of leaving you stuck.
+- **Export** now writes the Excel file oldest-to-newest instead of
+  newest-to-oldest. The on-screen list itself hasn't changed — it still
+  shows newest first, which is more useful while scrolling on a phone —
+  only the exported file's row order changed.
+
+## Fixed in v6.33: a real cause of duplicate Payment Register entries, plus a duplicate checker and cleanup tool
+
+**The bug, and why it happened.** Syncing "Payment to be done" (or Master)
+more than once could add the same payment a second time instead of marking
+the original Pending row Paid. The actual cause: a requisition with a blank
+Date column gets that blank filled in from its Payment Date the moment it
+first shows up Paid. Matching a resync of the exact same sheet row against
+what's already in the app used that filled-in date — but that value didn't
+exist yet the first time the row synced in Pending, so the match silently
+failed and the row was added again as a brand-new one, leaving the original
+stuck in "To Pay" forever. This is now fixed: matching ignores that
+filled-in value and uses only what the sheet's own Date column actually
+holds, so the same row is recognized correctly every time it's resynced.
+
+**Cleaning up what's already happened.** That bug could already have left
+duplicate entries in your Payment Register before this fix. Payment
+Register now checks the paid list for likely duplicates — same site, name,
+amount and Payment Date — and shows a warning with the extra amount if any
+are found, since this inflates the "Total paid" figure. Tap **"Review &
+clean up"** to see every group, pre-ticked to keep the oldest entry and
+delete the rest; check the details (Ref No., dates, description) and adjust
+before deleting anything.
+
+**One thing to know:** deleting here only removes the row from this app —
+if a duplicate had already been pushed to Master, that row still needs to
+be removed from your Google Sheet by hand. The review screen tells you
+whenever that applies to what you've selected.
+
 ## Payroll: fixed salaries and attendance-based pay
 
 A new **Payroll** tab handles the two different ways staff get paid, instead

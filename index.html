@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.31";
+const APP_VERSION = "6.33";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -80,6 +80,14 @@ const GOOGLE_DRIVE_APP_ID = "60621934527";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.33", date:"2026-09-14", title:"Fixed a real cause of duplicate Payment Register entries, plus a duplicate checker and cleanup tool", items:[
+    "Fixed: syncing \"Payment to be done\" (or Master) more than once could add the same payment a second time instead of marking the original Pending row Paid. Root cause — a requisition with a blank Date column has that blank filled in from its Payment Date the moment it first shows up Paid; matching a later resync of the exact same sheet row against what's already in the app used that filled-in date, which didn't exist yet the first time the row was Pending, so the match silently failed and the row was added again as new. Matching now ignores that filled-in value and uses only what the sheet's own Date column actually held, so a resync correctly recognizes the same row every time.",
+    "New: Payment Register now checks the paid list for likely duplicates (same site, name, amount and Payment Date) and shows a warning with the extra amount if any are found. \"Review & clean up\" lists every group, pre-ticked to keep the oldest entry in each and delete the rest, with the details to check before deleting. Deleting only removes the row from this app — a duplicate already pushed to Master still needs to be removed from that Google Sheet by hand, and the review calls this out whenever it applies.",
+  ]},
+  { v:"6.32", date:"2026-09-14", title:"Payment Register: fixed the new Drive import getting stuck on the wrong tab, and Export now sorts oldest to newest", items:[
+    "Fixed: the v6.31 \"…or pick the live Google Sheet accounts sent back\" button could fail with \"No Payment Date / Mode column found\" when the picked file has more than one tab (very common — the same workbook often holds \"Payment to be done\" and \"Master\" as separate tabs) and the wrong one got read. It now tells you exactly which tab it read and what columns were on it, and lets you type the correct tab name to retry immediately — no more guessing or re-downloading as a workaround.",
+    "Changed: \"Export\" on Payment Register now writes the file oldest-to-newest instead of newest-to-oldest. The on-screen list itself is unchanged (still newest first, which is more useful while scrolling on a phone) — only the exported Excel file's row order changed.",
+  ]},
   { v:"6.31", date:"2026-09-14", title:"Payment Register's \"sheet accounts returned\" import can now read a live Google Sheet directly", items:[
     "New: on Payment Register, next to \"Update dates & modes from a downloaded sheet accounts returned\", a second button appears once Google Drive is connected — \"…or pick the live Google Sheet accounts sent back\". It opens the same Drive picker already used in Sync from Google Sheets (Google Sheets and Excel files both selectable), reads it the same well-tested way, and feeds it into the exact same Ref No./Name+Amount matching this screen already did.",
     "Why: this import has always used a plain device file picker, which can only see real files already on your device — it was never connected to Google Drive, so a live Google Sheet you keep in Drive (never downloaded) could not be selected there. That's not new or a regression; it just meant downloading the sheet as Excel first, every time, before it could be used here.",
@@ -3799,7 +3807,24 @@ function ERPApp(){
     // out Pending the first time often comes back later with a Payment Date
     // filled in. When that happens the matching row already in the app gets
     // marked Paid instead of being silently skipped — see toUpdate below.
-    const sheetDupKey = (r) => [dupKey(r), String(r.description||"").trim().toLowerCase()].join("|");
+    //
+    // v6.33: the matching key must NOT use the settled/backfilled .date —
+    // settleRequisitionDates backfills a blank requisition Date from the
+    // Payment Date (flagging it dateFromPayment) the moment a row first
+    // shows up already paid. A row that went out Pending with a blank Date
+    // computes "" for its key on that first sync; the exact same sheet row,
+    // resynced later now carrying a Payment Date, backfills that blank into
+    // a real date and computes a DIFFERENT key — even though the sheet's
+    // own Date column never changed. The match against the row already in
+    // the app then silently fails, and the row gets added again as a brand
+    // new one instead of promoting the original to Paid — this was the
+    // actual cause of the duplicate Payment Register entries reported.
+    // matchDate() undoes the backfill for matching purposes only (never for
+    // what's displayed or stored), so both syncs compute the same key.
+    const matchDate = (r) => r.dateFromPayment ? "" : String(r.date||"").trim();
+    const sheetDupKey = (r) => [matchDate(r), String(r.site||"").trim().toLowerCase(),
+      String(r.name||"").trim().toLowerCase(), Number(r.amount||0),
+      String(r.description||"").trim().toLowerCase()].join("|");
     const existingByKey = new Map(reqs.map(r => [sheetDupKey(r), r]));
     const seenKeys = new Set();
     const updatedIds = new Set();
@@ -16142,6 +16167,8 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
   const [site, setSite] = useState("all");
   const [preview, setPreview] = useState(null);
   const [drivePicking, setDrivePicking] = useState(false);
+  const [showDupReview, setShowDupReview] = useState(false);
+  const [dupDeleteChecked, setDupDeleteChecked] = useState(new Set());
   const [mode, setMode] = useState("topay");     // topay | register
   const [payTarget, setPayTarget] = useState(null);
   const [showDupes, setShowDupes] = useState(false);
@@ -16154,6 +16181,58 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
   const [editReq, setEditReq] = useState(null);
 
   const paid = useMemo(() => reqs.filter(r => isInRegister(r) && !isRolledUp(r)), [reqs]);
+
+  // v6.33: duplicate-payment checker. Groups the paid register by site+name+
+  // amount+Payment Date (deliberately NOT the requisition's own Date field —
+  // that's exactly the field a sync bug could leave inconsistent between two
+  // copies of the same real payment; Payment Date and Amount are what a
+  // repeat entry of the same actual payment will always share). Mirrors the
+  // same "same party, same amount, same day, same site" duplicate signal
+  // dupKey() already uses for imports — see its comment above.
+  const paidDuplicateGroups = useMemo(() => {
+    const groups = new Map();
+    paid.forEach(r => {
+      const key = [String(r.site||"").trim().toLowerCase(), String(r.name||"").trim().toLowerCase(),
+        Number(r.amount||0), String(r.paymentDate||"").trim()].join("|");
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(r);
+    });
+    return [...groups.values()]
+      .filter(g => g.length > 1)
+      .map(g => [...g].sort((a,b) => (a.createdAt||0) - (b.createdAt||0)))
+      .sort((a,b) => String(b[0].paymentDate||"").localeCompare(String(a[0].paymentDate||"")));
+  }, [paid]);
+  const duplicateExtraCount = paidDuplicateGroups.reduce((s,g) => s + g.length - 1, 0);
+  const duplicateExtraAmount = paidDuplicateGroups.reduce((s,g) =>
+    s + g.slice(1).reduce((s2,r) => s2 + Number(r.amount||0), 0), 0);
+
+  function openDupReview(){
+    const toCheck = new Set();
+    paidDuplicateGroups.forEach(g => g.slice(1).forEach(r => toCheck.add(r.id)));
+    setDupDeleteChecked(toCheck);
+    setShowDupReview(true);
+  }
+  function toggleDupCheck(id){
+    setDupDeleteChecked(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+  function deleteDuplicates(){
+    if (!dupDeleteChecked.size) return;
+    const toDelete = paid.filter(r => dupDeleteChecked.has(r.id));
+    const amt = toDelete.reduce((s,r)=>s+Number(r.amount||0), 0);
+    const pushedCount = toDelete.filter(r => r.masterPushStatus === "pushed").length;
+    const warn = pushedCount
+      ? `\n\n${pushedCount} of these were already pushed to Master — deleting here does NOT remove them from your Google Sheet. Remove those rows there by hand.`
+      : "";
+    if (!confirm(`Permanently delete ${dupDeleteChecked.size} duplicate payment(s) totaling ₹${fmtINR(amt)} from this app? This cannot be undone.${warn}`)) return;
+    setReqs(reqs.filter(r => !dupDeleteChecked.has(r.id)));
+    showToast(`${dupDeleteChecked.size} duplicate payment(s) deleted`);
+    setDupDeleteChecked(new Set());
+    setShowDupReview(false);
+  }
 
   // everything still awaiting payment, oldest first so nothing quietly ages
   const toPay = useMemo(() => reqs
@@ -16299,8 +16378,11 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
   // existing requisitions by Ref No. first, then Name+Amount, and queues the
   // result as a preview exactly the same way regardless of where the rows
   // came from.
+  // Returns true on a usable preview, false when nothing could be matched —
+  // the Drive import path (handleImportFromDrive) uses that to know when to
+  // offer a tab retry instead of just leaving the user stuck.
   function matchImportedRows(rows, fileName){
-    if (!rows || rows.length === 0) { showToast("That sheet has no rows", "error"); return; }
+    if (!rows || rows.length === 0) { showToast("That sheet has no rows", "error"); return false; }
 
     const sample = rows[0];
     const cRef  = pickCol(sample, ["Ref No.","Ref No","RefNo","Reference","Ref"]);
@@ -16311,7 +16393,7 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
 
     if (!cDate && !cMode) {
       showToast("No Payment Date / Mode column found in that file", "error");
-      return;
+      return false;
     }
 
     const matched = [], unmatched = [], ambiguous = [];
@@ -16348,6 +16430,7 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
     });
 
     setPreview({ matched, unmatched, ambiguous, usedRef: !!cRef, fileName });
+    return true;
   }
 
   function handleImport(e){
@@ -16388,7 +16471,26 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
       const picked = await sync.driveChooseSourceFile();
       if (!picked) return;
       const token = await sync.driveGetFreshToken(false);
-      const data = await driveReadFileById(picked.id, token, "", picked.resourceKey, false);
+      let data = await driveReadFileById(picked.id, token, "", picked.resourceKey, false);
+      if (!data || data.ok === false) throw new Error((data && data.error) || "That file could not be read");
+      const ok = matchImportedRows(data.rows, data.fileName || picked.name);
+      if (ok) return;
+      // v6.32: matchImportedRows already showed why it failed (no rows, or
+      // no Payment Date/Mode column). With no tab specified, driveReadFileById
+      // reads whichever tab isn't named "Read Me" first — the wrong choice
+      // whenever this Drive file has more than one tab (very common here:
+      // the same workbook often holds "Payment to be done" and "Master" as
+      // separate tabs). Rather than leaving the user stuck with a bare
+      // error, name the tab that actually got read and its columns, and
+      // offer to retry on a different, named tab.
+      const cols = (data.rows[0] ? Object.keys(data.rows[0]) : []).join(", ") || "(no columns)";
+      const tabName = window.prompt(
+        `That didn't have a Payment Date or Payment Mode column on the "${data.sheet}" tab of "${data.fileName || picked.name}".\n\n` +
+        `Columns found there: ${cols}\n\n` +
+        `If your data is on a different tab in this same file, type its exact name here to retry there. Leave blank to cancel.`
+      );
+      if (!tabName) return;
+      data = await driveReadFileById(picked.id, token, tabName, picked.resourceKey, false);
       if (!data || data.ok === false) throw new Error((data && data.error) || "That file could not be read");
       matchImportedRows(data.rows, data.fileName || picked.name);
     } catch (err) {
@@ -16419,7 +16521,12 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
 
   function exportRegister(){
     if (filtered.length === 0) { showToast("Nothing to export for this filter", "error"); return; }
-    const data = filtered.map(r => ({
+    // Exported oldest -> newest, the opposite of the on-screen list (which
+    // stays newest-first, unchanged, since that's the more useful order
+    // while scrolling recent payments on the device). The screen's own
+    // "filtered" sort is left alone — only the exported copy is reordered.
+    const exportRows = [...filtered].sort((a,b) => (a.paymentDate||a.date||"").localeCompare(b.paymentDate||b.date||""));
+    const data = exportRows.map(r => ({
       "Ref No.":r.refNo||"", Date:fmtDate(r.date), Site:r.site,
       Category:r.category, "Sub Category":r.subCategory, Name:r.name,
       Amount:Number(r.amount)||0, Description:r.description||"",
@@ -16852,6 +16959,64 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
           </div>
         )}
       </div>
+
+      {paidDuplicateGroups.length > 0 && (
+        <div style={{ background:"#FEECEC", border:`1.5px solid ${RED}`, borderRadius:16, padding:16, marginBottom:14 }}>
+          <div style={{ fontWeight:700, fontSize:14, color:INK, marginBottom:4 }}>
+            {paidDuplicateGroups.length} possible duplicate group{paidDuplicateGroups.length===1?"":"s"} found
+          </div>
+          <div style={{ fontSize:13, color:MUTED, marginBottom:10, lineHeight:1.5 }}>
+            {duplicateExtraCount} extra payment(s), ₹{fmtINR(duplicateExtraAmount)} — matched by same site, name,
+            amount and Payment Date. Your "Total paid" above may be inflated by this much.
+          </div>
+          <button onClick={()=>showDupReview ? setShowDupReview(false) : openDupReview()}
+            style={{ width:"100%", padding:"11px 0", borderRadius:12, fontSize:13.5, fontWeight:700,
+              background:RED, color:"#fff", border:"none", cursor:"pointer" }}>
+            {showDupReview ? "Hide review" : "Review & clean up"}
+          </button>
+
+          {showDupReview && (
+            <div style={{ marginTop:14 }}>
+              <div style={{ fontSize:12, color:MUTED, lineHeight:1.5, marginBottom:10 }}>
+                Each group is pre-ticked to keep the oldest entry and delete the rest — check the details and
+                adjust before deleting. Deleting here only removes the row from this app; if a duplicate was
+                already pushed to Master, that row still needs to be removed from your Google Sheet by hand.
+              </div>
+              {paidDuplicateGroups.map((group, gi) => (
+                <div key={gi} style={{ background:SURFACE, borderRadius:12, padding:12, marginBottom:10, border:`1px solid ${SAND}` }}>
+                  <div style={{ fontSize:12.5, fontWeight:700, color:INK, marginBottom:8 }}>
+                    {group[0].name} · ₹{fmtINR(group[0].amount)} · {group[0].site}
+                  </div>
+                  {group.map((r, ri) => {
+                    const checked = dupDeleteChecked.has(r.id);
+                    return (
+                      <div key={r.id} onClick={()=>toggleDupCheck(r.id)}
+                        style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 0",
+                          borderTop: ri>0 ? `1px solid ${SAND}` : "none", cursor:"pointer" }}>
+                        <SelectCheck on={checked} onToggle={()=>toggleDupCheck(r.id)} />
+                        <div style={{ flex:1, minWidth:0 }}>
+                          <div style={{ fontSize:12.5, color:INK }}>
+                            {r.refNo || "(no Ref No.)"} · Paid {fmtDate(r.paymentDate)}{ri===0 ? " · oldest, kept by default" : ""}
+                          </div>
+                          <div style={{ fontSize:11.5, color:MUTED, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                            {r.description || "—"} · added {r.createdAt ? new Date(r.createdAt).toLocaleDateString("en-IN") : "—"}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+              <button onClick={deleteDuplicates} disabled={!dupDeleteChecked.size}
+                style={{ width:"100%", marginTop:4, padding:"12px 0", borderRadius:12, fontSize:14, fontWeight:700,
+                  background: dupDeleteChecked.size ? RED : SAND, color: dupDeleteChecked.size ? "#fff" : MUTED,
+                  border:"none", cursor: dupDeleteChecked.size ? "pointer" : "default" }}>
+                {dupDeleteChecked.size ? `Delete ${dupDeleteChecked.size} selected duplicate(s)` : "Nothing selected"}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
       <button onClick={()=>goTo("categorybreakdown")}
         style={{ width:"100%", marginBottom:10, padding:"12px 0", borderRadius:14, fontSize:13.5, fontWeight:600,
