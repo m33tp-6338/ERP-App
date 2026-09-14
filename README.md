@@ -965,6 +965,39 @@ if a duplicate had already been pushed to Master, that row still needs to
 be removed from your Google Sheet by hand. The review screen tells you
 whenever that applies to what you've selected.
 
+## New in v6.34: name matching for Master, and paid rows move to the bottom
+
+**Problem 1 — names that don't quite match.** If "Payment to be done" and
+Master spell the same person's name slightly differently (a typo, a missing
+initial, "Pvt Ltd" on one but not the other), Master write-back couldn't
+tell they're the same row — it would add a new row instead of updating the
+existing one, and future syncs would keep missing it too.
+
+Next to a Master source in **Sync from Google Sheets**, tap **"Find likely
+name mismatches vs. this source"**. It compares the app's requisition names
+against that source's names and suggests close spellings for you to review
+— **Confirm** if it's really the same person, **Not the same** if it isn't.
+Nothing is ever merged automatically. For a case the scan can't catch (an
+unrelated nickname, say), there's also a manual "Add a name match by hand"
+form just below it. Every confirmed pair is listed under "Remembered name
+spellings," where you can remove one at any time. Once remembered, that
+pairing is used automatically whenever a payment is pushed to or cleared
+from Master, so you never have to retype it.
+
+**Problem 2 — Master not reading newest-payment-last.** Marking a row Paid
+used to update it in place, wherever it happened to sit in the sheet. Now,
+the moment a row is marked Paid, the app moves it to the very bottom of the
+sheet — so Master reads oldest-to-newest the same way the rest of your
+sheets do.
+
+**Safety note:** moving a row means directly relocating its cells, which
+doesn't rewrite formula references or resize merged cells the way opening
+the file in Excel or Google Sheets would. So this only happens when the
+*entire* sheet has no formulas and no merged cells anywhere on it — not
+just near the row being moved. If it does, the row is still fully updated
+(Payment Date, status, Ref No.) exactly where it was, just not relocated,
+so nothing on your sheet is ever put at risk.
+
 ## Payroll: fixed salaries and attendance-based pay
 
 A new **Payroll** tab handles the two different ways staff get paid, instead
