@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.34";
+const APP_VERSION = "6.33";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -80,10 +80,6 @@ const GOOGLE_DRIVE_APP_ID = "60621934527";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
-  { v:"6.34", date:"2026-09-14", title:"Name matching for Master, and paid rows now move to the bottom of the sheet", items:[
-    "New: when a name is spelled differently between the app's requisitions and your Master sheet (e.g. \"Devraj Kumar\" vs. \"Devaraj Kumar\"), Master write-back can now be told the two are the same person. In Sync from Google Sheets, next to a Master source, \"Find likely name mismatches\" scans for close spellings and lets you confirm or dismiss each one — nothing is ever merged automatically. You can also add a pair by hand for a case the scan can't guess, like an unrelated nickname. Confirmed pairs are remembered and used every time a payment is pushed to or cleared from that sheet.",
-    "New: when a row in your Master sheet gets marked Paid, the app now moves that row to the bottom of the sheet, so the newest payment is always last instead of sitting wherever it was originally typed. This only happens when the sheet has no formulas and no merged cells anywhere on it — if it does, the row is still fully updated in place exactly as before, since moving cells directly can't safely rewrite a formula's references or a merged block the way opening the sheet in Excel or Sheets would.",
-  ]},
   { v:"6.33", date:"2026-09-14", title:"Fixed a real cause of duplicate Payment Register entries, plus a duplicate checker and cleanup tool", items:[
     "Fixed: syncing \"Payment to be done\" (or Master) more than once could add the same payment a second time instead of marking the original Pending row Paid. Root cause — a requisition with a blank Date column has that blank filled in from its Payment Date the moment it first shows up Paid; matching a later resync of the exact same sheet row against what's already in the app used that filled-in date, which didn't exist yet the first time the row was Pending, so the match silently failed and the row was added again as new. Matching now ignores that filled-in value and uses only what the sheet's own Date column actually held, so a resync correctly recognizes the same row every time.",
     "New: Payment Register now checks the paid list for likely duplicates (same site, name, amount and Payment Date) and shows a warning with the extra amount if any are found. \"Review & clean up\" lists every group, pre-ticked to keep the oldest entry in each and delete the rest, with the details to check before deleting. Deleting only removes the row from this app — a duplicate already pushed to Master still needs to be removed from that Google Sheet by hand, and the review calls this out whenever it applies.",
@@ -1427,7 +1423,6 @@ function collectAllData(){
     dieselLogPurchases: loadKey("erp:dieselLogPurchases", []),
     dieselLogMachines: loadKey("erp:dieselLogMachines", []),
     settings: loadKey("erp:settings", { gstApiKey:"" }),
-    nameAliases: loadKey("erp:nameAliases", []),
     company: loadKey("erp:company", DEFAULT_COMPANY),
     lists: loadKey("erp:lists", DEFAULT_LISTS),
   };
@@ -2525,7 +2520,6 @@ function ERPApp(){
   const [dieselLogPurchases, setDieselLogPurchasesState] = useState([]);
   const [dieselLogMachines, setDieselLogMachinesState] = useState([]);
   const [settings, setSettingsState] = useState({ gstApiKey:"" });
-  const [nameAliases, setNameAliasesState] = useState([]);
   const [company, setCompanyState] = useState(DEFAULT_COMPANY);
   const [lists, setListsState] = useState(DEFAULT_LISTS);
   const [loaded, setLoaded] = useState(false);
@@ -2641,7 +2635,6 @@ function ERPApp(){
     if (data.dieselLogPurchases) { setDieselLogPurchasesState(data.dieselLogPurchases); saveKey("erp:dieselLogPurchases", data.dieselLogPurchases); }
     if (data.dieselLogMachines) { setDieselLogMachinesState(data.dieselLogMachines); saveKey("erp:dieselLogMachines", data.dieselLogMachines); }
     if (data.settings) { setSettingsState(data.settings); saveKey("erp:settings", data.settings); }
-    if (data.nameAliases) { setNameAliasesState(data.nameAliases); saveKey("erp:nameAliases", data.nameAliases); }
     if (data.company) { setCompanyState(data.company); saveKey("erp:company", data.company); }
     if (data.lists) { setListsState(data.lists); saveKey("erp:lists", data.lists); }
   }, []);
@@ -2668,7 +2661,6 @@ function ERPApp(){
     setDieselLogState(loadKey("erp:dieselLog", []));
     setDieselLogPurchasesState(loadKey("erp:dieselLogPurchases", []));
     setDieselLogMachinesState(loadKey("erp:dieselLogMachines", []));
-    setNameAliasesState(loadKey("erp:nameAliases", []));
     setCompanyState(loadKey("erp:company", DEFAULT_COMPANY));
     setListsState(loadKey("erp:lists", DEFAULT_LISTS));
     setLoaded(true);
@@ -3232,17 +3224,6 @@ function ERPApp(){
     if (!saveKey("erp:sheets", next)) showToast("Could not save sheet settings", "error");
     markDirty();
   }, [showToast, markDirty]);
-
-  // v6.34: confirmed name pairs ("Payment to be done" spelling -> Master's
-  // spelling) so the Master write-back can find the right row even when the
-  // two sheets don't spell a name identically. Never guessed automatically —
-  // only ever written here once the user confirms a suggested pair, or adds
-  // one by hand. See resolveAliasName / findLikelyNameMismatches below.
-  const setNameAliases = useCallback((next) => {
-    setNameAliasesState(next);
-    if (!saveKey("erp:nameAliases", next)) showToast("Could not save name aliases", "error");
-    markDirty();
-  }, [showToast, markDirty]);
   const setSettings = useCallback((next) => {
     setSettingsState(next);
     saveKey("erp:settings", next);
@@ -3309,7 +3290,7 @@ function ERPApp(){
         const ws = loaded.wb.Sheets[loaded.sheetName];
         const attempted = [];
         candidates.forEach(r => {
-          const result = writePaymentIntoSheet(ws, r, nameAliases);
+          const result = writePaymentIntoSheet(ws, r);
           if (result.ok) attempted.push({ r, action: result.action });
           else { patches[r.id] = { masterPushStatus:"failed", masterPushError: result.reason }; failedCount++; }
         });
@@ -3338,7 +3319,7 @@ function ERPApp(){
     } else if (failedCount && opts && opts.manual) {
       showToast("Nothing could be pushed to Master — check the source's status below for why", "error");
     }
-  }, [sheets, driveConnected, driveGetFreshToken, reqs, setReqs, showToast, nameAliases]);
+  }, [sheets, driveConnected, driveGetFreshToken, reqs, setReqs, showToast]);
 
   // The reverse — used when a requisition the app had already pushed is
   // reverted out of Paid (see RequisitionDetail's setStatus), so a mistake
@@ -3367,7 +3348,7 @@ function ERPApp(){
         const ws = loaded.wb.Sheets[loaded.sheetName];
         let changed = false;
         rows.forEach(r => {
-          const result = clearPaymentInSheet(ws, r, nameAliases);
+          const result = clearPaymentInSheet(ws, r);
           if (result.ok) { changed = true; patches[r.id] = { masterPushStatus:"", masterFileId:"", masterSourceId:"", masterTab:"" }; }
         });
         if (changed) {
@@ -3385,7 +3366,7 @@ function ERPApp(){
       setMasterPushBusy(false);
     }
     if (Object.keys(patches).length) setReqs(reqs.map(r => patches[r.id] ? { ...r, ...patches[r.id] } : r));
-  }, [sheets, driveConnected, driveGetFreshToken, reqs, setReqs, showToast, nameAliases]);
+  }, [sheets, driveConnected, driveGetFreshToken, reqs, setReqs, showToast]);
 
   // Backfill for payments already marked Paid before this feature existed
   // (or from before a Master push source was set up) — reachable from a
@@ -3827,20 +3808,23 @@ function ERPApp(){
     // filled in. When that happens the matching row already in the app gets
     // marked Paid instead of being silently skipped — see toUpdate below.
     //
-    // v6.33: dupKey() itself now ignores the settled/backfilled .date (see
-    // matchDate() by dupKey's own definition below) — settleRequisitionDates
-    // backfills a blank requisition Date from the Payment Date the moment a
-    // row first shows up already paid. A row that went out Pending with a
-    // blank Date computes "" for its key on that first sync; the exact same
-    // sheet row, resynced later now carrying a Payment Date, used to backfill
-    // that blank into a real date and compute a DIFFERENT key — even though
-    // the sheet's own Date column never changed — so the match against the
-    // row already in the app silently failed, and the row got added again as
-    // a brand new one instead of promoting the original to Paid. This was
-    // the actual cause of the duplicate Payment Register entries reported;
-    // masterRowKey (used by the Master write-back) shares the same dupKey()
-    // and so gets the same fix.
-    const sheetDupKey = (r) => [dupKey(r), String(r.description||"").trim().toLowerCase()].join("|");
+    // v6.33: the matching key must NOT use the settled/backfilled .date —
+    // settleRequisitionDates backfills a blank requisition Date from the
+    // Payment Date (flagging it dateFromPayment) the moment a row first
+    // shows up already paid. A row that went out Pending with a blank Date
+    // computes "" for its key on that first sync; the exact same sheet row,
+    // resynced later now carrying a Payment Date, backfills that blank into
+    // a real date and computes a DIFFERENT key — even though the sheet's
+    // own Date column never changed. The match against the row already in
+    // the app then silently fails, and the row gets added again as a brand
+    // new one instead of promoting the original to Paid — this was the
+    // actual cause of the duplicate Payment Register entries reported.
+    // matchDate() undoes the backfill for matching purposes only (never for
+    // what's displayed or stored), so both syncs compute the same key.
+    const matchDate = (r) => r.dateFromPayment ? "" : String(r.date||"").trim();
+    const sheetDupKey = (r) => [matchDate(r), String(r.site||"").trim().toLowerCase(),
+      String(r.name||"").trim().toLowerCase(), Number(r.amount||0),
+      String(r.description||"").trim().toLowerCase()].join("|");
     const existingByKey = new Map(reqs.map(r => [sheetDupKey(r), r]));
     const seenKeys = new Set();
     const updatedIds = new Set();
@@ -4536,7 +4520,7 @@ function ERPApp(){
         {tab==="payroll" && <PayrollTab vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} attendance={attendance} setAttendance={setAttendance} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
         {tab==="statement" && <MonthlyStatementTab reqs={reqs} expenses={expenses} cashTxns={cashTxns} cards={cards} recurring={recurring} showToast={showToast} goTo={navigate} />}
         {tab==="sitesummary" && <SiteSummaryTab reqs={reqs} expenses={expenses} cashTxns={cashTxns} cards={cards} diesel={diesel} utilities={utilities} machines={machines} vendors={vendors} showToast={showToast} goTo={navigate} />}
-        {tab==="sheets" && <SheetSyncTab sheets={sheets} setSheets={setSheets} reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} expenses={expenses} setExpenses={setExpenses} recurring={recurring} setRecurring={setRecurring} sync={syncProps} busy={sheetSyncBusy} previewQueue={sheetPreviewQueue} syncSheets={syncSheets} testConnection={testConnection} applyPreview={applyPreview} dismissPreview={()=>setSheetPreviewQueue(q=>q.slice(1))} pushAllEligiblePaidToMaster={pushAllEligiblePaidToMaster} masterPushBusy={masterPushBusy} isMasterEligible={isMasterEligible} skip={sheetSkip} setSkip={setSheetSkip} nameAliases={nameAliases} setNameAliases={setNameAliases} />}
+        {tab==="sheets" && <SheetSyncTab sheets={sheets} setSheets={setSheets} reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} expenses={expenses} setExpenses={setExpenses} recurring={recurring} setRecurring={setRecurring} sync={syncProps} busy={sheetSyncBusy} previewQueue={sheetPreviewQueue} syncSheets={syncSheets} testConnection={testConnection} applyPreview={applyPreview} dismissPreview={()=>setSheetPreviewQueue(q=>q.slice(1))} pushAllEligiblePaidToMaster={pushAllEligiblePaidToMaster} masterPushBusy={masterPushBusy} isMasterEligible={isMasterEligible} skip={sheetSkip} setSkip={setSheetSkip} />}
         {tab==="expenses" && <ExpensesTab expenses={expenses} setExpenses={setExpenses} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
         {tab==="receivables" && <ReceivablesTab reqs={reqs} setReqs={setReqs} showToast={showToast} goTo={navigate} />}
         {tab==="payments" && <PaymentRegisterTab reqs={reqs} setReqs={setReqs} vendors={vendors} expenses={expenses} setExpenses={setExpenses} cashTxns={cashTxns} cards={cards} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} sync={syncProps} />}
@@ -11809,59 +11793,7 @@ const FREQUENCIES = ["Monthly","Quarterly","Half-Yearly","Yearly","One-time"];
 
 function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, lists, setLists, showToast, goTo,
   expenses, setExpenses, recurring, setRecurring, sync, busy, previewQueue, syncSheets, testConnection, applyPreview, dismissPreview,
-  pushAllEligiblePaidToMaster, masterPushBusy, isMasterEligible, skip, setSkip, nameAliases, setNameAliases }){
-  // v6.34: name-mismatch review — scans a Master source's live names against
-  // the app's requisition names and suggests likely misspelling pairs for
-  // the user to confirm. Nothing here is applied automatically; a pair only
-  // becomes a saved alias (nameAliases) once the user taps Confirm, or adds
-  // one by hand below. Keyed by source id so switching sources doesn't mix
-  // up an in-progress review.
-  const [aliasPanelFor, setAliasPanelFor] = useState(null);
-  const [aliasSuggestions, setAliasSuggestions] = useState([]);
-  const [aliasScanBusy, setAliasScanBusy] = useState(false);
-  const [manualFrom, setManualFrom] = useState("");
-  const [manualTo, setManualTo] = useState("");
-
-  async function scanForNameMismatches(sh){
-    setAliasScanBusy(true);
-    setAliasSuggestions([]);
-    setAliasPanelFor(sh.id);
-    try {
-      const token = await sync.driveGetFreshToken(false);
-      const data = await driveReadFileById(sh.fileId, token, sh.tab, sh.resourceKey, false);
-      if (!data || data.ok === false) throw new Error((data && data.error) || "Could not read that source");
-      const nameCol = data.rows.length ? pickCol(data.rows[0], ["Name","Vendor","Party","Payee"]) : null;
-      const masterNames = nameCol ? data.rows.map(r => r[nameCol]).filter(Boolean) : [];
-      if (!nameCol) { showToast("Couldn't find a Name column on that source", "error"); return; }
-      const reqNames = [...new Set((reqs||[]).map(r => r.name).filter(Boolean))];
-      const suggestions = findLikelyNameMismatches(reqNames, masterNames, nameAliases);
-      setAliasSuggestions(suggestions);
-      if (!suggestions.length) showToast("No likely name mismatches found");
-    } catch (e) {
-      showToast(e.message || "Could not scan for name mismatches", "error");
-    } finally {
-      setAliasScanBusy(false);
-    }
-  }
-  function confirmAliasSuggestion(s){
-    setNameAliases([...(nameAliases||[]), { id: uid(), from: s.from, to: s.to }]);
-    setAliasSuggestions(prev => prev.filter(x => x !== s));
-    showToast(`Remembered: "${s.from}" -> "${s.to}"`);
-  }
-  function dismissAliasSuggestion(s){
-    setAliasSuggestions(prev => prev.filter(x => x !== s));
-  }
-  function addManualAlias(){
-    const from = manualFrom.trim(), to = manualTo.trim();
-    if (!from || !to) return showToast("Enter both spellings first", "error");
-    if (normKey(from) === normKey(to)) return showToast("Those already match — no alias needed", "error");
-    setNameAliases([...(nameAliases||[]).filter(a => normKey(a.from) !== normKey(from)), { id: uid(), from, to }]);
-    setManualFrom(""); setManualTo("");
-    showToast(`Remembered: "${from}" -> "${to}"`);
-  }
-  function deleteAlias(id){
-    setNameAliases((nameAliases||[]).filter(a => a.id !== id));
-  }
+  pushAllEligiblePaidToMaster, masterPushBusy, isMasterEligible, skip, setSkip }){
   const { driveConnected, connectDrive, driveChooseSourceFile,
     driveImportFolderId, driveImportFolderName, driveChooseImportFolder, clearDriveImportFolder } = sync;
   const [editing, setEditing] = useState(null);
@@ -12480,83 +12412,11 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
                     </button>
                   );
                 })()}
-
-                {sh.kind === "requisitions" && sh.pushPaymentDates && sh.fileId && (
-                  <div style={{ marginTop:8 }}>
-                    <button onClick={()=>scanForNameMismatches(sh)} disabled={aliasScanBusy}
-                      style={{ width:"100%", padding:"9px 0", borderRadius:12, fontSize:13, fontWeight:600,
-                        background:"#fff", color:"#3F6CA8", border:`1.5px solid #DCE3F0`, cursor: aliasScanBusy ? "default":"pointer" }}>
-                      {aliasScanBusy && aliasPanelFor===sh.id ? "Checking name spellings…" : "Find likely name mismatches vs. this source"}
-                    </button>
-
-                    {aliasPanelFor === sh.id && aliasSuggestions.length > 0 && (
-                      <div style={{ marginTop:8, background:"#FFF8E6", borderRadius:12, padding:"10px 12px" }}>
-                        <div style={{ fontSize:12, fontWeight:700, color:INK, marginBottom:6 }}>
-                          Possible spelling mismatches — confirm only the ones that are really the same person
-                        </div>
-                        {aliasSuggestions.map((s,i) => (
-                          <div key={i} style={{ display:"flex", alignItems:"center", gap:8, fontSize:13, padding:"6px 0",
-                            borderTop: i>0 ? `1px solid #F0E4BE` : "none" }}>
-                            <span style={{ flex:1, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
-                              "{s.from}" ↔ "{s.to}"
-                            </span>
-                            <button onClick={()=>confirmAliasSuggestion(s)}
-                              style={{ padding:"5px 10px", borderRadius:8, fontSize:12, fontWeight:700, background:GREEN, color:"#fff", border:"none", cursor:"pointer" }}>
-                              Confirm
-                            </button>
-                            <button onClick={()=>dismissAliasSuggestion(s)}
-                              style={{ padding:"5px 10px", borderRadius:8, fontSize:12, fontWeight:600, background:"#fff", color:MUTED, border:`1px solid ${SAND}`, cursor:"pointer" }}>
-                              Not the same
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
               </div>
             );
           })}
         </div>
       )}
-
-      {(nameAliases && nameAliases.length > 0) && (
-        <div style={{ background:"#fff", borderRadius:16, padding:14, marginBottom:14, border:`1px solid ${SAND}` }}>
-          <div style={{ fontSize:13, fontWeight:700, color:INK, marginBottom:8 }}>
-            Remembered name spellings ({nameAliases.length})
-          </div>
-          {nameAliases.map(a => (
-            <div key={a.id} style={{ display:"flex", alignItems:"center", gap:8, fontSize:13, padding:"5px 0" }}>
-              <span style={{ flex:1, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", color:INK }}>
-                "{a.from}" ↔ "{a.to}"
-              </span>
-              <button onClick={()=>deleteAlias(a.id)}
-                style={{ padding:"4px 9px", borderRadius:8, fontSize:12, fontWeight:600, background:"#fff", color:"#B3372C", border:`1px solid #F1C9C4`, cursor:"pointer" }}>
-                Remove
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-
-      <div style={{ background:"#fff", borderRadius:16, padding:14, marginBottom:14, border:`1px solid ${SAND}` }}>
-        <div style={{ fontSize:13, fontWeight:700, color:INK, marginBottom:8 }}>
-          Add a name match by hand
-        </div>
-        <div style={{ fontSize:12, color:MUTED, marginBottom:8 }}>
-          For a case the scan above won't catch — a nickname or an unrelated short name.
-        </div>
-        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:8 }}>
-          <input value={manualFrom} onChange={e=>setManualFrom(e.target.value)} placeholder="Spelled in the app"
-            style={{ padding:"9px 10px", borderRadius:10, border:`1.5px solid ${SAND}`, fontSize:13 }} />
-          <input value={manualTo} onChange={e=>setManualTo(e.target.value)} placeholder="Spelled in Master"
-            style={{ padding:"9px 10px", borderRadius:10, border:`1.5px solid ${SAND}`, fontSize:13 }} />
-        </div>
-        <button onClick={addManualAlias}
-          style={{ width:"100%", padding:"9px 0", borderRadius:12, fontSize:13, fontWeight:700, background:"#EEF0FE", color:"#3F6CA8", border:`1.5px solid #3F6CA8`, cursor:"pointer" }}>
-          Remember this pair
-        </button>
-      </div>
 
       <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
         {Object.keys(SYNC_KIND_META).map(k => {
@@ -15947,20 +15807,8 @@ function settleRequisitionDates(out){
 
 // The same amount to the same party on the same day is a normal thing to see
 // twice - once for each site. Only a repeat within one site is a duplicate.
-//
-// v6.33: a row's .date can be BACKFILLED from Payment Date the first time it
-// shows up already paid (see settleRequisitionDates above), so the very same
-// sheet row can compute two different .date values across two syncs (blank
-// the first time, backfilled the next) even though nothing about the row's
-// real identity changed. matchDate() ignores a backfilled date for matching
-// purposes only - it is never used for display or storage. dupKey() picks
-// this up automatically, and so does masterRowKey() below (it's built from
-// dupKey()), which keeps the Master write-back's row matching in sync too.
-function matchDate(r){
-  return r.dateFromPayment ? "" : String(r.date||"").trim();
-}
 function dupKey(r){
-  return [matchDate(r),
+  return [String(r.date||"").trim(),
           String(r.site||"").trim().toLowerCase(),
           String(r.name||"").trim().toLowerCase(),
           Number(r.amount||0)].join("|");
@@ -15982,15 +15830,8 @@ function importDupKey(r){
 // row the read side would recognise is the same row the write side finds)
 // — kept as its own module-level copy since that one is defined inline
 // there; if that logic ever changes, change this to match.
-//
-// v6.34: optional `aliases` ({from,to} pairs the user has confirmed — see
-// resolveAliasName below) let a name spelled differently in the app's
-// requisitions still match its Master-sheet row. Applied to BOTH sides
-// being compared, so it works regardless of which side carries the odd
-// spelling.
-function masterRowKey(r, aliases){
-  const nr = (aliases && aliases.length) ? { ...r, name: resolveAliasName(r.name, aliases) } : r;
-  return [dupKey(nr), String(r.description||"").trim().toLowerCase()].join("|");
+function masterRowKey(r){
+  return [dupKey(r), String(r.description||"").trim().toLowerCase()].join("|");
 }
 
 // Scans a worksheet (already loaded whole via driveReadWorkbookForWrite)
@@ -15998,64 +15839,20 @@ function masterRowKey(r, aliases){
 // the REQ_TEMPLATE column map (header text per field, "" where that column
 // doesn't exist in this sheet), the full grid, and the 0-based data-row
 // index within it (-1 if no match).
-function findMasterRowMatch(ws, targetReq, aliases){
+function findMasterRowMatch(ws, targetReq){
   const aoa = XLSX.utils.sheet_to_json(ws, { header:1, defval:"", raw:false });
   if (!aoa.length) return { aoa, headerRow:[], colMap:{}, rowIdx:-1 };
   const headerRow = aoa[0].map(h => String(h==null ? "" : h).trim());
   const colMap = autoMapHeaders(headerRow, REQ_TEMPLATE);
-  const targetKey = masterRowKey(targetReq, aliases);
+  const targetKey = masterRowKey(targetReq);
   for (let i = 1; i < aoa.length; i++) {
     const rowObj = {};
     headerRow.forEach((h, ci) => { if (h) rowObj[h] = aoa[i][ci]; });
     const { out } = mapRowGeneric(rowObj, REQ_TEMPLATE, colMap);
     settleRequisitionDates(out);
-    if (masterRowKey(out, aliases) === targetKey) return { aoa, headerRow, colMap, rowIdx:i };
+    if (masterRowKey(out) === targetKey) return { aoa, headerRow, colMap, rowIdx:i };
   }
   return { aoa, headerRow, colMap, rowIdx:-1 };
-}
-
-// Whether ws is safe to reorder rows in by copying cell objects directly.
-// A raw cell-object shift does not recompute formula references or resize
-// merged ranges the way real spreadsheet software does — so if ANYTHING
-// in the whole sheet is a formula or part of a merge, moving rows around
-// could silently point a formula elsewhere in the sheet at the wrong row,
-// or desync a merged block. Checked across the ENTIRE sheet, not just the
-// rows being moved, since a formula three columns away or twenty rows
-// below is just as much at risk.
-function sheetIsSafeToReorder(ws){
-  if (ws["!merges"] && ws["!merges"].length) return false;
-  for (const key in ws) {
-    if (key.charCodeAt(0) === 33 /* "!" */) continue;
-    const cell = ws[key];
-    if (cell && cell.f) return false;
-  }
-  return true;
-}
-
-// Moves the row at rowIdx to lastRow by shifting every row in between up
-// by one, then placing the original row's cells at the bottom. Copies the
-// actual cell objects (not display text), so numeric/date typing and any
-// per-cell formatting travel with the row unchanged. Only called after
-// sheetIsSafeToReorder(ws) has passed.
-function moveSheetRowToBottom(ws, rowIdx, lastRow){
-  const range = XLSX.utils.decode_range(ws["!ref"]);
-  const c0 = range.s.c, c1 = range.e.c;
-  const moved = {};
-  for (let c = c0; c <= c1; c++) {
-    const addr = XLSX.utils.encode_cell({ r: rowIdx, c });
-    if (ws[addr]) moved[c] = ws[addr];
-  }
-  for (let r = rowIdx; r < lastRow; r++) {
-    for (let c = c0; c <= c1; c++) {
-      const from = XLSX.utils.encode_cell({ r: r + 1, c });
-      const to = XLSX.utils.encode_cell({ r, c });
-      if (ws[from]) ws[to] = ws[from]; else delete ws[to];
-    }
-  }
-  for (let c = c0; c <= c1; c++) {
-    const to = XLSX.utils.encode_cell({ r: lastRow, c });
-    if (moved[c]) ws[to] = moved[c]; else delete ws[to];
-  }
 }
 
 // Writes one requisition's Payment Date (and Payment Status, if that
@@ -16065,8 +15862,8 @@ function moveSheetRowToBottom(ws, rowIdx, lastRow){
 // `ws` in place; touches nothing else in the sheet, and nothing in any
 // other tab (those live untouched on the same `wb` object this `ws` came
 // from). Returns what happened so the caller can summarise it.
-function writePaymentIntoSheet(ws, req, aliases){
-  const { aoa, headerRow, colMap, rowIdx } = findMasterRowMatch(ws, req, aliases);
+function writePaymentIntoSheet(ws, req){
+  const { aoa, headerRow, colMap, rowIdx } = findMasterRowMatch(ws, req);
   if (!headerRow.length) return { ok:false, reason:"the sheet is empty" };
   if (!colMap.paymentDate) return { ok:false, reason:"no Payment Date column found in this sheet" };
   const dateCol = headerRow.indexOf(colMap.paymentDate);
@@ -16100,20 +15897,6 @@ function writePaymentIntoSheet(ws, req, aliases){
     if (refNoCol >= 0 && req.refNo) {
       const existingRefNo = String((aoa[rowIdx] && aoa[rowIdx][refNoCol]) || "").trim();
       if (!existingRefNo) setCell(rowIdx, refNoCol, req.refNo);
-    }
-    // v6.34: now that this row is Paid, move it to the bottom of the sheet
-    // so Master reads newest-payment-last, matching how the user's other
-    // sheets are kept. Only when the whole sheet has no formulas or merged
-    // cells (see sheetIsSafeToReorder) — otherwise leave it exactly where
-    // it was, fully updated, rather than risk corrupting something a raw
-    // cell shift can't safely adjust.
-    const lastRow = aoa.length - 1;
-    if (rowIdx < lastRow) {
-      if (sheetIsSafeToReorder(ws)) {
-        moveSheetRowToBottom(ws, rowIdx, lastRow);
-        return { ok:true, action:"updated-moved" };
-      }
-      return { ok:true, action:"updated-guarded" };
     }
     return { ok:true, action:"updated" };
   }
@@ -16153,8 +15936,8 @@ function writePaymentIntoSheet(ws, req, aliases){
 // also undoes what was pushed to Master. Only ever called for a
 // requisition carrying masterFileId — proof the app, not the user by
 // hand, wrote that cell — see the reqs-diff effect in ERPApp.
-function clearPaymentInSheet(ws, req, aliases){
-  const { headerRow, colMap, rowIdx } = findMasterRowMatch(ws, req, aliases);
+function clearPaymentInSheet(ws, req){
+  const { headerRow, colMap, rowIdx } = findMasterRowMatch(ws, req);
   if (rowIdx < 0) return { ok:false, reason:"that row is no longer in this sheet" };
   if (!colMap.paymentDate) return { ok:false, reason:"no Payment Date column found in this sheet" };
   const dateCol = headerRow.indexOf(colMap.paymentDate);
@@ -16165,70 +15948,6 @@ function clearPaymentInSheet(ws, req, aliases){
 }
 
 function normKey(k){ return String(k||"").toLowerCase().replace(/[^a-z0-9]/g,""); }
-
-// v6.34: name-alias lookup. aliases is a user-maintained list of
-// {from, to} pairs — "from" is a spelling that shows up in the app's own
-// requisitions, "to" is the spelling actually used in the Master sheet.
-// Never guessed or applied automatically: a pair only exists here once the
-// user has confirmed a suggested match, or typed one in by hand (see
-// SheetSyncTab's alias review UI). Matching ignores case/punctuation via
-// normKey so "R. Kumar" and "R Kumar" are treated the same "from".
-function resolveAliasName(name, aliases){
-  if (!aliases || !aliases.length) return name;
-  const key = normKey(name);
-  if (!key) return name;
-  const hit = aliases.find(a => normKey(a.from) === key);
-  return hit ? hit.to : name;
-}
-
-// v6.34: suggests likely name-mismatch pairs between the app's requisition
-// names and a live list of Master-sheet names, for the user to review and
-// confirm (never auto-applied). Uses a simple Levenshtein edit distance;
-// a pair is only suggested when the distance is small relative to the
-// name's length, and never when the names already normalise identically
-// (already a match) or a confirmed alias already covers the pair.
-function levenshtein(a, b){
-  a = String(a||""); b = String(b||"");
-  const m = a.length, n = b.length;
-  if (!m) return n;
-  if (!n) return m;
-  let prev = Array.from({length:n+1}, (_,j) => j);
-  for (let i = 1; i <= m; i++) {
-    const cur = [i];
-    for (let j = 1; j <= n; j++) {
-      cur[j] = a[i-1] === b[j-1]
-        ? prev[j-1]
-        : 1 + Math.min(prev[j-1], prev[j], cur[j-1]);
-    }
-    prev = cur;
-  }
-  return prev[n];
-}
-function findLikelyNameMismatches(reqNames, masterNames, aliases){
-  const aliasedFrom = new Set((aliases||[]).map(a => normKey(a.from)));
-  const masterByKey = new Map();
-  (masterNames||[]).forEach(n => { const k = normKey(n); if (k && !masterByKey.has(k)) masterByKey.set(k, n); });
-  const reqByKey = new Map();
-  (reqNames||[]).forEach(n => { const k = normKey(n); if (k && !reqByKey.has(k)) reqByKey.set(k, n); });
-  const suggestions = [];
-  reqByKey.forEach((reqName, reqKey) => {
-    if (masterByKey.has(reqKey)) return;   // already matches exactly
-    if (aliasedFrom.has(reqKey)) return;   // already aliased
-    let best = null, bestDist = Infinity;
-    masterByKey.forEach((masterName, masterKey) => {
-      const dist = levenshtein(reqKey, masterKey);
-      if (dist < bestDist) { bestDist = dist; best = masterName; }
-    });
-    // Allow roughly one edit per 5 characters (min 1, max 3) — catches a
-    // typo, a missing initial, or a transposed pair without matching two
-    // genuinely different people.
-    const threshold = Math.max(1, Math.min(3, Math.round(reqKey.length / 5)));
-    if (best && bestDist > 0 && bestDist <= threshold) {
-      suggestions.push({ from: reqName, to: best, distance: bestDist });
-    }
-  });
-  return suggestions.sort((a,b) => a.distance - b.distance);
-}
 function pickCol(row, candidates){
   const keys = Object.keys(row);
   for (const cand of candidates) {
