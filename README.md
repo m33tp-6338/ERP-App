@@ -965,6 +965,144 @@ if a duplicate had already been pushed to Master, that row still needs to
 be removed from your Google Sheet by hand. The review screen tells you
 whenever that applies to what you've selected.
 
+## New in v6.37: fixed real Google Sheets sync/Master duplicates and a growing blank gap in Master
+
+Two real bugs, found and confirmed against an actual uploaded Master file
+(20 duplicate row-pairs and a 483-row blank gap at the bottom of the sheet),
+not guessed from the general mechanism.
+
+**Bug 1 — an exact Description match was causing already-recorded payments
+to be added again.** Syncing from Google Sheets, and pushing a payment to
+Master, used to require a payment's Description text to match character-
+for-character to recognise it as something already recorded. Real Master
+sheets drift in wording over time — a note re-typed slightly differently, an
+extra space, "Rent" edited to "House Rent" — and every one of those drifts
+was enough to make the app treat an already-recorded payment as brand new,
+adding it again as a duplicate row. **Fixed:** matching now uses Date + Site
++ Name + Amount only — the fields that actually identify "the same payment"
+in practice. (Small accepted trade-off: two genuinely different payments to
+the same person, same site, same day, for the exact same amount, would now
+be treated as one. In real data this is rare — a repeat trip fare or a
+second week's labour at a different amount is unaffected.)
+
+**Bug 2 — new Master rows could land hundreds of rows below the real data,
+opening a growing blank gap.** Adding a brand-new row to Master used to
+trust the sheet's own declared size. Google Sheets/Excel can report a used
+range far larger than the real data — rows that were once typed into and
+later cleared (but not deleted), or a sheet that was simply sized bigger
+than it needed to be. Trusting that blindly meant a newly pushed payment
+could land far below the actual last row of data, leaving a large blank gap
+in between. **Fixed:** a new row (and a row being moved to the bottom after
+being marked Paid) now goes right after the true last row that actually has
+data, found by scanning for it directly, regardless of what the sheet
+declares its own size to be.
+
+**What this does not do:** neither fix touches rows already sitting in your
+sheet. If your Master file already has duplicate pairs or a blank gap from
+before this update, those are not cleaned up automatically — every sync/push
+from here on simply stops adding to either problem. To tidy up an existing
+sheet by hand: sort or filter Master by Ref No./Name/Amount to spot
+duplicate pairs (the two rows will have the same Site, Name, Amount and
+Date, but slightly different Ref No. and Description — keep whichever one
+has the Payment Date filled in and delete the other), then select and delete
+any fully blank rows in between to close the gap. Take a copy of the sheet
+before doing this, as with any manual edit.
+
+**Also worth knowing (not changed this update):** payments that arrive
+already marked Paid — via a sheet sync or a bulk import, rather than being
+marked Paid live inside the app — are not pushed to Master automatically.
+Only a Pending→Paid change made live in the app auto-pushes. An
+already-Paid import still needs the **"Push N paid requisition(s) to Master
+now"** button (Sync from Google Sheets tab) to reach Master. This was kept
+manual on purpose so nothing gets pushed to your sheet without you choosing
+the moment — worth checking after every sync/import so payments don't sit
+unpushed.
+
+## New in v6.36: one-tap "Settle up" for a partner's site/travel expenses
+
+On **Expenses**, the "Spent, not yet claimed" card now shows a **Settle up**
+button next to each partner's owed amount. One tap raises a Pending
+reimbursement requisition covering everything currently owed to them —
+same as manually opening a new requisition and ticking every one of their
+expenses, just without the ticking.
+
+**Safe against double-claiming.** Only an expense that has never been put
+on any requisition is picked up. If part of what's owed is already sitting
+on an earlier Pending requisition (raised but not yet paid), that part is
+shown separately as "already on a requisition" and left out of the next
+Settle up — so tapping it twice, or once after a partial claim, can never
+cover the same rupee twice. If everything owed to someone is already
+claimed, no Settle up button shows for them at all.
+
+## New in v6.35: Utility bills from the Payment Register now import into the Utilities tab automatically
+
+A requisition in the **Utility** category is now imported onto the
+**Utilities** tab the moment it's marked **Paid** — however it got there
+(Change status, a sheet sync, a Master sync). Month, site, provider, bill
+amount and payment mode are filled in automatically, with a note recording
+the source Ref No./PR Number so you can always trace an entry back.
+
+**Card fees are kept separate from the bill.** The created entry's Bill
+Amount and Paid Amount are always the requisition's own **Amount** (the
+real bill) — never its Paid Amount, which can run higher when a card
+convenience fee was added on top. Whenever Paid Amount exceeds Amount, the
+difference is written to the entry's own **Card Charge** field instead of
+being folded into the bill, so the bill total always matches the real bill
+and the fee stays visible on its own.
+
+Sub-Category is matched to a Utility Type (electricity/water/internet/
+mobile/gas/municipal tax, including variants like "Wifi" or "Power") where
+possible; anything unmatched is added as a new Utility Type rather than
+dropped. Payment Mode only carries over when it maps cleanly (NEFT/RTGS/
+IMPS → "NEFT / IMPS", UPI, Cash, Cheque) — a mode like "Other" is left
+blank rather than guessed, the same caution the existing Master push
+already uses.
+
+A **"Push N paid Utility bill(s) from Payment Register now"** button on the
+Utilities tab backfills anything already Paid before this update. Reverting
+a requisition from Paid back to Pending removes the Utilities-tab entry it
+created, and each requisition is imported at most once — no duplicates from
+marking Paid, reverting, and marking Paid again.
+
+This is a fully separate mechanism from the existing Master push (its own
+tracking flag, its own detection logic), so it can never interfere with
+Master write-back even if one of the two has a problem — and it stays
+separate from "Record as a partner expense" too, since it only ever reads
+the requisition and never creates or touches an Expense record.
+
+## New in v6.34: name matching for Master, and paid rows move to the bottom
+
+**Problem 1 — names that don't quite match.** If "Payment to be done" and
+Master spell the same person's name slightly differently (a typo, a missing
+initial, "Pvt Ltd" on one but not the other), Master write-back couldn't
+tell they're the same row — it would add a new row instead of updating the
+existing one, and future syncs would keep missing it too.
+
+Next to a Master source in **Sync from Google Sheets**, tap **"Find likely
+name mismatches vs. this source"**. It compares the app's requisition names
+against that source's names and suggests close spellings for you to review
+— **Confirm** if it's really the same person, **Not the same** if it isn't.
+Nothing is ever merged automatically. For a case the scan can't catch (an
+unrelated nickname, say), there's also a manual "Add a name match by hand"
+form just below it. Every confirmed pair is listed under "Remembered name
+spellings," where you can remove one at any time. Once remembered, that
+pairing is used automatically whenever a payment is pushed to or cleared
+from Master, so you never have to retype it.
+
+**Problem 2 — Master not reading newest-payment-last.** Marking a row Paid
+used to update it in place, wherever it happened to sit in the sheet. Now,
+the moment a row is marked Paid, the app moves it to the very bottom of the
+sheet — so Master reads oldest-to-newest the same way the rest of your
+sheets do.
+
+**Safety note:** moving a row means directly relocating its cells, which
+doesn't rewrite formula references or resize merged cells the way opening
+the file in Excel or Google Sheets would. So this only happens when the
+*entire* sheet has no formulas and no merged cells anywhere on it — not
+just near the row being moved. If it does, the row is still fully updated
+(Payment Date, status, Ref No.) exactly where it was, just not relocated,
+so nothing on your sheet is ever put at risk.
+
 ## Payroll: fixed salaries and attendance-based pay
 
 A new **Payroll** tab handles the two different ways staff get paid, instead

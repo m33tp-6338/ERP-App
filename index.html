@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.33";
+const APP_VERSION = "6.37";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -80,6 +80,27 @@ const GOOGLE_DRIVE_APP_ID = "60621934527";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.37", date:"2026-09-15", title:"Fixed real Google Sheets sync/Master duplicates and a growing blank gap in Master, found in your actual file", items:[
+    "Fixed: syncing from Google Sheets, or pushing a payment to Master, used to require the Description text to match EXACTLY to recognise a payment already recorded — so any drift in wording (an extra space, \"Rent\" re-typed as \"House Rent\", a note edited slightly) made the app treat an already-recorded payment as brand new, adding it again. Matching now uses Date + Site + Name + Amount only, which is what actually identifies \"the same payment\" in practice. Checked directly against your real Master file: this explains all 20 duplicate pairs found in it.",
+    "Fixed: adding a brand-new row to Master used to trust the sheet's own declared size, which Google Sheets/Excel can report as far larger than the real data (rows once typed into and later cleared, or a sheet simply sized bigger than needed) — so a new payment could land hundreds of rows below the real last row, opening a growing blank gap. New rows (and rows being moved to the bottom after being marked Paid) now go right after the true last row that actually has data, wherever that really is. This is exactly the 483-row blank gap (rows 798-1280) found in your Master sheet.",
+    "Neither fix touches rows already sitting in your sheet — the existing 20 duplicate pairs and the existing blank gap in your current Master file are not cleaned up automatically. See the README for how to tidy that up by hand; every future sync/push will not add to either problem.",
+  ]},
+  { v:"6.36", date:"2026-09-15", title:"One-tap \"Settle up\" for a partner's site/travel expenses", items:[
+    "New: on Expenses, next to each partner's \"still owed\" amount under \"Spent, not yet claimed,\" a \"Settle up\" button raises a Pending reimbursement requisition covering everything currently owed to them in one tap — no more opening a new requisition and ticking each expense by hand.",
+    "Only an expense never yet put on any requisition is picked up. One already sitting on an earlier Pending reimbursement (raised but not yet paid) is left alone, so tapping Settle up again can never double-claim the same rupee — if part of what's owed is already on a requisition, that part is shown separately (\"₹X already on a requisition\") and only the remainder gets a Settle up button.",
+    "The requisition this creates is identical to what \"Create Claim\" already built by hand — same Reimbursement/Partner Expense tagging, same linking back to the expense(s) it covers — this is purely a shortcut for the everyday case of settling up everything owed to one person at once.",
+  ]},
+  { v:"6.35", date:"2026-09-14", title:"Utility bills from the Payment Register now import into the Utilities tab automatically", items:[
+    "New: a requisition in the Utility category is now imported into the Utilities tab the moment it's marked Paid — no matter how it got there (Change status, a sheet sync, a Master sync). The month, site, provider, bill amount and payment mode are all filled in from the requisition automatically, and a note records which Ref No./PR Number it came from so you can always trace a Utilities-tab entry back to its original requisition.",
+    "Amount handling: the Bill Amount and Paid Amount on the created entry are always the requisition's own Amount (what was actually billed) — never the Paid Amount, since that can be higher when a card convenience fee was added on top of the bill. Whenever Paid Amount exceeds Amount, the difference is written to the new entry's own Card Charge field instead of being folded into the bill, so the bill total on the Utilities tab always matches the real bill and the fee is visible separately.",
+    "The requisition's Sub-Category is matched to a Utility Type (electricity/water/internet/mobile/gas/municipal tax, including common variants like \"Wifi\" or \"Power\") wherever possible; anything that doesn't match an existing type is added as a new Utility Type automatically rather than dropped or mis-filed. Payment Mode is only carried over when it maps cleanly (NEFT/RTGS/IMPS → \"NEFT / IMPS\", UPI, Cash, Cheque) — a mode like \"Other\" that isn't a clean match is left blank rather than guessed, exactly the same caution the existing Master push already uses for its own risky fields.",
+    "A \"Push N paid Utility bill(s) from Payment Register now\" button on the Utilities tab backfills anything already Paid before this update, and catches anything the automatic path might ever miss. Reverting a requisition from Paid back to Pending automatically removes the Utilities-tab entry it created, so undoing a mistaken Paid mark never leaves an orphaned bill behind. Every requisition is imported at most once — marking Paid, reverting, and marking Paid again does not create duplicates.",
+    "This is a fully separate mechanism from the existing Master push (its own tracking flag, its own detection logic) so it can never interfere with Master write-back even if one of the two has a problem. It also stays completely separate from the Record-as-a-partner-expense flow — importing a Utility bill here only ever reads the requisition, it never creates or touches an Expense record, so it cannot introduce a double-count on its own.",
+  ]},
+  { v:"6.34", date:"2026-09-14", title:"Name matching for Master, and paid rows now move to the bottom of the sheet", items:[
+    "New: when a name is spelled differently between the app's requisitions and your Master sheet (e.g. \"Devraj Kumar\" vs. \"Devaraj Kumar\"), Master write-back can now be told the two are the same person. In Sync from Google Sheets, next to a Master source, \"Find likely name mismatches\" scans for close spellings and lets you confirm or dismiss each one — nothing is ever merged automatically. You can also add a pair by hand for a case the scan can't guess, like an unrelated nickname. Confirmed pairs are remembered and used every time a payment is pushed to or cleared from that sheet.",
+    "New: when a row in your Master sheet gets marked Paid, the app now moves that row to the bottom of the sheet, so the newest payment is always last instead of sitting wherever it was originally typed. This only happens when the sheet has no formulas and no merged cells anywhere on it — if it does, the row is still fully updated in place exactly as before, since moving cells directly can't safely rewrite a formula's references or a merged block the way opening the sheet in Excel or Sheets would.",
+  ]},
   { v:"6.33", date:"2026-09-14", title:"Fixed a real cause of duplicate Payment Register entries, plus a duplicate checker and cleanup tool", items:[
     "Fixed: syncing \"Payment to be done\" (or Master) more than once could add the same payment a second time instead of marking the original Pending row Paid. Root cause — a requisition with a blank Date column has that blank filled in from its Payment Date the moment it first shows up Paid; matching a later resync of the exact same sheet row against what's already in the app used that filled-in date, which didn't exist yet the first time the row was Pending, so the match silently failed and the row was added again as new. Matching now ignores that filled-in value and uses only what the sheet's own Date column actually held, so a resync correctly recognizes the same row every time.",
     "New: Payment Register now checks the paid list for likely duplicates (same site, name, amount and Payment Date) and shows a warning with the extra amount if any are found. \"Review & clean up\" lists every group, pre-ticked to keep the oldest entry in each and delete the rest, with the details to check before deleting. Deleting only removes the row from this app — a duplicate already pushed to Master still needs to be removed from that Google Sheet by hand, and the review calls this out whenever it applies.",
@@ -646,7 +667,7 @@ function warnIfDuplicateLedgerName(vendors, v){
   );
 }
 const emptyReq = {
-  coveredById:"", coveredByRef:"", dupOk:[], id:"", refNo:"", date:"", site:"", category:"", subCategory:"", vendorId:"", name:"", amount:"", description:"", paymentStatus:"Pending", accNo:"", ifsc:"", paidBy:"Company", paymentDate:"", paymentMode:"", paidAmount:"", recovered:false, isReimbursement:false, claimId:"", exported:false, createdAt:0,
+  coveredById:"", coveredByRef:"", dupOk:[], id:"", refNo:"", date:"", site:"", category:"", subCategory:"", vendorId:"", name:"", amount:"", description:"", paymentStatus:"Pending", accNo:"", ifsc:"", paidBy:"Company", paymentDate:"", paymentMode:"", paidAmount:"", recovered:false, isReimbursement:false, claimId:"", exported:false, utilityImported:false, createdAt:0,
   salaryMonth:"" }; // set only on a requisition generated from Payroll, e.g. "2026-08" - how "already generated this month" is detected without guessing from text
 const PAYMENT_MODES = ["NEFT","RTGS","IMPS","UPI","Cheque","Cash","Other"];
 
@@ -1018,7 +1039,8 @@ function machineEfficiency(machineId, entries, meterType){
 // ---- utilities ----
 const emptyUtility = { id:"", month:"", site:"", utilityType:"Electricity", provider:"", consumerNo:"",
   billNo:"", periodFrom:"", periodTo:"", dueDate:"", billAmount:"", paidAmount:"", paymentDate:"",
-  paymentMode:"", cardId:"", cardCharge:"", meterPrev:"", meterCurr:"", hasBill:false, notes:"", createdAt:0 };
+  paymentMode:"", cardId:"", cardCharge:"", meterPrev:"", meterCurr:"", hasBill:false, notes:"",
+  fromReqId:"", createdAt:0 };
 const UTILITY_MODES = ["UPI","NEFT / IMPS","Debit Card","Credit Card","Cash","Auto-debit","Cheque"];
 
 function utilityOutstanding(u){
@@ -1077,6 +1099,77 @@ function partyBalance(vendor, reqs, entries){
 
 const REIMB_SITE = "Office";
 const REIMB_CATEGORY = "Partner Expense";
+
+// A requisition filed under this category is a utility bill. Once it is marked
+// Paid it is eligible to be pulled into the Utilities tab automatically -
+// see isUtilityEligible / utilityFromReq / importUtilitiesFromReqs.
+const UTILITY_CATEGORY = "Utility";
+
+function isUtilityEligible(r){
+  return !!r && r.category === UTILITY_CATEGORY && r.paymentStatus === "Paid" && !r.utilityImported;
+}
+
+// Sub-Category on the requisition (free text, e.g. "Wifi") doesn't always match
+// the Utilities tab's own type list (e.g. "Internet") - a small alias table
+// bridges the common cases, and anything unrecognised is used as-is (and, same
+// as the spreadsheet importer already does, added to the type list so it shows
+// up as a real option afterwards instead of silently falling back).
+const UTILITY_TYPE_ALIASES = {
+  "wifi":"Internet", "internet":"Internet", "broadband":"Internet",
+  "electricity":"Electricity", "power":"Electricity", "current bill":"Electricity",
+  "water":"Water", "mobile":"Mobile", "phone":"Mobile", "telephone":"Mobile",
+  "gas":"Gas", "municipal tax":"Municipal Tax", "property tax":"Municipal Tax",
+};
+function utilityTypeForSubCategory(subCategory, utilTypes){
+  const raw = String(subCategory||"").trim();
+  if (!raw) return (utilTypes && utilTypes[0]) || "Electricity";
+  const hit = UTILITY_TYPE_ALIASES[raw.toLowerCase()];
+  if (hit) return hit;
+  const exact = (utilTypes||[]).find(t => t.toLowerCase() === raw.toLowerCase());
+  return exact || raw;
+}
+
+// Requisition payment modes (NEFT/RTGS/IMPS/UPI/Cheque/Cash/Other) don't line up
+// 1:1 with the Utilities tab's own mode list - map what can be mapped safely and
+// leave the rest blank rather than guess (e.g. "Other" could be a card, cash, or
+// auto-debit - no way to tell, so it's left for the person to fill in).
+const UTILITY_MODE_FROM_REQ_MODE = {
+  "UPI":"UPI", "Cash":"Cash", "Cheque":"Cheque",
+  "NEFT":"NEFT / IMPS", "RTGS":"NEFT / IMPS", "IMPS":"NEFT / IMPS",
+};
+function utilityModeForReqMode(mode){
+  return UTILITY_MODE_FROM_REQ_MODE[String(mode||"").trim()] || "";
+}
+
+// Builds a Utilities-tab entry from a paid Utility-category requisition.
+// A requisition only carries one "amount" plus an optional actual-paid figure
+// (paidAmount, e.g. a card convenience fee on top of the bill) - split that
+// back into the Utilities tab's own Bill Amount / Paid Amount / Card Charge so
+// the bill still shows as fully settled (₹0 outstanding) while the extra charge
+// is tracked separately rather than silently absorbed into the bill total.
+function utilityFromReq(r, lists){
+  const utilTypes = (lists && lists.utilityTypes) ? lists.utilityTypes : DEFAULT_LISTS.utilityTypes;
+  const billAmount = Number(r.amount || 0);
+  const actuallyPaid = (r.paidAmount === "" || r.paidAmount == null) ? billAmount : Number(r.paidAmount || 0);
+  const cardCharge = Math.max(0, actuallyPaid - billAmount);
+  return {
+    ...emptyUtility,
+    id: uid(),
+    month: (r.paymentDate || r.date || "").slice(0, 7),
+    site: r.site || "",
+    utilityType: utilityTypeForSubCategory(r.subCategory, utilTypes),
+    provider: r.name || "",
+    billAmount,
+    paidAmount: billAmount,
+    cardCharge,
+    paymentDate: r.paymentDate || "",
+    paymentMode: utilityModeForReqMode(r.paymentMode),
+    hasBill: true,
+    notes: `Imported from Payment Register${r.refNo ? ` (${r.refNo})` : ""}`,
+    fromReqId: r.id,
+    createdAt: Date.now(),
+  };
+}
 
 // Reference numbers are the guard against the same payment being entered twice.
 // The month comes from the entry's own date, and the number is checked against
@@ -1423,6 +1516,7 @@ function collectAllData(){
     dieselLogPurchases: loadKey("erp:dieselLogPurchases", []),
     dieselLogMachines: loadKey("erp:dieselLogMachines", []),
     settings: loadKey("erp:settings", { gstApiKey:"" }),
+    nameAliases: loadKey("erp:nameAliases", []),
     company: loadKey("erp:company", DEFAULT_COMPANY),
     lists: loadKey("erp:lists", DEFAULT_LISTS),
   };
@@ -2520,6 +2614,7 @@ function ERPApp(){
   const [dieselLogPurchases, setDieselLogPurchasesState] = useState([]);
   const [dieselLogMachines, setDieselLogMachinesState] = useState([]);
   const [settings, setSettingsState] = useState({ gstApiKey:"" });
+  const [nameAliases, setNameAliasesState] = useState([]);
   const [company, setCompanyState] = useState(DEFAULT_COMPANY);
   const [lists, setListsState] = useState(DEFAULT_LISTS);
   const [loaded, setLoaded] = useState(false);
@@ -2635,6 +2730,7 @@ function ERPApp(){
     if (data.dieselLogPurchases) { setDieselLogPurchasesState(data.dieselLogPurchases); saveKey("erp:dieselLogPurchases", data.dieselLogPurchases); }
     if (data.dieselLogMachines) { setDieselLogMachinesState(data.dieselLogMachines); saveKey("erp:dieselLogMachines", data.dieselLogMachines); }
     if (data.settings) { setSettingsState(data.settings); saveKey("erp:settings", data.settings); }
+    if (data.nameAliases) { setNameAliasesState(data.nameAliases); saveKey("erp:nameAliases", data.nameAliases); }
     if (data.company) { setCompanyState(data.company); saveKey("erp:company", data.company); }
     if (data.lists) { setListsState(data.lists); saveKey("erp:lists", data.lists); }
   }, []);
@@ -2661,6 +2757,7 @@ function ERPApp(){
     setDieselLogState(loadKey("erp:dieselLog", []));
     setDieselLogPurchasesState(loadKey("erp:dieselLogPurchases", []));
     setDieselLogMachinesState(loadKey("erp:dieselLogMachines", []));
+    setNameAliasesState(loadKey("erp:nameAliases", []));
     setCompanyState(loadKey("erp:company", DEFAULT_COMPANY));
     setListsState(loadKey("erp:lists", DEFAULT_LISTS));
     setLoaded(true);
@@ -3224,6 +3321,17 @@ function ERPApp(){
     if (!saveKey("erp:sheets", next)) showToast("Could not save sheet settings", "error");
     markDirty();
   }, [showToast, markDirty]);
+
+  // v6.34: confirmed name pairs ("Payment to be done" spelling -> Master's
+  // spelling) so the Master write-back can find the right row even when the
+  // two sheets don't spell a name identically. Never guessed automatically —
+  // only ever written here once the user confirms a suggested pair, or adds
+  // one by hand. See resolveAliasName / findLikelyNameMismatches below.
+  const setNameAliases = useCallback((next) => {
+    setNameAliasesState(next);
+    if (!saveKey("erp:nameAliases", next)) showToast("Could not save name aliases", "error");
+    markDirty();
+  }, [showToast, markDirty]);
   const setSettings = useCallback((next) => {
     setSettingsState(next);
     saveKey("erp:settings", next);
@@ -3290,7 +3398,7 @@ function ERPApp(){
         const ws = loaded.wb.Sheets[loaded.sheetName];
         const attempted = [];
         candidates.forEach(r => {
-          const result = writePaymentIntoSheet(ws, r);
+          const result = writePaymentIntoSheet(ws, r, nameAliases);
           if (result.ok) attempted.push({ r, action: result.action });
           else { patches[r.id] = { masterPushStatus:"failed", masterPushError: result.reason }; failedCount++; }
         });
@@ -3319,7 +3427,7 @@ function ERPApp(){
     } else if (failedCount && opts && opts.manual) {
       showToast("Nothing could be pushed to Master — check the source's status below for why", "error");
     }
-  }, [sheets, driveConnected, driveGetFreshToken, reqs, setReqs, showToast]);
+  }, [sheets, driveConnected, driveGetFreshToken, reqs, setReqs, showToast, nameAliases]);
 
   // The reverse — used when a requisition the app had already pushed is
   // reverted out of Paid (see RequisitionDetail's setStatus), so a mistake
@@ -3348,7 +3456,7 @@ function ERPApp(){
         const ws = loaded.wb.Sheets[loaded.sheetName];
         let changed = false;
         rows.forEach(r => {
-          const result = clearPaymentInSheet(ws, r);
+          const result = clearPaymentInSheet(ws, r, nameAliases);
           if (result.ok) { changed = true; patches[r.id] = { masterPushStatus:"", masterFileId:"", masterSourceId:"", masterTab:"" }; }
         });
         if (changed) {
@@ -3366,7 +3474,7 @@ function ERPApp(){
       setMasterPushBusy(false);
     }
     if (Object.keys(patches).length) setReqs(reqs.map(r => patches[r.id] ? { ...r, ...patches[r.id] } : r));
-  }, [sheets, driveConnected, driveGetFreshToken, reqs, setReqs, showToast]);
+  }, [sheets, driveConnected, driveGetFreshToken, reqs, setReqs, showToast, nameAliases]);
 
   // Backfill for payments already marked Paid before this feature existed
   // (or from before a Master push source was set up) — reachable from a
@@ -3401,6 +3509,63 @@ function ERPApp(){
     if (justPaid.length) pushPaymentsToMaster(justPaid, { manual:false });
     if (justReverted.length) clearPaymentsFromMaster(justReverted);
   }, [reqs, driveConnected, sheets, isMasterEligible, pushPaymentsToMaster, clearPaymentsFromMaster]);
+
+  // Pulls paid Utility-category requisitions from the Payment Register into
+  // the Utilities tab as their own bill entries — entirely local (no Drive
+  // involved), so this is a plain, synchronous, best-effort operation.
+  // Each requisition is only ever imported once: importing sets
+  // utilityImported on it, and the created bill remembers fromReqId, so a
+  // requisition can never end up as two bills, and a bill made this way is
+  // easy to trace back to the payment it came from.
+  const importUtilitiesFromReqs = useCallback((candidates) => {
+    if (!candidates || !candidates.length) return 0;
+    const newBills = candidates.map(r => utilityFromReq(r, lists));
+    setUtilities([...(utilities||[]), ...newBills]);
+    const newTypes = [...new Set(newBills.map(b => b.utilityType).filter(Boolean))]
+      .filter(t => !((lists && lists.utilityTypes) || DEFAULT_LISTS.utilityTypes).includes(t));
+    if (newTypes.length) {
+      const base = (lists && lists.utilityTypes) ? lists.utilityTypes : DEFAULT_LISTS.utilityTypes;
+      setLists({ ...lists, utilityTypes: [...base, ...newTypes] });
+    }
+    const importedIds = new Set(candidates.map(r => r.id));
+    setReqs(reqs.map(r => importedIds.has(r.id) ? { ...r, utilityImported:true } : r));
+    return newBills.length;
+  }, [lists, utilities, setUtilities, setLists, reqs, setReqs]);
+
+  // Manual backfill, for Utility payments that were already marked Paid
+  // before this feature existed (mirrors pushAllEligiblePaidToMaster).
+  const pushAllEligibleUtilities = useCallback(() => {
+    const eligible = (reqs||[]).filter(isUtilityEligible);
+    if (!eligible.length) { showToast("Nothing to import — every paid Utility requisition is already on the Utilities tab"); return; }
+    const n = importUtilitiesFromReqs(eligible);
+    showToast(`Imported ${n} utility bill(s)`);
+  }, [reqs, importUtilitiesFromReqs, showToast]);
+
+  // Same just-became-Paid detection as the Master push above, kept as its
+  // own effect (and its own previous-value ref) so this feature can never
+  // interfere with the Master push even if one of the two has a problem.
+  // Reverting a requisition out of Paid removes the bill it created, the
+  // same way a Master push is undone by clearPaymentsFromMaster — otherwise
+  // an un-paid requisition would leave a bill behind claiming it was paid.
+  const prevReqsForUtilityRef = React.useRef(reqs);
+  useEffect(() => {
+    const prev = prevReqsForUtilityRef.current;
+    prevReqsForUtilityRef.current = reqs;
+    const prevById = new Map(prev.map(r => [r.id, r]));
+    const justPaid = [], justRevertedIds = [];
+    reqs.forEach(r => {
+      const before = prevById.get(r.id);
+      const wasPaid = !!before && before.paymentStatus === "Paid";
+      if (r.paymentStatus === "Paid" && !wasPaid && isUtilityEligible(r)) justPaid.push(r);
+      if (wasPaid && r.paymentStatus !== "Paid" && r.utilityImported) justRevertedIds.push(r.id);
+    });
+    if (justPaid.length) importUtilitiesFromReqs(justPaid);
+    if (justRevertedIds.length) {
+      const revertedSet = new Set(justRevertedIds);
+      setUtilities((utilities||[]).filter(u => !(u.fromReqId && revertedSet.has(u.fromReqId))));
+      setReqs(reqs.map(r => revertedSet.has(r.id) ? { ...r, utilityImported:false } : r));
+    }
+  }, [reqs, importUtilitiesFromReqs]);
 
   // --- Sync from Google Sheets: shared logic ---
   // Lifted up from SheetSyncTab (rather than kept as local state/functions
@@ -3799,8 +3964,8 @@ function ERPApp(){
     // rarely carries its own Ref No (that gets assigned once a row lands
     // in the app), so comparing on that — like importDupKey does for a one-off
     // Excel import — would never match on a re-sync and let the same row back
-    // in every time. Match on date + site + name + amount + description instead,
-    // which is what a repeated sync of the same sheet will actually reproduce.
+    // in every time. Match on date + site + name + amount instead, which is
+    // what a repeated sync of the same sheet will actually reproduce.
     //
     // A match isn't always "nothing to do" though: the whole point of syncing
     // "Payment to be done" (or "Master") more than once is that a row that went
@@ -3808,23 +3973,32 @@ function ERPApp(){
     // filled in. When that happens the matching row already in the app gets
     // marked Paid instead of being silently skipped — see toUpdate below.
     //
-    // v6.33: the matching key must NOT use the settled/backfilled .date —
-    // settleRequisitionDates backfills a blank requisition Date from the
-    // Payment Date (flagging it dateFromPayment) the moment a row first
-    // shows up already paid. A row that went out Pending with a blank Date
-    // computes "" for its key on that first sync; the exact same sheet row,
-    // resynced later now carrying a Payment Date, backfills that blank into
-    // a real date and computes a DIFFERENT key — even though the sheet's
-    // own Date column never changed. The match against the row already in
-    // the app then silently fails, and the row gets added again as a brand
-    // new one instead of promoting the original to Paid — this was the
-    // actual cause of the duplicate Payment Register entries reported.
-    // matchDate() undoes the backfill for matching purposes only (never for
-    // what's displayed or stored), so both syncs compute the same key.
-    const matchDate = (r) => r.dateFromPayment ? "" : String(r.date||"").trim();
-    const sheetDupKey = (r) => [matchDate(r), String(r.site||"").trim().toLowerCase(),
-      String(r.name||"").trim().toLowerCase(), Number(r.amount||0),
-      String(r.description||"").trim().toLowerCase()].join("|");
+    // v6.33: dupKey() itself now ignores the settled/backfilled .date (see
+    // matchDate() by dupKey's own definition below) — settleRequisitionDates
+    // backfills a blank requisition Date from the Payment Date the moment a
+    // row first shows up already paid. A row that went out Pending with a
+    // blank Date computes "" for its key on that first sync; the exact same
+    // sheet row, resynced later now carrying a Payment Date, used to backfill
+    // that blank into a real date and compute a DIFFERENT key — even though
+    // the sheet's own Date column never changed — so the match against the
+    // row already in the app silently failed, and the row got added again as
+    // a brand new one instead of promoting the original to Paid. This was
+    // the actual cause of the duplicate Payment Register entries reported;
+    // masterRowKey (used by the Master write-back) shares the same dupKey()
+    // and so gets the same fix.
+    //
+    // v6.37: description dropped from this key entirely (it used to be
+    // appended on top of dupKey). Real Master/Payment-to-be-done sheets drift
+    // in wording over time — a re-typed note, an extra space, "Rent" edited to
+    // "House Rent" — and every one of those drifts used to make an
+    // already-recorded row fail to match, so it came in again as a brand-new
+    // "duplicate" instead of being recognised. date+site+name+amount is far
+    // more stable and is what actually identifies "the same payment" in
+    // practice; the small remaining risk (two genuinely different payments to
+    // the same person, same site, same day, same amount) was accepted
+    // knowingly rather than left to the much more common description-drift
+    // false negative.
+    const sheetDupKey = (r) => dupKey(r);
     const existingByKey = new Map(reqs.map(r => [sheetDupKey(r), r]));
     const seenKeys = new Set();
     const updatedIds = new Set();
@@ -4502,7 +4676,8 @@ function ERPApp(){
         {tab==="datacheck" && <DataCheckTab reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} expenses={expenses} setExpenses={setExpenses} lists={lists} setLists={setLists} goTo={navigate} openImport={openImport} showToast={showToast} />}
         {tab==="changelog" && <ChangelogTab settings={settings} setSettings={setSettings} goTo={navigate} />}
         {tab==="utilities" && <UtilitiesTab utilities={utilities} setUtilities={setUtilities} cards={cards}
-          lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} />}
+          lists={lists} setLists={setLists} showToast={showToast} goTo={navigate}
+          reqs={reqs} pushAllEligibleUtilities={pushAllEligibleUtilities} />}
         {tab==="diesel" && <DieselTab machines={machines} setMachines={setMachines} diesel={diesel} setDiesel={setDiesel}
           recurring={recurring} vendors={vendors} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport}
           sheets={sheets} syncSheets={syncSheets} sheetSyncBusy={sheetSyncBusy} />}
@@ -4520,7 +4695,7 @@ function ERPApp(){
         {tab==="payroll" && <PayrollTab vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} attendance={attendance} setAttendance={setAttendance} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
         {tab==="statement" && <MonthlyStatementTab reqs={reqs} expenses={expenses} cashTxns={cashTxns} cards={cards} recurring={recurring} showToast={showToast} goTo={navigate} />}
         {tab==="sitesummary" && <SiteSummaryTab reqs={reqs} expenses={expenses} cashTxns={cashTxns} cards={cards} diesel={diesel} utilities={utilities} machines={machines} vendors={vendors} showToast={showToast} goTo={navigate} />}
-        {tab==="sheets" && <SheetSyncTab sheets={sheets} setSheets={setSheets} reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} expenses={expenses} setExpenses={setExpenses} recurring={recurring} setRecurring={setRecurring} sync={syncProps} busy={sheetSyncBusy} previewQueue={sheetPreviewQueue} syncSheets={syncSheets} testConnection={testConnection} applyPreview={applyPreview} dismissPreview={()=>setSheetPreviewQueue(q=>q.slice(1))} pushAllEligiblePaidToMaster={pushAllEligiblePaidToMaster} masterPushBusy={masterPushBusy} isMasterEligible={isMasterEligible} skip={sheetSkip} setSkip={setSheetSkip} />}
+        {tab==="sheets" && <SheetSyncTab sheets={sheets} setSheets={setSheets} reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} expenses={expenses} setExpenses={setExpenses} recurring={recurring} setRecurring={setRecurring} sync={syncProps} busy={sheetSyncBusy} previewQueue={sheetPreviewQueue} syncSheets={syncSheets} testConnection={testConnection} applyPreview={applyPreview} dismissPreview={()=>setSheetPreviewQueue(q=>q.slice(1))} pushAllEligiblePaidToMaster={pushAllEligiblePaidToMaster} masterPushBusy={masterPushBusy} isMasterEligible={isMasterEligible} skip={sheetSkip} setSkip={setSheetSkip} nameAliases={nameAliases} setNameAliases={setNameAliases} />}
         {tab==="expenses" && <ExpensesTab expenses={expenses} setExpenses={setExpenses} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
         {tab==="receivables" && <ReceivablesTab reqs={reqs} setReqs={setReqs} showToast={showToast} goTo={navigate} />}
         {tab==="payments" && <PaymentRegisterTab reqs={reqs} setReqs={setReqs} vendors={vendors} expenses={expenses} setExpenses={setExpenses} cashTxns={cashTxns} cards={cards} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} sync={syncProps} />}
@@ -8029,7 +8204,7 @@ function ChangelogTab({ settings, setSettings, goTo }){
 }
 
 /* ================= UTILITIES ================= */
-function UtilitiesTab({ utilities, setUtilities, cards, lists, setLists, showToast, goTo }){
+function UtilitiesTab({ utilities, setUtilities, cards, lists, setLists, showToast, goTo, reqs, pushAllEligibleUtilities }){
   const L = lists || DEFAULT_LISTS;
   const [monthFilter, setMonthFilter] = useState("all");
   const [placeFilter, setPlaceFilter] = useState("All");
@@ -8224,6 +8399,17 @@ function UtilitiesTab({ utilities, setUtilities, cards, lists, setLists, showToa
           Export
         </button>
       </div>
+
+      {pushAllEligibleUtilities && (() => {
+        const pendingCount = (reqs||[]).filter(isUtilityEligible).length;
+        return (
+          <button onClick={pushAllEligibleUtilities}
+            style={{ width:"100%", marginBottom:12, padding:"11px 0", borderRadius:12, fontSize:14, fontWeight:700,
+              background:"#EEF0FE", color:"#3F6CA8", border:`1.5px solid #3F6CA8`, cursor:"pointer" }}>
+            {pendingCount > 0 ? `Import ${pendingCount} paid Utility bill(s) from Payment Register` : "Import from Payment Register"}
+          </button>
+        );
+      })()}
 
       <div style={{ display:"grid", gridTemplateColumns:"1fr", gap:8, marginBottom:8 }}>
         <select style={inputStyle} value={monthFilter} onChange={e=>setMonthFilter(e.target.value)}>
@@ -11793,7 +11979,59 @@ const FREQUENCIES = ["Monthly","Quarterly","Half-Yearly","Yearly","One-time"];
 
 function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, lists, setLists, showToast, goTo,
   expenses, setExpenses, recurring, setRecurring, sync, busy, previewQueue, syncSheets, testConnection, applyPreview, dismissPreview,
-  pushAllEligiblePaidToMaster, masterPushBusy, isMasterEligible, skip, setSkip }){
+  pushAllEligiblePaidToMaster, masterPushBusy, isMasterEligible, skip, setSkip, nameAliases, setNameAliases }){
+  // v6.34: name-mismatch review — scans a Master source's live names against
+  // the app's requisition names and suggests likely misspelling pairs for
+  // the user to confirm. Nothing here is applied automatically; a pair only
+  // becomes a saved alias (nameAliases) once the user taps Confirm, or adds
+  // one by hand below. Keyed by source id so switching sources doesn't mix
+  // up an in-progress review.
+  const [aliasPanelFor, setAliasPanelFor] = useState(null);
+  const [aliasSuggestions, setAliasSuggestions] = useState([]);
+  const [aliasScanBusy, setAliasScanBusy] = useState(false);
+  const [manualFrom, setManualFrom] = useState("");
+  const [manualTo, setManualTo] = useState("");
+
+  async function scanForNameMismatches(sh){
+    setAliasScanBusy(true);
+    setAliasSuggestions([]);
+    setAliasPanelFor(sh.id);
+    try {
+      const token = await sync.driveGetFreshToken(false);
+      const data = await driveReadFileById(sh.fileId, token, sh.tab, sh.resourceKey, false);
+      if (!data || data.ok === false) throw new Error((data && data.error) || "Could not read that source");
+      const nameCol = data.rows.length ? pickCol(data.rows[0], ["Name","Vendor","Party","Payee"]) : null;
+      const masterNames = nameCol ? data.rows.map(r => r[nameCol]).filter(Boolean) : [];
+      if (!nameCol) { showToast("Couldn't find a Name column on that source", "error"); return; }
+      const reqNames = [...new Set((reqs||[]).map(r => r.name).filter(Boolean))];
+      const suggestions = findLikelyNameMismatches(reqNames, masterNames, nameAliases);
+      setAliasSuggestions(suggestions);
+      if (!suggestions.length) showToast("No likely name mismatches found");
+    } catch (e) {
+      showToast(e.message || "Could not scan for name mismatches", "error");
+    } finally {
+      setAliasScanBusy(false);
+    }
+  }
+  function confirmAliasSuggestion(s){
+    setNameAliases([...(nameAliases||[]), { id: uid(), from: s.from, to: s.to }]);
+    setAliasSuggestions(prev => prev.filter(x => x !== s));
+    showToast(`Remembered: "${s.from}" -> "${s.to}"`);
+  }
+  function dismissAliasSuggestion(s){
+    setAliasSuggestions(prev => prev.filter(x => x !== s));
+  }
+  function addManualAlias(){
+    const from = manualFrom.trim(), to = manualTo.trim();
+    if (!from || !to) return showToast("Enter both spellings first", "error");
+    if (normKey(from) === normKey(to)) return showToast("Those already match — no alias needed", "error");
+    setNameAliases([...(nameAliases||[]).filter(a => normKey(a.from) !== normKey(from)), { id: uid(), from, to }]);
+    setManualFrom(""); setManualTo("");
+    showToast(`Remembered: "${from}" -> "${to}"`);
+  }
+  function deleteAlias(id){
+    setNameAliases((nameAliases||[]).filter(a => a.id !== id));
+  }
   const { driveConnected, connectDrive, driveChooseSourceFile,
     driveImportFolderId, driveImportFolderName, driveChooseImportFolder, clearDriveImportFolder } = sync;
   const [editing, setEditing] = useState(null);
@@ -12412,11 +12650,83 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
                     </button>
                   );
                 })()}
+
+                {sh.kind === "requisitions" && sh.pushPaymentDates && sh.fileId && (
+                  <div style={{ marginTop:8 }}>
+                    <button onClick={()=>scanForNameMismatches(sh)} disabled={aliasScanBusy}
+                      style={{ width:"100%", padding:"9px 0", borderRadius:12, fontSize:13, fontWeight:600,
+                        background:"#fff", color:"#3F6CA8", border:`1.5px solid #DCE3F0`, cursor: aliasScanBusy ? "default":"pointer" }}>
+                      {aliasScanBusy && aliasPanelFor===sh.id ? "Checking name spellings…" : "Find likely name mismatches vs. this source"}
+                    </button>
+
+                    {aliasPanelFor === sh.id && aliasSuggestions.length > 0 && (
+                      <div style={{ marginTop:8, background:"#FFF8E6", borderRadius:12, padding:"10px 12px" }}>
+                        <div style={{ fontSize:12, fontWeight:700, color:INK, marginBottom:6 }}>
+                          Possible spelling mismatches — confirm only the ones that are really the same person
+                        </div>
+                        {aliasSuggestions.map((s,i) => (
+                          <div key={i} style={{ display:"flex", alignItems:"center", gap:8, fontSize:13, padding:"6px 0",
+                            borderTop: i>0 ? `1px solid #F0E4BE` : "none" }}>
+                            <span style={{ flex:1, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                              "{s.from}" ↔ "{s.to}"
+                            </span>
+                            <button onClick={()=>confirmAliasSuggestion(s)}
+                              style={{ padding:"5px 10px", borderRadius:8, fontSize:12, fontWeight:700, background:GREEN, color:"#fff", border:"none", cursor:"pointer" }}>
+                              Confirm
+                            </button>
+                            <button onClick={()=>dismissAliasSuggestion(s)}
+                              style={{ padding:"5px 10px", borderRadius:8, fontSize:12, fontWeight:600, background:"#fff", color:MUTED, border:`1px solid ${SAND}`, cursor:"pointer" }}>
+                              Not the same
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             );
           })}
         </div>
       )}
+
+      {(nameAliases && nameAliases.length > 0) && (
+        <div style={{ background:"#fff", borderRadius:16, padding:14, marginBottom:14, border:`1px solid ${SAND}` }}>
+          <div style={{ fontSize:13, fontWeight:700, color:INK, marginBottom:8 }}>
+            Remembered name spellings ({nameAliases.length})
+          </div>
+          {nameAliases.map(a => (
+            <div key={a.id} style={{ display:"flex", alignItems:"center", gap:8, fontSize:13, padding:"5px 0" }}>
+              <span style={{ flex:1, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", color:INK }}>
+                "{a.from}" ↔ "{a.to}"
+              </span>
+              <button onClick={()=>deleteAlias(a.id)}
+                style={{ padding:"4px 9px", borderRadius:8, fontSize:12, fontWeight:600, background:"#fff", color:"#B3372C", border:`1px solid #F1C9C4`, cursor:"pointer" }}>
+                Remove
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ background:"#fff", borderRadius:16, padding:14, marginBottom:14, border:`1px solid ${SAND}` }}>
+        <div style={{ fontSize:13, fontWeight:700, color:INK, marginBottom:8 }}>
+          Add a name match by hand
+        </div>
+        <div style={{ fontSize:12, color:MUTED, marginBottom:8 }}>
+          For a case the scan above won't catch — a nickname or an unrelated short name.
+        </div>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:8 }}>
+          <input value={manualFrom} onChange={e=>setManualFrom(e.target.value)} placeholder="Spelled in the app"
+            style={{ padding:"9px 10px", borderRadius:10, border:`1.5px solid ${SAND}`, fontSize:13 }} />
+          <input value={manualTo} onChange={e=>setManualTo(e.target.value)} placeholder="Spelled in Master"
+            style={{ padding:"9px 10px", borderRadius:10, border:`1.5px solid ${SAND}`, fontSize:13 }} />
+        </div>
+        <button onClick={addManualAlias}
+          style={{ width:"100%", padding:"9px 0", borderRadius:12, fontSize:13, fontWeight:700, background:"#EEF0FE", color:"#3F6CA8", border:`1.5px solid #3F6CA8`, cursor:"pointer" }}>
+          Remember this pair
+        </button>
+      </div>
 
       <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
         {Object.keys(SYNC_KIND_META).map(k => {
@@ -12499,6 +12809,23 @@ function ExpensesTab({ expenses, setExpenses, reqs, setReqs, lists, setLists, sh
     unclaimed.forEach(e => { const k = e.paidBy || "Unassigned"; map[k] = (map[k]||0) + Number(e.amount||0); });
     return Object.entries(map).sort((a,b)=>b[1]-a[1]);
   }, [unclaimed]);
+
+  // v6.36: "Settle up" one-tap per person. Only an expense with NO claimId yet
+  // (never put on any requisition) is eligible — one already sitting on a
+  // Pending reimbursement requisition (raised but not yet paid) stays out of
+  // this, so a second tap can never double-claim the same rupee.
+  const availableToSettle = useMemo(() => unclaimed.filter(e => !e.claimId), [unclaimed]);
+  const settleAmountByPerson = useMemo(() => {
+    const map = {};
+    availableToSettle.forEach(e => { const k = e.paidBy || "Unassigned"; map[k] = (map[k]||0) + Number(e.amount||0); });
+    return map;
+  }, [availableToSettle]);
+  function settleUpPerson(who){
+    const rows = availableToSettle.filter(e => (e.paidBy || "Unassigned") === who);
+    if (!rows.length) { showToast("Everything owed to them is already on a requisition"); return; }
+    setSelected(new Set(rows.map(e => e.id)));
+    setAskDate("claim");
+  }
 
   const selectedRows = expenses.filter(e => selected.has(e.id));
   const selectedTotal = selectedRows.reduce((s,e)=>s+Number(e.amount||0), 0);
@@ -12788,12 +13115,31 @@ function ExpensesTab({ expenses, setExpenses, reqs, setReqs, lists, setLists, sh
         <div style={{ fontSize:12, color:MUTED, marginTop:2 }}>{unclaimed.length} expense(s)</div>
         {owedByPerson.length > 0 && (
           <div style={{ marginTop:14, paddingTop:14, borderTop:`1px solid ${SAND}` }}>
-            {owedByPerson.map(([who, amt]) => (
-              <div key={who} style={{ display:"flex", justifyContent:"space-between", fontSize:14, padding:"5px 0" }}>
-                <span style={{ fontWeight:500, color:INK }}>{who}</span>
-                <span style={{ fontWeight:700, color:INK }}>₹{fmtINR(amt)}</span>
-              </div>
-            ))}
+            {owedByPerson.map(([who, amt]) => {
+              const available = settleAmountByPerson[who] || 0;
+              return (
+                <div key={who} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:10, padding:"7px 0" }}>
+                  <div>
+                    <div style={{ fontWeight:500, color:INK, fontSize:14 }}>{who}</div>
+                    {available < amt && (
+                      <div style={{ fontSize:11, color:MUTED, marginTop:1 }}>
+                        {available > 0 ? `₹${fmtINR(amt-available)} already on a requisition` : "already on a requisition"}
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ display:"flex", alignItems:"center", gap:10, flexShrink:0 }}>
+                    <span style={{ fontWeight:700, color:INK, fontSize:14 }}>₹{fmtINR(amt)}</span>
+                    {available > 0 && (
+                      <button onClick={()=>settleUpPerson(who)}
+                        style={{ fontSize:12, fontWeight:700, padding:"7px 11px", borderRadius:10,
+                          background:INK, color:"#fff", border:"none", cursor:"pointer", whiteSpace:"nowrap" }}>
+                        Settle up
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
@@ -15807,8 +16153,20 @@ function settleRequisitionDates(out){
 
 // The same amount to the same party on the same day is a normal thing to see
 // twice - once for each site. Only a repeat within one site is a duplicate.
+//
+// v6.33: a row's .date can be BACKFILLED from Payment Date the first time it
+// shows up already paid (see settleRequisitionDates above), so the very same
+// sheet row can compute two different .date values across two syncs (blank
+// the first time, backfilled the next) even though nothing about the row's
+// real identity changed. matchDate() ignores a backfilled date for matching
+// purposes only - it is never used for display or storage. dupKey() picks
+// this up automatically, and so does masterRowKey() below (it's built from
+// dupKey()), which keeps the Master write-back's row matching in sync too.
+function matchDate(r){
+  return r.dateFromPayment ? "" : String(r.date||"").trim();
+}
 function dupKey(r){
-  return [String(r.date||"").trim(),
+  return [matchDate(r),
           String(r.site||"").trim().toLowerCase(),
           String(r.name||"").trim().toLowerCase(),
           Number(r.amount||0)].join("|");
@@ -15830,8 +16188,24 @@ function importDupKey(r){
 // row the read side would recognise is the same row the write side finds)
 // — kept as its own module-level copy since that one is defined inline
 // there; if that logic ever changes, change this to match.
-function masterRowKey(r){
-  return [dupKey(r), String(r.description||"").trim().toLowerCase()].join("|");
+//
+// v6.34: optional `aliases` ({from,to} pairs the user has confirmed — see
+// resolveAliasName below) let a name spelled differently in the app's
+// requisitions still match its Master-sheet row. Applied to BOTH sides
+// being compared, so it works regardless of which side carries the odd
+// spelling.
+//
+// v6.37: description dropped from this key (see sheetDupKey's comment in
+// the live-sync closure above for the full reasoning — a Master sheet's
+// Description text drifts over time, e.g. a re-typed note or an extra
+// space, and requiring an exact match on it was making the app fail to
+// recognise a payment already sitting in Master, appending it again as a
+// brand-new row instead of just stamping the Payment Date onto the
+// existing one). date+site+name+amount is what actually identifies "the
+// same payment" here.
+function masterRowKey(r, aliases){
+  const nr = (aliases && aliases.length) ? { ...r, name: resolveAliasName(r.name, aliases) } : r;
+  return dupKey(nr);
 }
 
 // Scans a worksheet (already loaded whole via driveReadWorkbookForWrite)
@@ -15839,20 +16213,64 @@ function masterRowKey(r){
 // the REQ_TEMPLATE column map (header text per field, "" where that column
 // doesn't exist in this sheet), the full grid, and the 0-based data-row
 // index within it (-1 if no match).
-function findMasterRowMatch(ws, targetReq){
+function findMasterRowMatch(ws, targetReq, aliases){
   const aoa = XLSX.utils.sheet_to_json(ws, { header:1, defval:"", raw:false });
   if (!aoa.length) return { aoa, headerRow:[], colMap:{}, rowIdx:-1 };
   const headerRow = aoa[0].map(h => String(h==null ? "" : h).trim());
   const colMap = autoMapHeaders(headerRow, REQ_TEMPLATE);
-  const targetKey = masterRowKey(targetReq);
+  const targetKey = masterRowKey(targetReq, aliases);
   for (let i = 1; i < aoa.length; i++) {
     const rowObj = {};
     headerRow.forEach((h, ci) => { if (h) rowObj[h] = aoa[i][ci]; });
     const { out } = mapRowGeneric(rowObj, REQ_TEMPLATE, colMap);
     settleRequisitionDates(out);
-    if (masterRowKey(out) === targetKey) return { aoa, headerRow, colMap, rowIdx:i };
+    if (masterRowKey(out, aliases) === targetKey) return { aoa, headerRow, colMap, rowIdx:i };
   }
   return { aoa, headerRow, colMap, rowIdx:-1 };
+}
+
+// Whether ws is safe to reorder rows in by copying cell objects directly.
+// A raw cell-object shift does not recompute formula references or resize
+// merged ranges the way real spreadsheet software does — so if ANYTHING
+// in the whole sheet is a formula or part of a merge, moving rows around
+// could silently point a formula elsewhere in the sheet at the wrong row,
+// or desync a merged block. Checked across the ENTIRE sheet, not just the
+// rows being moved, since a formula three columns away or twenty rows
+// below is just as much at risk.
+function sheetIsSafeToReorder(ws){
+  if (ws["!merges"] && ws["!merges"].length) return false;
+  for (const key in ws) {
+    if (key.charCodeAt(0) === 33 /* "!" */) continue;
+    const cell = ws[key];
+    if (cell && cell.f) return false;
+  }
+  return true;
+}
+
+// Moves the row at rowIdx to lastRow by shifting every row in between up
+// by one, then placing the original row's cells at the bottom. Copies the
+// actual cell objects (not display text), so numeric/date typing and any
+// per-cell formatting travel with the row unchanged. Only called after
+// sheetIsSafeToReorder(ws) has passed.
+function moveSheetRowToBottom(ws, rowIdx, lastRow){
+  const range = XLSX.utils.decode_range(ws["!ref"]);
+  const c0 = range.s.c, c1 = range.e.c;
+  const moved = {};
+  for (let c = c0; c <= c1; c++) {
+    const addr = XLSX.utils.encode_cell({ r: rowIdx, c });
+    if (ws[addr]) moved[c] = ws[addr];
+  }
+  for (let r = rowIdx; r < lastRow; r++) {
+    for (let c = c0; c <= c1; c++) {
+      const from = XLSX.utils.encode_cell({ r: r + 1, c });
+      const to = XLSX.utils.encode_cell({ r, c });
+      if (ws[from]) ws[to] = ws[from]; else delete ws[to];
+    }
+  }
+  for (let c = c0; c <= c1; c++) {
+    const to = XLSX.utils.encode_cell({ r: lastRow, c });
+    if (moved[c]) ws[to] = moved[c]; else delete ws[to];
+  }
 }
 
 // Writes one requisition's Payment Date (and Payment Status, if that
@@ -15862,8 +16280,8 @@ function findMasterRowMatch(ws, targetReq){
 // `ws` in place; touches nothing else in the sheet, and nothing in any
 // other tab (those live untouched on the same `wb` object this `ws` came
 // from). Returns what happened so the caller can summarise it.
-function writePaymentIntoSheet(ws, req){
-  const { aoa, headerRow, colMap, rowIdx } = findMasterRowMatch(ws, req);
+function writePaymentIntoSheet(ws, req, aliases){
+  const { aoa, headerRow, colMap, rowIdx } = findMasterRowMatch(ws, req, aliases);
   if (!headerRow.length) return { ok:false, reason:"the sheet is empty" };
   if (!colMap.paymentDate) return { ok:false, reason:"no Payment Date column found in this sheet" };
   const dateCol = headerRow.indexOf(colMap.paymentDate);
@@ -15883,6 +16301,17 @@ function writePaymentIntoSheet(ws, req){
     cur.e.c = Math.max(cur.e.c, cMax);
     ws["!ref"] = XLSX.utils.encode_range(cur);
   };
+  // v6.37: the sheet's declared range (aoa.length) can run hundreds of rows
+  // past the true last row of data — see the comment on newRowIdx below.
+  // Both "move this row to the bottom" and "append a new row" need the REAL
+  // last content row, not the declared one, so it's found once here.
+  const trueLastRow = (() => {
+    for (let i = aoa.length - 1; i >= 1; i--) {
+      const row = aoa[i];
+      if (row && row.some(v => String(v == null ? "" : v).trim() !== "")) return i;
+    }
+    return 0;
+  })();
 
   if (rowIdx >= 0) {
     setCell(rowIdx, dateCol, fmtDate(req.paymentDate));
@@ -15898,10 +16327,35 @@ function writePaymentIntoSheet(ws, req){
       const existingRefNo = String((aoa[rowIdx] && aoa[rowIdx][refNoCol]) || "").trim();
       if (!existingRefNo) setCell(rowIdx, refNoCol, req.refNo);
     }
+    // v6.34: now that this row is Paid, move it to the bottom of the sheet
+    // so Master reads newest-payment-last, matching how the user's other
+    // sheets are kept. Only when the whole sheet has no formulas or merged
+    // cells (see sheetIsSafeToReorder) — otherwise leave it exactly where
+    // it was, fully updated, rather than risk corrupting something a raw
+    // cell shift can't safely adjust.
+    // v6.37: was `aoa.length - 1` — the sheet's declared range, which can sit
+    // hundreds of rows past the real last row of data. Moving to that far a
+    // "bottom" would drop this row deep into a blank gap instead of right
+    // after the genuine last payment. Use trueLastRow instead.
+    if (rowIdx < trueLastRow) {
+      if (sheetIsSafeToReorder(ws)) {
+        moveSheetRowToBottom(ws, rowIdx, trueLastRow);
+        return { ok:true, action:"updated-moved" };
+      }
+      return { ok:true, action:"updated-guarded" };
+    }
     return { ok:true, action:"updated" };
   }
 
-  const newRowIdx = aoa.length;
+  // v6.37: newRowIdx used to be aoa.length — the sheet's whole declared
+  // range. Google Sheets/Excel often report a used range well past the real
+  // last row (leftover from rows that were cleared but never actually
+  // deleted, or a grid simply sized bigger than the data). Trusting it
+  // blindly means a new row lands hundreds of rows below the true last
+  // payment, opening a growing blank gap at the bottom of Master — exactly
+  // what turned up in the user's real sheet (rows 798-1280 empty, real data
+  // resuming only at 1281). trueLastRow (found above) fixes this.
+  const newRowIdx = trueLastRow + 1;
   const put = (key, val, numeric) => {
     const header = colMap[key];
     if (!header) return;
@@ -15936,8 +16390,8 @@ function writePaymentIntoSheet(ws, req){
 // also undoes what was pushed to Master. Only ever called for a
 // requisition carrying masterFileId — proof the app, not the user by
 // hand, wrote that cell — see the reqs-diff effect in ERPApp.
-function clearPaymentInSheet(ws, req){
-  const { headerRow, colMap, rowIdx } = findMasterRowMatch(ws, req);
+function clearPaymentInSheet(ws, req, aliases){
+  const { headerRow, colMap, rowIdx } = findMasterRowMatch(ws, req, aliases);
   if (rowIdx < 0) return { ok:false, reason:"that row is no longer in this sheet" };
   if (!colMap.paymentDate) return { ok:false, reason:"no Payment Date column found in this sheet" };
   const dateCol = headerRow.indexOf(colMap.paymentDate);
@@ -15948,6 +16402,70 @@ function clearPaymentInSheet(ws, req){
 }
 
 function normKey(k){ return String(k||"").toLowerCase().replace(/[^a-z0-9]/g,""); }
+
+// v6.34: name-alias lookup. aliases is a user-maintained list of
+// {from, to} pairs — "from" is a spelling that shows up in the app's own
+// requisitions, "to" is the spelling actually used in the Master sheet.
+// Never guessed or applied automatically: a pair only exists here once the
+// user has confirmed a suggested match, or typed one in by hand (see
+// SheetSyncTab's alias review UI). Matching ignores case/punctuation via
+// normKey so "R. Kumar" and "R Kumar" are treated the same "from".
+function resolveAliasName(name, aliases){
+  if (!aliases || !aliases.length) return name;
+  const key = normKey(name);
+  if (!key) return name;
+  const hit = aliases.find(a => normKey(a.from) === key);
+  return hit ? hit.to : name;
+}
+
+// v6.34: suggests likely name-mismatch pairs between the app's requisition
+// names and a live list of Master-sheet names, for the user to review and
+// confirm (never auto-applied). Uses a simple Levenshtein edit distance;
+// a pair is only suggested when the distance is small relative to the
+// name's length, and never when the names already normalise identically
+// (already a match) or a confirmed alias already covers the pair.
+function levenshtein(a, b){
+  a = String(a||""); b = String(b||"");
+  const m = a.length, n = b.length;
+  if (!m) return n;
+  if (!n) return m;
+  let prev = Array.from({length:n+1}, (_,j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = a[i-1] === b[j-1]
+        ? prev[j-1]
+        : 1 + Math.min(prev[j-1], prev[j], cur[j-1]);
+    }
+    prev = cur;
+  }
+  return prev[n];
+}
+function findLikelyNameMismatches(reqNames, masterNames, aliases){
+  const aliasedFrom = new Set((aliases||[]).map(a => normKey(a.from)));
+  const masterByKey = new Map();
+  (masterNames||[]).forEach(n => { const k = normKey(n); if (k && !masterByKey.has(k)) masterByKey.set(k, n); });
+  const reqByKey = new Map();
+  (reqNames||[]).forEach(n => { const k = normKey(n); if (k && !reqByKey.has(k)) reqByKey.set(k, n); });
+  const suggestions = [];
+  reqByKey.forEach((reqName, reqKey) => {
+    if (masterByKey.has(reqKey)) return;   // already matches exactly
+    if (aliasedFrom.has(reqKey)) return;   // already aliased
+    let best = null, bestDist = Infinity;
+    masterByKey.forEach((masterName, masterKey) => {
+      const dist = levenshtein(reqKey, masterKey);
+      if (dist < bestDist) { bestDist = dist; best = masterName; }
+    });
+    // Allow roughly one edit per 5 characters (min 1, max 3) — catches a
+    // typo, a missing initial, or a transposed pair without matching two
+    // genuinely different people.
+    const threshold = Math.max(1, Math.min(3, Math.round(reqKey.length / 5)));
+    if (best && bestDist > 0 && bestDist <= threshold) {
+      suggestions.push({ from: reqName, to: best, distance: bestDist });
+    }
+  });
+  return suggestions.sort((a,b) => a.distance - b.distance);
+}
 function pickCol(row, candidates){
   const keys = Object.keys(row);
   for (const cand of candidates) {
