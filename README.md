@@ -965,6 +965,32 @@ if a duplicate had already been pushed to Master, that row still needs to
 be removed from your Google Sheet by hand. The review screen tells you
 whenever that applies to what you've selected.
 
+## New in v6.38: syncing/importing requisitions no longer auto-writes into Master
+
+**The bug:** pulling requisitions IN — a Google Sheets sync (silent, on
+opening the app, or tapping "Apply" on a sync preview) or an uploaded
+Excel file's Apply Import — could also silently trigger a push back OUT to
+Master, any time a row came in already marked Paid. A brand-new row from a
+sync looked, to the app, exactly like a row you'd just marked Paid by hand,
+so it wrote a copy of it into Master too. This is very likely the real
+reason Master kept growing duplicate/bottom-block rows after every cleanup
+you did — the next sync just put them back.
+
+**Fixed:** bringing data in from a sync or an import can no longer, by
+itself, cause anything to be written back to Master. Master is only ever
+touched by one of two things now: marking a requisition Paid directly in
+the app (Requisition Detail, or To Pay's Register Payment), or tapping the
+explicit **"Push N paid requisition(s) to Master"** button on Sync from
+Google Sheets. This is exactly the "keep it manual" choice made in v6.37 —
+v6.37 fixed *how* Master rows are matched, this fixes a gap that let sync
+bypass that choice entirely.
+
+**One thing to know:** this does not clean up anything already sitting in
+your Master sheet from before this fix — see the v6.37 section below (and
+the Ref No. lists your Claude conversation has given you) for what to
+remove by hand. Going forward, a sync/import will never add to that pile
+again.
+
 ## New in v6.37: fixed real Google Sheets sync/Master duplicates and a growing blank gap in Master
 
 Two real bugs, found and confirmed against an actual uploaded Master file
