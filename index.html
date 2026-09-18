@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.38";
+const APP_VERSION = "6.39";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -80,6 +80,11 @@ const GOOGLE_DRIVE_APP_ID = "60621934527";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.39", date:"2026-09-17", title:"Correcting a Date, Category, Sub-Category, Name or Payment Date in the sheet now updates the existing payment instead of duplicating or ignoring it", items:[
+    "Fixed: syncing from Google Sheets used to match an existing payment only by Date+Site+Name+Amount. So correcting a Date or Name for a payment already in the app broke that match and added it again as a duplicate — while correcting a Category, Sub-Category, or an already-Paid row's Payment Date didn't break the match, but the correction was silently thrown away (the sync just said \"already in the app\" and moved on).",
+    "Now, whenever the sheet carries a Ref No. (Master does; \"Payment to be done\" usually doesn't), that's checked first and trusted as the payment's real identity — a Ref No. never legitimately changes once assigned. A match by Ref No. updates Date, Category, Sub-Category, Name, and Payment Date onto the existing requisition instead of adding a duplicate or discarding the change. The sync preview screen now shows exactly which fields are being corrected on each matched row, not just \"Pending → Paid\".",
+    "Deliberately does NOT auto-correct Amount or Site this way, since those affect money and site totals — an amount or site fix still needs to be made directly on the requisition in the app. Rows with no Ref No. on the sheet are unaffected by this change and still match the same way as before.",
+  ]},
   { v:"6.38", date:"2026-09-16", title:"Stopped Google Sheets sync from also auto-writing into Master", items:[
     "Fixed: pulling requisitions in from a Google Sheets sync (silent auto-sync on opening the app, or tapping \"Apply\" on a sync preview) or from an uploaded Excel file's Apply Import could ALSO trigger an automatic push to Master, if any row came in already marked Paid. A brand-new imported row looked identical to a row you'd just marked Paid by hand in the app, so it silently wrote a copy into Master too — this is very likely the reason Master kept re-growing duplicate/bottom-block rows after every cleanup.",
     "Bringing data IN from a sync or an import can no longer, by itself, write anything back OUT to Master. Master is only ever updated by: something you mark Paid directly in the app (Requisition Detail, To Pay's Register Payment), or the explicit \"Push N paid requisition(s) to Master\" button on Sync from Google Sheets — exactly as agreed when auto-push-on-import was turned off in v6.37.",
@@ -951,9 +956,9 @@ const SYNC_KIND_META = {
     label: "Requisitions", newLabel: "New requisitions", itemLabel: "requisition",
     describe: (d) => `${d.name || "—"} · ₹${fmtINR(d.amount)} · ${fmtDate(d.date) || "no date"}`,
     dupDesc: "Same date, same name and same amount as something already recorded, so these are not added again.",
-    updateLabel: "Already in the app — will be marked Paid",
-    updateDesc: "Same date, name and amount as a requisition already here, but this row now shows a Payment Date — so instead of adding a duplicate, the existing one is updated to Paid.",
-    updateSummary: (n) => `${n} marked Paid`,
+    updateLabel: "Already in the app — will be updated",
+    updateDesc: "Matched to a requisition already here (by Ref No. when the sheet has one, otherwise by date+name+amount) — so instead of adding a duplicate, the existing one is updated: a newly-filled Payment Date marks it Paid, and a changed Date, Category, Sub-Category, Name or Payment Date on an already-matched row corrects it there too.",
+    updateSummary: (n) => `${n} updated`,
   },
   expenses: {
     label: "Expenses", newLabel: "New expenses", itemLabel: "expense",
@@ -4040,6 +4045,30 @@ function ERPApp(){
     // name is ambiguous or matches nothing, so this never guesses wrong.
     const activeRecurring = (recurring||[]).filter(r => r.active !== false);
 
+    // v6.39: a row can also be recognised by its Ref No. — checked FIRST,
+    // ahead of dupKey. Once assigned, a Ref No. is the one thing that never
+    // legitimately changes for a given payment, so if the sheet's Ref No.
+    // matches an existing requisition, this IS that same payment no matter
+    // what its Date/Category/Sub-Category/Name/Payment Date now read on the
+    // sheet. Before this, correcting any of those in the sheet either broke
+    // the dupKey match and added a duplicate (Date, Name — both part of
+    // dupKey) or matched fine but the correction was silently discarded
+    // (Category, Sub-Category, Payment Date — none of those are part of
+    // dupKey, so a changed value just looked like "nothing to do"). Only
+    // engages when the sheet source actually has a Ref No. column (Master
+    // does; "Payment to be done" typically doesn't) — a blank Ref No. falls
+    // straight through to dupKey matching exactly as before, so nothing
+    // changes for the ordinary "brand-new Pending payment" sync case.
+    //
+    // Deliberately does NOT auto-correct Amount, Site, or Description this
+    // way — those affect money or grouping, and a corrected Date/Category/
+    // Sub-Category/Name is what was actually asked for. An Amount/Site fix
+    // still needs to be made directly on the requisition in the app.
+    const CORRECTABLE_FIELDS = ["date", "category", "subCategory", "name", "paymentDate"];
+    const existingByRefNo = new Map(
+      reqs.filter(r => r.refNo).map(r => [String(r.refNo).trim().toLowerCase(), r])
+    );
+
     collected.forEach((c, i) => {
       const { out, problems } = mapRowGeneric(c.row, tpl, map);
       if (problems.length) { errors.push({ source:c.source, rowNum:i+2, why:`missing ${problems.join(", ")}` }); return; }
@@ -4048,26 +4077,30 @@ function ERPApp(){
       if (!out.site) out.site = c.source;
 
       const k = sheetDupKey(out);
-      const existing = existingByKey.get(k);
+      const refKey = out.refNo ? String(out.refNo).trim().toLowerCase() : "";
+      const byRef = refKey ? existingByRefNo.get(refKey) : null;
+      const existing = (byRef && !updatedIds.has(byRef.id)) ? byRef : existingByKey.get(k);
       if (existing) {
         const canPromoteToPaid = out.paymentStatus === "Paid"
           && existing.paymentStatus !== "Paid"
           && existing.paymentStatus !== "On Hold"
           && !updatedIds.has(existing.id);
+
+        const fieldPatch = {};
+        CORRECTABLE_FIELDS.forEach(f => {
+          const v = out[f];
+          if (v !== "" && v !== undefined && v !== null && String(v) !== String(existing[f] ?? "")) fieldPatch[f] = v;
+        });
         if (canPromoteToPaid) {
+          fieldPatch.paymentStatus = "Paid";
+          fieldPatch.paymentDate = out.paymentDate || existing.paymentDate || out.date;
+          fieldPatch.paidFromDateColumn = !!out.paidFromDateColumn;
+          fieldPatch.paidDateAssumed = !!out.paidDateAssumed;
+        }
+
+        if (Object.keys(fieldPatch).length) {
           updatedIds.add(existing.id);
-          toUpdate.push({
-            id: existing.id,
-            source: c.source,
-            existing,
-            data: out,
-            patch: {
-              paymentStatus: "Paid",
-              paymentDate: out.paymentDate || existing.paymentDate || out.date,
-              paidFromDateColumn: !!out.paidFromDateColumn,
-              paidDateAssumed: !!out.paidDateAssumed,
-            },
-          });
+          toUpdate.push({ id: existing.id, source: c.source, existing, data: out, patch: fieldPatch });
         } else {
           duplicates.push({ data:out, source:c.source, why:"already in the app" });
         }
@@ -4518,7 +4551,7 @@ function ERPApp(){
     setSheets(sheets.map(x => (preview.list || []).some(l => l.id === x.id) ? { ...x, lastSync: stamp } : x));
     const updatedCount = updatePatches.size;
     showToast(`${added.length} requisition(s) brought in`
-      + (updatedCount ? ` · ${updatedCount} marked Paid` : "")
+      + (updatedCount ? ` · ${updatedCount} existing requisition(s) updated` : "")
       + (recurringUpdates.length ? ` · ${recurringUpdates.length} Rent & EMI item(s) updated` : ""));
     setSheetPreviewQueue(q => q.slice(1));
   }, [sheetPreviewQueue, sheetSkip, expenses, setExpenses, lists, setLists, sheets, setSheets, showToast, reqs, setReqs, vendors, setVendors, recurring, setRecurring,
@@ -12273,12 +12306,25 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
           const selectable = preview.kind === "requisitions";
           const keptCount = selectable ? preview.toUpdate.filter((_,n)=>!skip.has("u"+n)).length : preview.toUpdate.length;
           const allOn = keptCount === preview.toUpdate.length;
+          // v6.39: a toUpdate row is no longer always a Paid-promotion — it
+          // can also be a pure field correction (Date/Category/Sub-Category/
+          // Name/Payment Date matched by Ref No.), so this only shows
+          // "Pending → Paid" when the patch actually promotes, and lists
+          // whatever else changed either way instead of assuming.
+          const CORRECTION_LABELS = { date:"Date", category:"Category", subCategory:"Sub-Category", name:"Name", paymentDate:"Payment Date" };
           const rowBody = (u) => preview.kind === "requisitions"
             ? <React.Fragment>
                 <strong>{u.existing.name}</strong> · ₹{fmtINR(u.existing.amount)}
                 <span style={{ color:MUTED }}> · {u.existing.site || u.source}</span>
-                <span style={{ color:AMBER, fontWeight:600 }}> · Pending → Paid</span>
-                {u.patch.paymentDate && <span style={{ color:MUTED }}> · paid {fmtDate(u.patch.paymentDate)}</span>}
+                {u.patch.paymentStatus === "Paid" && <span style={{ color:AMBER, fontWeight:600 }}> · Pending → Paid</span>}
+                {u.patch.paymentStatus === "Paid" && u.patch.paymentDate && <span style={{ color:MUTED }}> · paid {fmtDate(u.patch.paymentDate)}</span>}
+                {Object.keys(u.patch)
+                  .filter(f => CORRECTION_LABELS[f] && !(f === "paymentDate" && u.patch.paymentStatus === "Paid"))
+                  .map(f => (
+                    <span key={f} style={{ color:MUTED }}>
+                      {" "}· {CORRECTION_LABELS[f]} → {(f === "date" || f === "paymentDate") ? fmtDate(u.patch[f]) : u.patch[f]}
+                    </span>
+                  ))}
               </React.Fragment>
             : syncKindMeta(preview.kind).describe(u.existing);
           return (

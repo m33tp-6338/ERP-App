@@ -965,6 +965,31 @@ if a duplicate had already been pushed to Master, that row still needs to
 be removed from your Google Sheet by hand. The review screen tells you
 whenever that applies to what you've selected.
 
+## New in v6.39: correcting a Date, Category, Sub-Category, Name or Payment Date in the sheet now updates the payment instead of duplicating or ignoring it
+
+**The bug:** the Google Sheets sync matched an existing payment only by
+Date + Site + Name + Amount. So correcting a wrong Date or Name for a
+payment already in the app broke that match — the corrected row looked
+like a brand-new payment and got added again as a duplicate. Correcting a
+Category, Sub-Category, or an already-Paid row's Payment Date didn't break
+the match, but the correction was silently thrown away — the sync just
+recognised the row as "already in the app" and moved on, with your fix
+never reaching the app.
+
+**Fixed:** whenever the sheet has a Ref No. column (Master does;
+"Payment to be done" usually doesn't), the sync now checks Ref No. first
+and trusts it as the payment's real identity — a Ref No. never
+legitimately changes once assigned. A match by Ref No. now updates Date,
+Category, Sub-Category, Name, and Payment Date on the existing requisition
+instead of adding a duplicate or discarding the change. The review screen
+before you tap Apply now shows exactly which fields are being corrected on
+each matched row.
+
+**One thing to know:** this deliberately does NOT auto-correct Amount or
+Site, since those affect money and site totals — fix those directly on the
+requisition in the app itself, the same as before. A row with no Ref No.
+on the sheet is unaffected by this change.
+
 ## New in v6.38: syncing/importing requisitions no longer auto-writes into Master
 
 **The bug:** pulling requisitions IN — a Google Sheets sync (silent, on
