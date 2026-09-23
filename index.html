@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.39";
+const APP_VERSION = "6.40";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -80,6 +80,11 @@ const GOOGLE_DRIVE_APP_ID = "60621934527";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.40", date:"2026-09-23", title:"Stopped moving a paid row to the bottom of Master — it now always updates in place", items:[
+    "Fixed: since v6.34, marking a requisition Paid moved its row in Master to the bottom of the sheet (\"so Master reads newest-payment-last\"). This fought any order you kept yourself — chronological entry order, or anything else — and was especially disruptive for a card payment, where the Paid date can land weeks after the row was first entered: the row would suddenly jump far down the sheet the moment it settled, well out of place.",
+    "The app now only ever writes the Payment Date (and Status, and a blank Ref No. it can fill in) onto the matching row, exactly where it already sits. Nothing in Master is ever reordered by the app anymore — whatever order you keep the sheet in is exactly the order it stays in.",
+    "This only affects future updates. Any row a previous version already moved stays wherever it landed — this isn't retroactively undone.",
+  ]},
   { v:"6.39", date:"2026-09-17", title:"Correcting a Date, Category, Sub-Category, Name or Payment Date in the sheet now updates the existing payment instead of duplicating or ignoring it", items:[
     "Fixed: syncing from Google Sheets used to match an existing payment only by Date+Site+Name+Amount. So correcting a Date or Name for a payment already in the app broke that match and added it again as a duplicate — while correcting a Category, Sub-Category, or an already-Paid row's Payment Date didn't break the match, but the correction was silently thrown away (the sync just said \"already in the app\" and moved on).",
     "Now, whenever the sheet carries a Ref No. (Master does; \"Payment to be done\" usually doesn't), that's checked first and trusted as the payment's real identity — a Ref No. never legitimately changes once assigned. A match by Ref No. updates Date, Category, Sub-Category, Name, and Payment Date onto the existing requisition instead of adding a duplicate or discarding the change. The sync preview screen now shows exactly which fields are being corrected on each matched row, not just \"Pending → Paid\".",
@@ -16407,23 +16412,16 @@ function writePaymentIntoSheet(ws, req, aliases){
       const existingRefNo = String((aoa[rowIdx] && aoa[rowIdx][refNoCol]) || "").trim();
       if (!existingRefNo) setCell(rowIdx, refNoCol, req.refNo);
     }
-    // v6.34: now that this row is Paid, move it to the bottom of the sheet
-    // so Master reads newest-payment-last, matching how the user's other
-    // sheets are kept. Only when the whole sheet has no formulas or merged
-    // cells (see sheetIsSafeToReorder) — otherwise leave it exactly where
-    // it was, fully updated, rather than risk corrupting something a raw
-    // cell shift can't safely adjust.
-    // v6.37: was `aoa.length - 1` — the sheet's declared range, which can sit
-    // hundreds of rows past the real last row of data. Moving to that far a
-    // "bottom" would drop this row deep into a blank gap instead of right
-    // after the genuine last payment. Use trueLastRow instead.
-    if (rowIdx < trueLastRow) {
-      if (sheetIsSafeToReorder(ws)) {
-        moveSheetRowToBottom(ws, rowIdx, trueLastRow);
-        return { ok:true, action:"updated-moved" };
-      }
-      return { ok:true, action:"updated-guarded" };
-    }
+    // v6.34 introduced moving a row to the bottom of the sheet once it's
+    // marked Paid, so Master would read newest-payment-last. v6.40: retired
+    // at the user's request — it silently fought their own row order
+    // (chronological, or whatever manual arrangement they keep), and was
+    // especially disruptive for a card payment whose Paid date lands weeks
+    // after its entry date, since the row would jump far down the sheet the
+    // moment it settled. The update now always happens in place; nothing in
+    // this sheet ever gets reordered by the app. sheetIsSafeToReorder() and
+    // moveSheetRowToBottom() are kept below, unused, in case row-reordering
+    // is ever wanted again as an opt-in.
     return { ok:true, action:"updated" };
   }
 

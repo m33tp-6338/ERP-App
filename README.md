@@ -965,6 +965,26 @@ if a duplicate had already been pushed to Master, that row still needs to
 be removed from your Google Sheet by hand. The review screen tells you
 whenever that applies to what you've selected.
 
+## New in v6.40: Master rows no longer get moved to the bottom when marked Paid
+
+**The bug:** since v6.34, marking a requisition Paid moved its row in Master
+down to the bottom of the sheet, so Master would read newest-payment-last.
+This fought whatever order you actually kept the sheet in — chronological
+entry order, or any other arrangement — and was worst for a card payment,
+where the Paid date can land weeks after the row was first entered: the row
+would suddenly jump far down the sheet the moment it settled, landing well
+out of place relative to everything around it.
+
+**The fix:** the app now only ever writes the Payment Date (and Status, and
+a blank Ref No. it can fill in) onto the row that's already there — exactly
+where it sits. Nothing in Master is reordered by the app anymore, for any
+reason. Whatever order you keep the sheet in — by hand, by a sort you apply
+yourself, or just the order you typed things in — is the order it stays in.
+
+**One thing to know:** this only changes what happens going forward. Any row
+an earlier version already moved to the bottom stays wherever it landed —
+this update doesn't go back and move anything to "fix" it retroactively.
+
 ## New in v6.39: correcting a Date, Category, Sub-Category, Name or Payment Date in the sheet now updates the payment instead of duplicating or ignoring it
 
 **The bug:** the Google Sheets sync matched an existing payment only by
