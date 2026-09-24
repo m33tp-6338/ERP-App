@@ -965,6 +965,24 @@ if a duplicate had already been pushed to Master, that row still needs to
 be removed from your Google Sheet by hand. The review screen tells you
 whenever that applies to what you've selected.
 
+## New in v6.44: Large lists render only visible rows — fixes app lag as data grows
+
+The Requisitions list, Payment Register (both To Pay and Paid), and Expenses
+list were each mounting every matching row on screen at once. With 1000+
+requisitions, that meant over a thousand real elements rendered simultaneously
+— on every screen open, and re-rendered on every keystroke while searching.
+That's what was behind the app feeling laggy as your data grew.
+
+These four lists now render only the rows near what's actually on screen,
+plus a small buffer, and pick up more automatically as you scroll — the same
+technique apps like Gmail use to stay fast regardless of how much data is
+loaded. Nothing about what you can do changed: search, sort, filters,
+select-all, and opening a row all still work exactly as before, and all still
+act on your complete data — not just whatever happens to be drawn on screen
+at that moment.
+
+This is purely a rendering change; it does not touch how your data is stored.
+
 ## New in v6.43: Import from Excel (Expenses) also stopped guessing Expense Type
 
 v6.41 stopped the live Office Master sync from guessing an Expense Type on
