@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.40";
+const APP_VERSION = "6.41";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -80,6 +80,11 @@ const GOOGLE_DRIVE_APP_ID = "60621934527";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.41", date:"2026-09-24", title:"Office Master → Expenses: added Vendor, stopped guessing Expense Type, amount import unchanged", items:[
+    "Added: a Vendor field on Expenses, filled in automatically from Office Master's \"VENDOR\" column when syncing. It shows up next to Sub-Category in the Expenses list, the edit form (positioned right after Sub-Category, before Amount), and every Expenses export.",
+    "Changed: syncing from Office Master no longer guesses an Expense Type. Office Master has no Expense Type column, so every synced row was silently being tagged \"Site Purchase\" — now the field is left blank instead, for you to set if and when it matters. This only changes what happens on sync; existing expense records are untouched.",
+    "Confirmed, no change needed: Office Master's \"AMOUNT2\" column was already being ignored — only \"Amount\" is ever imported as the expense value. That was correct before this update too.",
+  ]},
   { v:"6.40", date:"2026-09-23", title:"Stopped moving a paid row to the bottom of Master — it now always updates in place", items:[
     "Fixed: since v6.34, marking a requisition Paid moved its row in Master to the bottom of the sheet (\"so Master reads newest-payment-last\"). This fought any order you kept yourself — chronological entry order, or anything else — and was especially disruptive for a card payment, where the Paid date can land weeks after the row was first entered: the row would suddenly jump far down the sheet the moment it settled, well out of place.",
     "The app now only ever writes the Payment Date (and Status, and a blank Ref No. it can fill in) onto the matching row, exactly where it already sits. Nothing in Master is ever reordered by the app anymore — whatever order you keep the sheet in is exactly the order it stays in.",
@@ -688,7 +693,7 @@ const emptyReq = {
 const PAYMENT_MODES = ["NEFT","RTGS","IMPS","UPI","Cheque","Cash","Other"];
 
 const emptyExpense = { id:"", date:"", periodText:"", expenseType:"Site Purchase", site:"", category:"", subCategory:"",
-  description:"", amount:"", paidBy:"", paidDate:"", settledTo:"", claimId:"", claimRef:"",
+  vendorName:"", description:"", amount:"", paidBy:"", paidDate:"", settledTo:"", claimId:"", claimRef:"",
   onwardTo:"", onwardDate:"", fromReqId:"", seq:0, createdAt:0 };
 
 // Settled means the person has actually been paid back.
@@ -3742,7 +3747,6 @@ function ERPApp(){
       // Mirrors ImportTab's own "expenses" row handling (see ImportTab.buildPreview),
       // kept as its own copy here since this tab intentionally stays append-only —
       // simpler than the update-merge logic Import from Excel supports.
-      const etypes = (lists && lists.expenseTypes) ? lists.expenseTypes : DEFAULT_LISTS.expenseTypes;
       const existingKeys = new Set((expenses||[]).map(e =>
         [e.date || e.periodText, String(e.paidBy||"").toLowerCase(), Number(e.amount||0),
          String(e.description||"").toLowerCase(), String(e.subCategory||"").toLowerCase()].join("|")));
@@ -3758,13 +3762,13 @@ function ERPApp(){
         out.date = parsedDate || "";
         out.periodText = parsedDate ? "" : raw;
 
-        if (!out.expenseType || !etypes.includes(out.expenseType)) {
-          const t = String(out.expenseType||"").toLowerCase();
-          out.expenseType = t.indexOf("travel")>=0 ? "Travel"
-            : t.indexOf("office")>=0 ? "Office"
-            : (t.indexOf("purchase")>=0 || t.indexOf("site")>=0) ? "Site Purchase"
-            : (out.expenseType || etypes[0] || "Site Purchase");
-        }
+        // v6.41: this used to force every row into a guessed Expense Type
+        // ("Site Purchase" by default) whenever the source had no recognizable
+        // Expense Type column — which Office Master never has, so every
+        // Office Master row was silently tagged "Site Purchase" regardless of
+        // what it actually was. At the user's request: no more guessing. If
+        // the sheet genuinely has an Expense Type/Type/Head column, whatever
+        // it says is kept as-is; otherwise the field is left blank.
         if (out.paidDate && !String(out.settledTo||"").trim()) out.settledTo = out.paidBy || "";
         if (!out.site) out.site = c.source;
 
@@ -12862,7 +12866,7 @@ function ExpensesTab({ expenses, setExpenses, reqs, setReqs, lists, setLists, sh
     if (view === "unclaimed" && done) return false;
     if (view === "claimed" && !done) return false;
     if (personFilter !== "All" && e.paidBy !== personFilter) return false;
-    if (!matches(query, dateTerms(e.date, e.paidDate), e.description, e.expenseType, e.category, e.subCategory, e.site, e.paidBy, e.settledTo, e.claimRef, e.amount)) return false;
+    if (!matches(query, dateTerms(e.date, e.paidDate), e.description, e.expenseType, e.category, e.subCategory, e.vendorName, e.site, e.paidBy, e.settledTo, e.claimRef, e.amount)) return false;
     return true;
   }), [sorted, view, personFilter]);
 
@@ -13066,12 +13070,12 @@ function ExpensesTab({ expenses, setExpenses, reqs, setReqs, lists, setLists, sh
     if (!rows.length) return;
     const ws = XLSX.utils.json_to_sheet(rows.map(e => ({
       Date: e.date ? fmtDate(e.date) : "", "Expense Type":e.expenseType||"", "Paid By":e.paidBy||"",
-      Amount:Number(e.amount)||0, Site:e.site||"", Category:e.category||"",
-      "Sub-Category":e.subCategory||"", Description:e.description||"",
+      Site:e.site||"", Category:e.category||"", "Sub-Category":e.subCategory||"", Vendor:e.vendorName||"",
+      Amount:Number(e.amount)||0, Description:e.description||"",
       "Paid To":e.settledTo||"", "Payment Date": e.paidDate ? fmtDate(e.paidDate) : "",
       "Claimed In":e.claimRef||"",
     })));
-    ws["!cols"] = [{wch:12},{wch:15},{wch:16},{wch:12},{wch:14},{wch:16},{wch:16},{wch:38},{wch:16},{wch:14},{wch:16}];
+    ws["!cols"] = [{wch:12},{wch:15},{wch:16},{wch:14},{wch:16},{wch:16},{wch:16},{wch:12},{wch:38},{wch:16},{wch:14},{wch:16}];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Expenses");
     XLSX.writeFile(wb, `Expenses_selected_${todayStr()}.xlsx`);
@@ -13112,10 +13116,11 @@ function ExpensesTab({ expenses, setExpenses, reqs, setReqs, lists, setLists, sh
       Date: e.date ? fmtDate(e.date) : "",
       "Expense Type":e.expenseType || "",
       "Paid By":e.paidBy || "",
-      Amount:Number(e.amount)||0,
       Site:e.site || "",
       Category:e.category || "",
       "Sub-Category":e.subCategory || "",
+      Vendor:e.vendorName || "",
+      Amount:Number(e.amount)||0,
       Description:e.description || "",
       "Paid To": e.settledTo || "",
       "Payment Date": e.paidDate ? fmtDate(e.paidDate) : "",
@@ -13123,7 +13128,7 @@ function ExpensesTab({ expenses, setExpenses, reqs, setReqs, lists, setLists, sh
       "Passed On Date": e.onwardDate ? fmtDate(e.onwardDate) : "",
       "Claimed In": e.claimRef || "",
     });
-    const cols = [{wch:14},{wch:12},{wch:14},{wch:16},{wch:12},{wch:14},{wch:16},{wch:20},{wch:38},{wch:16},{wch:14},{wch:16},{wch:14},{wch:16}];
+    const cols = [{wch:14},{wch:12},{wch:14},{wch:16},{wch:14},{wch:16},{wch:20},{wch:16},{wch:12},{wch:38},{wch:16},{wch:14},{wch:16},{wch:14},{wch:16}];
     const wb = XLSX.utils.book_new();
     const groups = {};
     rows.forEach(e => { (groups[e.expenseType] = groups[e.expenseType] || []).push(e); });
@@ -13404,7 +13409,7 @@ function ExpensesTab({ expenses, setExpenses, reqs, setReqs, lists, setLists, sh
                         <div style={{ fontSize:12, color:MUTED, marginTop:2, overflow:"hidden",
                           textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
                           {[groupBy === "person" ? (e.date ? fmtDate(e.date) : "no date") : (e.paidBy || "unassigned"),
-                            e.expenseType, e.site, e.category
+                            e.expenseType, e.site, e.category, e.vendorName
                           ].filter(Boolean).join(" · ")}
                         </div>
                       </div>
@@ -13591,11 +13596,6 @@ function ExpenseForm({ exp, lists, setLists, reqs, onCancel, onSave }){
           onAddOption={(name)=>addToList(L, setLists, "person", name)}
           addPrompt="Name of the person:" />
 
-        <Field label="Amount" required>
-          <input type="number" inputMode="decimal" style={{...inputStyle, fontWeight:700}}
-            value={e.amount} onChange={ev=>set("amount", ev.target.value)} placeholder="₹ 0" />
-        </Field>
-
         <ManagedSelect label="Site" hint="Which site this cost really belongs to"
           value={e.site} onChange={x=>set("site", x)}
           options={siteOptions}
@@ -13613,6 +13613,16 @@ function ExpenseForm({ exp, lists, setLists, reqs, onCancel, onSave }){
           options={subCategoryOptions}
           onAddOption={(name)=>addToList(L, setLists, "subCategory", name, e.category)}
           addPrompt="Name of the new sub-category:" />
+
+        <Field label="Vendor">
+          <input style={inputStyle} value={e.vendorName||""} onChange={ev=>set("vendorName", ev.target.value)}
+            placeholder="Who it was paid to" />
+        </Field>
+
+        <Field label="Amount" required>
+          <input type="number" inputMode="decimal" style={{...inputStyle, fontWeight:700}}
+            value={e.amount} onChange={ev=>set("amount", ev.target.value)} placeholder="₹ 0" />
+        </Field>
 
         <Field label="Description">
           <textarea style={{...inputStyle, resize:"vertical"}} rows={3} value={e.description}
@@ -14664,6 +14674,7 @@ const EXPENSE_TEMPLATE = [
   { key:"site",        headers:["Site","Location"] },
   { key:"category",    headers:["Category"] },
   { key:"subCategory", headers:["Sub-Category","Sub Category","SubCategory"] },
+  { key:"vendorName",  headers:["Vendor","Vendor Name"] },
   { key:"description", headers:["Description","Particulars","Details","Narration","Remarks"] },
   { key:"settledTo",   headers:["Paid To","Partner","Reimbursed To","Settled To","Paid To Partner"] },
   { key:"onwardTo",    headers:["Passed On To","Onward To","Shared With","Transferred To","Split To"] },
@@ -18196,11 +18207,11 @@ function exportEverything({ vendors, reqs, recurring, expenses, cashTxns, cards,
 
   add("Expenses", (expenses||[]).map(e => ({
     ID:e.id, Date:fmtDate(e.date), "Expense Type":e.expenseType||"", "Paid By":e.paidBy||"",
-    Amount:Number(e.amount)||0, Site:e.site||"", Category:e.category||"",
-    "Sub-Category":e.subCategory||"", Description:e.description||"",
+    Site:e.site||"", Category:e.category||"", "Sub-Category":e.subCategory||"", Vendor:e.vendorName||"",
+    Amount:Number(e.amount)||0, Description:e.description||"",
     "Paid To":e.settledTo||"", "Payment Date":fmtDate(e.paidDate),
     "Passed On To":e.onwardTo||"", "Passed On Date":fmtDate(e.onwardDate),
-  })), [{wch:14},{wch:12},{wch:15},{wch:16},{wch:12},{wch:14},{wch:16},{wch:16},{wch:44},{wch:16},{wch:14},{wch:16},{wch:15}]);
+  })), [{wch:14},{wch:12},{wch:15},{wch:16},{wch:14},{wch:16},{wch:16},{wch:16},{wch:12},{wch:44},{wch:16},{wch:14},{wch:16},{wch:15}]);
 
   add("Cash", (cashTxns||[]).map(t => ({
     ID:t.id, Date:fmtDate(t.date), Card:cardName(t.cardId), Type:t.type||"Spend",

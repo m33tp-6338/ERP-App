@@ -965,6 +965,23 @@ if a duplicate had already been pushed to Master, that row still needs to
 be removed from your Google Sheet by hand. The review screen tells you
 whenever that applies to what you've selected.
 
+## New in v6.41: Vendor added to Expenses, Office Master sync stopped guessing Expense Type
+
+**Added:** a Vendor field on Expenses, filled in automatically from Office
+Master's "VENDOR" column when syncing. It appears next to Sub-Category in the
+Expenses list, in the edit form (right after Sub-Category, before Amount),
+and in every Expenses export.
+
+**Changed:** syncing from Office Master no longer guesses an Expense Type.
+Office Master has no Expense Type column, so every row synced from it was
+being silently tagged "Site Purchase" — now that field is left blank instead,
+for you to set yourself if and when it matters. This only changes what
+happens going forward on sync; expense records already in the app are
+untouched.
+
+**Confirmed, no change needed:** Office Master's "AMOUNT2" column was already
+being ignored — only "Amount" has ever been imported as the expense value.
+
 ## New in v6.40: Master rows no longer get moved to the bottom when marked Paid
 
 **The bug:** since v6.34, marking a requisition Paid moved its row in Master
