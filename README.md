@@ -965,6 +965,19 @@ if a duplicate had already been pushed to Master, that row still needs to
 be removed from your Google Sheet by hand. The review screen tells you
 whenever that applies to what you've selected.
 
+## New in v6.43: Import from Excel (Expenses) also stopped guessing Expense Type
+
+v6.41 stopped the live Office Master sync from guessing an Expense Type on
+import — but that logic exists twice in the app (the live sync, and the
+separate "Import from Excel" tool), and only the live-sync copy got fixed.
+Anything imported through **Import from Excel** was still being auto-tagged,
+usually "Site Purchase".
+
+Fixed the same way here too: the field is now left exactly as the sheet has
+it, blank if there's no Expense Type column at all. This only changes future
+imports — records already imported through Import from Excel before this
+update still carry whatever Expense Type got guessed for them at the time.
+
 ## New in v6.42: Requisition sync preview leads with Site instead of Name
 
 **The problem:** on a Requisitions sync, the "Will be added" / "will be

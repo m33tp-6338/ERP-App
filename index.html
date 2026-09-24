@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.42";
+const APP_VERSION = "6.43";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -80,6 +80,11 @@ const GOOGLE_DRIVE_APP_ID = "60621934527";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.43", date:"2026-09-24", title:"Import from Excel (Expenses) also stopped guessing Expense Type — v6.41 missed this path", items:[
+    "Fixed: v6.41 stopped the live Office Master sync from guessing an Expense Type on import, but the app has a second, separate copy of that same import logic for \"Import from Excel\" — and that copy was missed. Any Expenses imported through Import from Excel (not the live Google Sheets sync) were still being auto-tagged, usually \"Site Purchase\".",
+    "Fixed now, the same way: the field is left exactly as the sheet has it, blank if the sheet has no Expense Type column at all.",
+    "If you imported expenses through Import from Excel before this update, those records already have a guessed Expense Type sitting on them — this fix only changes what happens on future imports. Bulk-editing existing records' Expense Type, if you want it cleared, would need to be done separately.",
+  ]},
   { v:"6.42", date:"2026-09-24", title:"Requisition sync preview now leads with Site instead of Name", items:[
     "Fixed: the \"Will be added\"/\"will be updated\"/duplicates lists on a Requisitions sync led with Name — but Name is optional and often blank, so most rows just read \"(no name given) · ₹... · date\" even when nothing was wrong with them.",
     "Now each row leads with Site instead (every row here has one, since Site is required to import at all), followed by Amount and Date. The real Name is still shown at the end when the sheet actually has one — it's just never the placeholder text anymore.",
@@ -15130,14 +15135,12 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
         out.date = parsedDate || "";
         out.periodText = parsedDate ? "" : raw;
 
-        const etypes = (lists && lists.expenseTypes) ? lists.expenseTypes : DEFAULT_LISTS.expenseTypes;
-        if (!out.expenseType || !etypes.includes(out.expenseType)) {
-          const t = String(out.expenseType||"").toLowerCase();
-          out.expenseType = t.indexOf("travel")>=0 ? "Travel"
-            : t.indexOf("office")>=0 ? "Office"
-            : (t.indexOf("purchase")>=0 || t.indexOf("site")>=0) ? "Site Purchase"
-            : (out.expenseType || etypes[0] || "Site Purchase");
-        }
+        // v6.42: used to force a guessed Expense Type ("Site Purchase" by
+        // default) whenever the source had no recognizable Expense Type
+        // column — same fix as the live Office Master sync (v6.41), applied
+        // here too since this is the "Import from Excel" copy of that same
+        // logic and was missed the first time. Whatever the sheet says (or
+        // doesn't say) is now kept as-is, no more guessing.
         // Settling on a date means the money went back to whoever spent it,
         // unless the sheet names someone else.
         if (out.paidDate && !String(out.settledTo||"").trim()) out.settledTo = out.paidBy || "";
