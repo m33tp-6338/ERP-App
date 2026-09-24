@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.41";
+const APP_VERSION = "6.42";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -80,6 +80,10 @@ const GOOGLE_DRIVE_APP_ID = "60621934527";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.42", date:"2026-09-24", title:"Requisition sync preview now leads with Site instead of Name", items:[
+    "Fixed: the \"Will be added\"/\"will be updated\"/duplicates lists on a Requisitions sync led with Name — but Name is optional and often blank, so most rows just read \"(no name given) · ₹... · date\" even when nothing was wrong with them.",
+    "Now each row leads with Site instead (every row here has one, since Site is required to import at all), followed by Amount and Date. The real Name is still shown at the end when the sheet actually has one — it's just never the placeholder text anymore.",
+  ]},
   { v:"6.41", date:"2026-09-24", title:"Office Master → Expenses: added Vendor, stopped guessing Expense Type, amount import unchanged", items:[
     "Added: a Vendor field on Expenses, filled in automatically from Office Master's \"VENDOR\" column when syncing. It shows up next to Sub-Category in the Expenses list, the edit form (positioned right after Sub-Category, before Amount), and every Expenses export.",
     "Changed: syncing from Office Master no longer guesses an Expense Type. Office Master has no Expense Type column, so every synced row was silently being tagged \"Site Purchase\" — now the field is left blank instead, for you to set if and when it matters. This only changes what happens on sync; existing expense records are untouched.",
@@ -964,7 +968,13 @@ const DIESEL_LOG_SYNC_KINDS = new Set(["diesellogEntries", "diesellogPurchases",
 const SYNC_KIND_META = {
   requisitions: {
     label: "Requisitions", newLabel: "New requisitions", itemLabel: "requisition",
-    describe: (d) => `${d.name || "—"} · ₹${fmtINR(d.amount)} · ${fmtDate(d.date) || "no date"}`,
+    // v6.42: Name is optional in the sheet and blank on a lot of rows — by the
+    // time this runs it's already been backfilled to "(no name given)" (see
+    // settleRequisitionDates), so leading with it made most rows in this list
+    // read as "(no name given) · ..." even though nothing was actually wrong.
+    // Site is required (every row here has one), so it leads instead; Name is
+    // appended only when it's a real value, never the placeholder.
+    describe: (d) => `${d.site || "—"} · ₹${fmtINR(d.amount)} · ${fmtDate(d.date) || "no date"}${d.name && d.name !== UNNAMED_PAYEE ? ` · ${d.name}` : ""}`,
     dupDesc: "Same date, same name and same amount as something already recorded, so these are not added again.",
     updateLabel: "Already in the app — will be updated",
     updateDesc: "Matched to a requisition already here (by Ref No. when the sheet has one, otherwise by date+name+amount) — so instead of adding a duplicate, the existing one is updated: a newly-filled Payment Date marks it Paid, and a changed Date, Category, Sub-Category, Name or Payment Date on an already-matched row corrects it there too.",

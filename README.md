@@ -965,6 +965,18 @@ if a duplicate had already been pushed to Master, that row still needs to
 be removed from your Google Sheet by hand. The review screen tells you
 whenever that applies to what you've selected.
 
+## New in v6.42: Requisition sync preview leads with Site instead of Name
+
+**The problem:** on a Requisitions sync, the "Will be added" / "will be
+updated" / duplicates lists led each row with its Name — but Name is
+optional in the sheet and often blank, so most rows just read "(no name
+given) · ₹... · date" even when everything about the row was actually fine.
+
+**The fix:** each row now leads with Site instead (every row here has one,
+since Site is required just to make it into these lists), followed by Amount
+and Date. The real Name still shows at the end whenever the sheet actually
+has one — it's just never shown as "(no name given)" anymore.
+
 ## New in v6.41: Vendor added to Expenses, Office Master sync stopped guessing Expense Type
 
 **Added:** a Vendor field on Expenses, filled in automatically from Office
