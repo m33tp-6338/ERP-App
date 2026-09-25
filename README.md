@@ -965,6 +965,20 @@ if a duplicate had already been pushed to Master, that row still needs to
 be removed from your Google Sheet by hand. The review screen tells you
 whenever that applies to what you've selected.
 
+## New in v6.45: Google account picker no longer appears the instant the app opens
+
+If Google Drive/Sheets sync is connected, the app runs a silent "sync on
+open" check. That check used to request a sign-in token immediately when
+the app finished loading — so the Google account-picker popup could appear
+before you'd even seen the app itself, making it look like it opened
+straight into a sign-in screen.
+
+It now waits about 2.5 seconds before running that check, so the app opens
+and is usable first — the account picker, if one's actually needed, only
+shows up after that short pause, in the background. Nothing else about
+syncing changed: what syncs, how often, and the manual "Sync Now"/"Connect
+Google Drive" buttons all work exactly as before.
+
 ## New in v6.44: Large lists render only visible rows — fixes app lag as data grows
 
 The Requisitions list, Payment Register (both To Pay and Paid), and Expenses

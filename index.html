@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.43";
+const APP_VERSION = "6.45";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -80,6 +80,16 @@ const GOOGLE_DRIVE_APP_ID = "60621934527";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.45", date:"2026-09-25", title:"Google account picker no longer pops up the instant the app opens", items:[
+    "Fixed: the app's \"sync on open\" check used to request a Google sign-in token the moment the app finished loading, which meant the Google account-picker popup could appear before the app had even finished painting — it looked like the app opened straight into a sign-in screen instead of your data.",
+    "That check now waits about 2.5 seconds before running, so the app opens and is usable first. The account picker (if one's actually needed) now only appears after that short delay, in the background, never blocking the app from opening.",
+    "This only changes the timing of the automatic on-open sync — it doesn't change what syncs, how often, or anything about the manual \"Sync Now\"/\"Connect Google Drive\" buttons, which still work exactly as before.",
+  ]},
+  { v:"6.44", date:"2026-09-24", title:"Requisitions, Payment Register and Expenses now render only visible rows — fixes app lag on large datasets", items:[
+    "Fixed: the app was lagging as your data grew because the Requisitions list, Payment Register (both To Pay and Paid), and Expenses list were each mounting every single matching row on screen at once — with 1000+ requisitions that's over a thousand real elements rendered at the same time, on every screen open and every keystroke in search.",
+    "Changed: these four lists now render only the rows near what you're actually looking at, plus a small buffer, and pick up more as you scroll — the same technique used by apps like Gmail and Google Sheets to stay fast no matter how much data is loaded. Nothing about what you can do changed: search, sort, filters, select-all, and opening a row all still work exactly as before and still act on your full data, not just what's currently drawn on screen.",
+    "This does not touch your stored data in any way — it only changes how the screen draws it. If anything about scrolling ever looks off (a brief blank flash while flicking very fast through a huge list, for instance), a description of exactly what you saw would help track it down.",
+  ]},
   { v:"6.43", date:"2026-09-24", title:"Import from Excel (Expenses) also stopped guessing Expense Type — v6.41 missed this path", items:[
     "Fixed: v6.41 stopped the live Office Master sync from guessing an Expense Type on import, but the app has a second, separate copy of that same import logic for \"Import from Excel\" — and that copy was missed. Any Expenses imported through Import from Excel (not the live Google Sheets sync) were still being auto-tagged, usually \"Site Purchase\".",
     "Fixed now, the same way: the field is left exactly as the sheet has it, blank if the sheet has no Expense Type column at all.",
@@ -1996,6 +2006,67 @@ function EmptyState({ text }) {
   return (
     <div style={{ textAlign:"center", padding:"40px 16px", borderRadius:16, background:SURFACE, border:`1px dashed ${SAND}` }}>
       <p style={{ fontSize:14, color:MUTED }}>{text}</p>
+    </div>
+  );
+}
+
+/* ---------- windowed list ----------
+   v6.44: Renders only the cards near the viewport instead of every row in the
+   list, so screens with hundreds/thousands of entries (Payment Register,
+   Expenses) stay fast no matter how much data is loaded. Uses the page's own
+   scroll (this app has no inner scrolling panes) plus a generous estimated
+   row height, so it degrades gracefully even when a card's real height
+   varies a little from the estimate — it only affects how early a row is
+   pre-rendered before it scrolls into view, never correctness. */
+function WindowedList({ items, rowHeight, gap = 8, overscan = 8, renderRow, initialCount = 30 }){
+  const containerRef = React.useRef(null);
+  const [range, setRange] = useState({ start: 0, end: Math.min(items.length, initialCount) });
+
+  useEffect(() => {
+    const rowStep = rowHeight + gap;
+    let ticking = false;
+    function measure() {
+      const el = containerRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const viewportH = window.innerHeight || document.documentElement.clientHeight || 800;
+      const above = Math.max(0, -rect.top);
+      const start = Math.max(0, Math.floor(above / rowStep) - overscan);
+      const visibleRows = Math.ceil(viewportH / rowStep) + overscan * 2;
+      let end = Math.min(items.length, start + visibleRows);
+      // Snap all the way to the real end once we're within `overscan` rows of
+      // it — a small, bounded amount of extra rendering that guarantees the
+      // last row is always reachable even if the estimated rowHeight is a
+      // little off from the true rendered height (which shifts exactly how
+      // far the page can actually scroll).
+      if (end >= items.length - overscan) end = items.length;
+      setRange(prev => (prev.start === start && prev.end === end) ? prev : { start, end });
+    }
+    measure();
+    function onScrollOrResize() {
+      if (ticking) return;
+      ticking = true;
+      requestAnimationFrame(() => { measure(); ticking = false; });
+    }
+    window.addEventListener("scroll", onScrollOrResize, { passive:true });
+    window.addEventListener("resize", onScrollOrResize);
+    return () => {
+      window.removeEventListener("scroll", onScrollOrResize);
+      window.removeEventListener("resize", onScrollOrResize);
+    };
+  }, [items.length, rowHeight, gap, overscan]);
+
+  const start = Math.min(range.start, Math.max(0, items.length - 1));
+  const end = Math.max(start, Math.min(range.end, items.length));
+  const rowStep = rowHeight + gap;
+  const topH = start * rowStep;
+  const bottomH = Math.max(0, (items.length - end) * rowStep);
+
+  return (
+    <div ref={containerRef} style={{ display:"flex", flexDirection:"column", gap }}>
+      {topH > 0 && <div style={{ height: topH }} />}
+      {items.slice(start, end).map((item, i) => renderRow(item, start + i))}
+      {bottomH > 0 && <div style={{ height: bottomH }} />}
     </div>
   );
 }
@@ -4598,16 +4669,26 @@ function ERPApp(){
     }
   }, [driveConnected, sheetSyncBusy, sheets, syncSheets]);
 
-  // Fires once, the moment the app has finished loading — this is the "on
-  // app open" auto-sync the user asked for. A second, throttled check (at
-  // most once every 20 minutes) catches the case where the app was kept
+  // Fires once, shortly after the app has finished loading — this is the
+  // "on app open" auto-sync the user asked for. A second, throttled check
+  // (at most once every 20 minutes) catches the case where the app was kept
   // open in the background and only just brought back to the foreground,
   // which for a phone PWA is effectively also "opening the app" again.
+  //
+  // v6.45: this used to fire the instant `loaded` became true, which meant
+  // the Google account-picker popup could appear before the app had even
+  // finished painting — it looked like the app opened straight into a
+  // sign-in screen. It's delayed a couple of seconds now so the app opens
+  // and is usable first, and only then (in the background) does the silent
+  // token request happen and the picker show up if one's actually needed.
   useEffect(() => {
     if (!loaded || autoSyncRanRef.current) return;
     autoSyncRanRef.current = true;
-    lastAutoSyncAtRef.current = Date.now();
-    runAutoSheetSync();
+    const t = setTimeout(() => {
+      lastAutoSyncAtRef.current = Date.now();
+      runAutoSheetSync();
+    }, 2500);
+    return () => clearTimeout(t);
   }, [loaded, runAutoSheetSync]);
 
   useEffect(() => {
@@ -6617,7 +6698,7 @@ function ExportTab({ reqs, setReqs, vendors, setVendors, lists, setLists, expens
             <span style={{ fontSize:12, color:MUTED }}>Tap an entry to open it</span>
           </div>
           <div style={{ display:"flex", flexDirection:"column", gap:8, marginBottom: selected.size>0 ? 170 : 100 }}>
-            {filtered.map(r => (
+            <WindowedList items={filtered} rowHeight={120} gap={8} renderRow={r => (
               <div key={r.id} onClick={()=>setDetailRow(r)}
                 style={{ background:SURFACE, borderRadius:16, padding:16, display:"flex", alignItems:"flex-start", gap:12, cursor:"pointer",
                   border:`1.5px solid ${selected.has(r.id)?AMBER:SAND}` }}>
@@ -6645,7 +6726,7 @@ function ExportTab({ reqs, setReqs, vendors, setVendors, lists, setLists, expens
                 </div>
                 <Icon name="chevron" size={18} color="#B6C2D4" />
               </div>
-            ))}
+            )} />
           </div>
         </React.Fragment>
       )}
@@ -13407,7 +13488,7 @@ function ExpensesTab({ expenses, setExpenses, reqs, setReqs, lists, setLists, sh
             {sections.map(g => (
               <React.Fragment key={g.key}>
                 {g.key !== "__all" && <GroupHead label={g.label} count={g.rows.length} total={g.total} />}
-                {g.rows.map(e => {
+                <WindowedList items={g.rows} rowHeight={78} gap={6} renderRow={e => {
                   const done = expenseSettled(e);
                   return (
                     <div key={e.id} onClick={()=>setEditing(e)}
@@ -13460,7 +13541,7 @@ function ExpensesTab({ expenses, setExpenses, reqs, setReqs, lists, setLists, sh
                       </button>
                     </div>
                   );
-                })}
+                }} />
               </React.Fragment>
             ))}
           </div>
@@ -17264,7 +17345,7 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
           <div style={{ display:"flex", flexDirection:"column", gap:8, marginBottom: selected.size ? 150 : 20 }}>
             <SelectAllBar count={selected.size} total={toPay.length}
               onToggleAll={()=>setSelected(selected.size===toPay.length ? new Set() : new Set(toPay.map(r=>r.id)))} />
-            {toPay.map(r => {
+            <WindowedList items={toPay} rowHeight={170} gap={8} renderRow={r => {
               const age = daysUntil(r.date);
               const daysOld = age < 0 ? Math.abs(age) : 0;
               return (
@@ -17318,7 +17399,7 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
                   </div>
                 </div>
               );
-            })}
+            }} />
           </div>
         )}
 
@@ -17688,7 +17769,7 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
         <div style={{ display:"flex", flexDirection:"column", gap:8, marginBottom: selected.size ? 150 : 20 }}>
           <SelectAllBar count={selected.size} total={filtered.length}
             onToggleAll={()=>setSelected(selected.size===filtered.length ? new Set() : new Set(filtered.map(r=>r.id)))} />
-          {filtered.map(r => (
+          <WindowedList items={filtered} rowHeight={150} gap={8} renderRow={r => (
             <div key={r.id} onClick={()=>setOpenReq(r)}
               style={{ background:SURFACE, borderRadius:16, padding:14,
                 border:`1.5px solid ${selected.has(r.id) ? AMBER : SAND}`,
@@ -17719,7 +17800,7 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
                 )}
               </div>
             </div>
-          ))}
+          )} />
         </div>
       )}
       {selected.size > 0 && (() => {
