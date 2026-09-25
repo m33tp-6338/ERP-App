@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.45";
+const APP_VERSION = "6.47";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -80,6 +80,15 @@ const GOOGLE_DRIVE_APP_ID = "60621934527";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.47", date:"2026-09-25", title:"Office Master (and every other sheet) no longer imports a Vendor into Expenses", items:[
+    "Changed, at the user's request: Vendor is no longer picked up from any import source into Expenses — v6.41 had added this (reading a \"Vendor\"/\"Vendor Name\" column from Office Master), and it's now removed.",
+    "The Vendor field on Expenses itself is untouched — it still exists on every expense record, still shows in the Expenses form/list and every export, and any Vendor value already sitting on an existing record (from an import done before this update) is left exactly as it was. This only stops a future import from filling it in automatically; it can still be typed in by hand per expense.",
+  ]},
+  { v:"6.46", date:"2026-09-25", title:"Attach-expenses panel's Travel/Office filter no longer disappears for untyped expenses", items:[
+    "Fixed: the \"Attach expenses to this payment\" panel's Travel/Office/Site type filter chips disappeared once enough expenses had no Expense Type set — which, since v6.41/v6.43 correctly stopped guessing that value on import (Office Master has no such column), meant a growing share of imported expenses. The filter chips only ever showed when there was more than one distinct type, so a pile of untyped expenses quietly buried real Travel/Office ones and the whole filter vanished.",
+    "Untyped expenses now get their own \"Not set\" filter chip alongside whatever real types exist (Travel, Office, Site Purchase, etc.), so you can filter down to exactly the ones still needing a type, or to a specific real type, instead of losing the filter entirely. Attaching itself was never actually broken — every expense was always in the list — but with a long list this made it feel impossible to find the right ones.",
+    "This doesn't set an Expense Type for anything by itself. If you want real Travel/Office/Site Purchase types on Office-Master-imported expenses instead of them all landing in \"Not set,\" that needs either a real column for it in your Office Master sheet (like Vendor got added), or setting it by hand per expense in the app — worth deciding which fits your workflow, since re-guessing it automatically is exactly what v6.41 removed for accuracy.",
+  ]},
   { v:"6.45", date:"2026-09-25", title:"Google account picker no longer pops up the instant the app opens", items:[
     "Fixed: the app's \"sync on open\" check used to request a Google sign-in token the moment the app finished loading, which meant the Google account-picker popup could appear before the app had even finished painting — it looked like the app opened straight into a sign-in screen instead of your data.",
     "That check now waits about 2.5 seconds before running, so the app opens and is usable first. The account picker (if one's actually needed) now only appears after that short delay, in the background, never blocking the app from opening.",
@@ -14068,7 +14077,18 @@ function RequisitionDetail({ req, vendors, reqs, setReqs, expenses, setExpenses,
           : allExp;
         if (!attachable.length && !covered.length && !coveredReqs.length) return null;
 
+        // v6.46: an expense imported from Office Master often has no Expense
+        // Type at all (v6.41/v6.43 deliberately stopped guessing one, since
+        // the guesses were frequently wrong — Office Master has no such
+        // column to import from). That used to mean the whole Travel/Office
+        // filter disappeared once enough untyped expenses piled up, even
+        // though plenty of OTHER expenses (entered directly in the app, which
+        // still asks for a type) still have a real one. A "Not set" bucket
+        // keeps every untyped expense findable and keeps the real types
+        // filterable, instead of collapsing back to one flat list.
+        const EXP_TYPE_UNSET = "Not set";
         const types = [...new Set(allExp.map(e => e.expenseType).filter(Boolean))].sort();
+        if (allExp.some(e => !e.expenseType)) types.push(EXP_TYPE_UNSET);
         const inRange = () => true;
         const list = (attachTab === "payments")
           ? attachable
@@ -14076,7 +14096,7 @@ function RequisitionDetail({ req, vendors, reqs, setReqs, expenses, setExpenses,
               .filter(x => matches(attQuery, dateTerms(x.date, x.paymentDate), x.name, x.refNo, x.site, x.category, x.description, x.amount, x.paidBy))
               .sort((a,b) => String(b.date||"").localeCompare(String(a.date||"")))
           : attachable
-              .filter(e => pickType === "All" || e.expenseType === pickType)
+              .filter(e => pickType === "All" || (pickType === EXP_TYPE_UNSET ? !e.expenseType : e.expenseType === pickType))
               .filter(inRange)
               .filter(e => matches(attQuery, dateTerms(e.date, e.paidDate), e.description, e.expenseType, e.paidBy, e.site, e.category, e.amount, e.claimRef))
               .sort((a,b) => String(b.date||"").localeCompare(String(a.date||""))
@@ -14389,7 +14409,7 @@ function RequisitionDetail({ req, vendors, reqs, setReqs, expenses, setExpenses,
                           <div style={{ fontSize:11.5, color:MUTED, marginTop:2 }}>
                             {isPay
                               ? `${e.refNo || "no ref"}${e.date ? " · " + fmtDate(e.date) : ""} · ${e.site || "no site"}`
-                              : `${e.paidBy || "Unassigned"} · ${e.expenseType}${e.date ? " · " + fmtDate(e.date) : ""}`}
+                              : `${e.paidBy || "Unassigned"} · ${e.expenseType || EXP_TYPE_UNSET}${e.date ? " · " + fmtDate(e.date) : ""}`}
                           </div>
                           {isPay && isPartnerPaid(e) && (
                             <div style={{ fontSize:11, fontWeight:700, color:AMBER, marginTop:2 }}>
@@ -14770,7 +14790,13 @@ const EXPENSE_TEMPLATE = [
   { key:"site",        headers:["Site","Location"] },
   { key:"category",    headers:["Category"] },
   { key:"subCategory", headers:["Sub-Category","Sub Category","SubCategory"] },
-  { key:"vendorName",  headers:["Vendor","Vendor Name"] },
+  // v6.47: Vendor is no longer picked up from an import source (Office
+  // Master or otherwise) — removed from the sheet at the user's request.
+  // The vendorName field itself is untouched: it still exists on Expense
+  // records, still shows in the form/list/exports, and any Vendor value
+  // already on an existing record (from an earlier import, before this
+  // change) is left exactly as it is — this only stops a FUTURE import from
+  // filling it in from a sheet column.
   { key:"description", headers:["Description","Particulars","Details","Narration","Remarks"] },
   { key:"settledTo",   headers:["Paid To","Partner","Reimbursed To","Settled To","Paid To Partner"] },
   { key:"onwardTo",    headers:["Passed On To","Onward To","Shared With","Transferred To","Split To"] },

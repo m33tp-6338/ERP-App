@@ -965,6 +965,41 @@ if a duplicate had already been pushed to Master, that row still needs to
 be removed from your Google Sheet by hand. The review screen tells you
 whenever that applies to what you've selected.
 
+## New in v6.47: Office Master no longer imports a Vendor into Expenses
+
+Vendor is no longer picked up from any sheet source (Office Master or
+otherwise) into Expenses — v6.41 had added this, and it's now removed at
+the user's request.
+
+The Vendor field itself is untouched: it's still on every expense record,
+still shows in the form/list/exports, and any Vendor value already sitting
+on an existing record from an earlier import stays exactly as it was. This
+only stops a future import from auto-filling it — it can still be typed in
+by hand per expense.
+
+## New in v6.46: Attach-expenses panel's Travel/Office filter no longer disappears for untyped expenses
+
+The "Attach expenses to this payment" panel's type filter (Travel, Office,
+etc.) used to disappear once enough expenses had no Expense Type set — which
+happens for anything imported from Office Master, since v6.41/v6.43
+correctly stopped guessing that value there (Office Master has no such
+column, and the old guesses were often wrong). The filter only showed when
+there was more than one distinct type, so a pile of untyped imports quietly
+buried the real ones and the whole filter vanished.
+
+Untyped expenses now get their own "Not set" chip alongside whatever real
+types exist, so you can filter straight to the ones still needing a type,
+or to a specific real one, instead of losing the filter altogether.
+Attaching itself was never broken — every expense was always in the list —
+it just got hard to find the right one in a long, unfiltered list.
+
+This doesn't assign a type to anything automatically. If you want real
+Travel/Office/Site Purchase types on Office-Master-imported expenses rather
+than everything landing in "Not set," that needs either a dedicated column
+for it in your Office Master sheet (the same way Vendor was added), or
+setting it by hand per expense — worth deciding which fits, since
+re-guessing it automatically is exactly what v6.41 removed for accuracy.
+
 ## New in v6.45: Google account picker no longer appears the instant the app opens
 
 If Google Drive/Sheets sync is connected, the app runs a silent "sync on
