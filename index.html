@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.47";
+const APP_VERSION = "6.48";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -80,6 +80,11 @@ const GOOGLE_DRIVE_APP_ID = "60621934527";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.48", date:"2026-09-25", title:"Marking a payment Paid in the app now settles a matching Rent & EMI item too", items:[
+    "Fixed: v6.6 added \"a paid row whose name exactly matches an active Rent & EMI item settles that item automatically — advances the due date, counts the instalment,\" but it only ever ran for rows arriving via a Google Sheets sync into Requisitions. Marking a payment Paid any other way — Payment Register's single or bulk Mark Paid, a direct payment, the bank-statement match import, the Requests tab's bulk Mark Paid, a Requisition's own Record Payment, or attaching payments into another — never touched the Rent & EMI schedule at all, so an instalment paid straight in the app just sat there still showing as due (and overdue) until someone opened Rent & EMI and tapped Confirm Paid by hand.",
+    "The same matching rule now runs everywhere a payment is marked Paid inside the app: an exact (case-insensitive) name match against exactly one active Rent & EMI item. On a match, that item's due date moves forward and, if it's an instalment, its paid count goes up — same as the sync path always did.",
+    "This only ever advances the Rent & EMI schedule. It deliberately does not tag the requisition itself as Rent-&-EMI-linked, so a payment that came from Master keeps writing its payment date back to Master exactly as before — only rows the sync creates for this get that link, unchanged from v6.6.",
+  ]},
   { v:"6.47", date:"2026-09-25", title:"Office Master (and every other sheet) no longer imports a Vendor into Expenses", items:[
     "Changed, at the user's request: Vendor is no longer picked up from any import source into Expenses — v6.41 had added this (reading a \"Vendor\"/\"Vendor Name\" column from Office Master), and it's now removed.",
     "The Vendor field on Expenses itself is untouched — it still exists on every expense record, still shows in the Expenses form/list and every export, and any Vendor value already sitting on an existing record (from an import done before this update) is left exactly as it was. This only stops a future import from filling it in automatically; it can still be typed in by hand per expense.",
@@ -1432,6 +1437,43 @@ function daysUntil(dateStr){
   const today = new Date(todayStr() + "T00:00:00");
   const due = new Date(dateStr + "T00:00:00");
   return Math.round((due - today) / (1000*60*60*24));
+}
+// v6.48: "a paid row whose name exactly matches an active Rent & EMI item
+// settles that item automatically" (v6.6) only ever ran for rows arriving
+// via a Google Sheets sync into Requisitions. Every in-app way of marking a
+// requisition Paid — Payment Register's single/bulk Mark Paid, a direct
+// payment, the bank-statement match import, the Requests tab's bulk Mark
+// Paid, Requisition Detail's Record Payment, and attaching payments into
+// another — never touched the Rent & EMI schedule at all, so an instalment
+// paid straight in the app just sat there still showing as due until
+// someone opened Rent & EMI and tapped Confirm Paid by hand. This applies
+// the exact same matching rule the sync path already uses (case-
+// insensitive name, exactly one active match) to every one of those paths.
+// It only ever advances the schedule (due date forward, instalment count
+// up) — it deliberately never sets recurringId on the requisition itself,
+// so a row that came in from Master (or anywhere else) keeps its normal
+// Master push-back eligibility untouched; only sync-created rows are
+// tagged that way, exactly as before.
+function settleRecurringOnPaidNames(names, recurring, setRecurring){
+  const active = (recurring||[]).filter(r => r.active !== false);
+  const updates = [];
+  (names||[]).forEach(name => {
+    const n = String(name||"").trim().toLowerCase();
+    if (!n) return;
+    if (updates.some(u => String(u.name||"").trim().toLowerCase() === n)) return;
+    const matches = active.filter(r => String(r.name||"").trim().toLowerCase() === n);
+    if (matches.length !== 1) return;
+    const item = matches[0];
+    const upd = { ...item };
+    if (item.frequency === "One-time") upd.active = false;
+    else upd.nextDueDate = addInterval(item.nextDueDate, item.frequency);
+    if (isInstalment(item) && item.installmentsPaid !== "") {
+      upd.installmentsPaid = (Number(item.installmentsPaid)||0) + 1;
+      if (Number(item.totalInstallments) && upd.installmentsPaid >= Number(item.totalInstallments)) upd.active = false;
+    }
+    updates.push(upd);
+  });
+  if (updates.length) setRecurring(recurring.map(r => updates.find(u => u.id === r.id) || r));
 }
 function generateRequisitionFromRecurring(item, reqs, setReqs, recurring, setRecurring, showToast){
   const record = {
@@ -4847,7 +4889,7 @@ function ERPApp(){
         {tab==="vendors" && <VendorsTab vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport}
           sheets={sheets} syncSheets={syncSheets} sheetSyncBusy={sheetSyncBusy} />}
         {tab==="requisition" && <RequisitionForm vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} expenses={expenses} setExpenses={setExpenses} lists={lists} setLists={setLists} goTo={navigate} openImport={openImport} showToast={showToast} />}
-        {tab==="export" && <ExportTab reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} expenses={expenses} setExpenses={setExpenses} goTo={navigate} openImport={openImport} showToast={showToast} sheets={sheets} syncSheets={syncSheets} sheetSyncBusy={sheetSyncBusy} />}
+        {tab==="export" && <ExportTab reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} expenses={expenses} setExpenses={setExpenses} goTo={navigate} openImport={openImport} showToast={showToast} sheets={sheets} syncSheets={syncSheets} sheetSyncBusy={sheetSyncBusy} recurring={recurring} setRecurring={setRecurring} />}
         {tab==="recurring" && <RecurringTab vendors={vendors} setVendors={setVendors} recurring={recurring} setRecurring={setRecurring} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport}
           sheets={sheets} syncSheets={syncSheets} sheetSyncBusy={sheetSyncBusy} />}
         {tab==="import" && <ImportTab focusKind={importFocus} clearFocus={()=>setImportFocus("")} presetCardId={importCardHint} vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqsFromImport} recurring={recurring} setRecurring={setRecurring} expenses={expenses} setExpenses={setExpenses} cards={cards} setCards={setCards} cashTxns={cashTxns} setCashTxns={setCashTxns} machines={machines} setMachines={setMachines} diesel={diesel} setDiesel={setDiesel} utilities={utilities} setUtilities={setUtilities} attendance={attendance} setAttendance={setAttendance} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} />}
@@ -4879,7 +4921,7 @@ function ERPApp(){
         {tab==="sheets" && <SheetSyncTab sheets={sheets} setSheets={setSheets} reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} expenses={expenses} setExpenses={setExpenses} recurring={recurring} setRecurring={setRecurring} sync={syncProps} busy={sheetSyncBusy} previewQueue={sheetPreviewQueue} syncSheets={syncSheets} testConnection={testConnection} applyPreview={applyPreview} dismissPreview={()=>setSheetPreviewQueue(q=>q.slice(1))} pushAllEligiblePaidToMaster={pushAllEligiblePaidToMaster} masterPushBusy={masterPushBusy} isMasterEligible={isMasterEligible} skip={sheetSkip} setSkip={setSheetSkip} nameAliases={nameAliases} setNameAliases={setNameAliases} />}
         {tab==="expenses" && <ExpensesTab expenses={expenses} setExpenses={setExpenses} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport} />}
         {tab==="receivables" && <ReceivablesTab reqs={reqs} setReqs={setReqs} showToast={showToast} goTo={navigate} />}
-        {tab==="payments" && <PaymentRegisterTab reqs={reqs} setReqs={setReqs} vendors={vendors} expenses={expenses} setExpenses={setExpenses} cashTxns={cashTxns} cards={cards} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} sync={syncProps} />}
+        {tab==="payments" && <PaymentRegisterTab reqs={reqs} setReqs={setReqs} vendors={vendors} expenses={expenses} setExpenses={setExpenses} cashTxns={cashTxns} cards={cards} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} sync={syncProps} recurring={recurring} setRecurring={setRecurring} />}
         {tab==="company" && <CompanyTab company={company} setCompany={setCompany} showToast={showToast} />}
         {tab==="settings" && <SettingsTab settings={settings} setSettings={setSettings} vendors={vendors} reqs={reqs} recurring={recurring} expenses={expenses} sheets={sheets} cashTxns={cashTxns} cards={cards} machines={machines} diesel={diesel} utilities={utilities} lists={lists} setLists={setLists} showToast={showToast} sync={syncProps} goTo={navigate} />}
       </main>
@@ -6553,7 +6595,7 @@ async function shareRequisitions(rows){
 }
 
 /* ================= EXPORT TAB ================= */
-function ExportTab({ reqs, setReqs, vendors, setVendors, lists, setLists, expenses, setExpenses, goTo, openImport, showToast, sheets, syncSheets, sheetSyncBusy }){
+function ExportTab({ reqs, setReqs, vendors, setVendors, lists, setLists, expenses, setExpenses, goTo, openImport, showToast, sheets, syncSheets, sheetSyncBusy, recurring, setRecurring }){
   const [selected, setSelected] = useState(new Set());
   const [filterStatus, setFilterStatus] = useState("All");
   const [editingRow, setEditingRow] = useState(null);
@@ -6652,7 +6694,7 @@ function ExportTab({ reqs, setReqs, vendors, setVendors, lists, setLists, expens
   if (detailRow) {
     const live = reqs.find(r => r.id === detailRow.id);
     if (!live) { setDetailRow(null); return null; }
-    return <RequisitionDetail req={live} vendors={vendors} reqs={reqs} setReqs={setReqs} expenses={expenses} setExpenses={setExpenses} lists={lists} setLists={setLists} goTo={goTo} showToast={showToast}
+    return <RequisitionDetail req={live} vendors={vendors} reqs={reqs} setReqs={setReqs} expenses={expenses} setExpenses={setExpenses} lists={lists} setLists={setLists} goTo={goTo} showToast={showToast} recurring={recurring} setRecurring={setRecurring}
       onBack={()=>setDetailRow(null)}
       onEdit={()=>{ setEditingRow(live); setDetailRow(null); }}
       onExport={(r)=>exportRows([r])}
@@ -6801,6 +6843,7 @@ function ExportTab({ reqs, setReqs, vendors, setVendors, lists, setLists, expens
                 ? { ...r, paymentStatus:"Paid", paymentDate: iso,
                     paymentMode: r.paymentMode || "NEFT" }
                 : r));
+              settleRecurringOnPaidNames(rows.map(r=>r.name), recurring, setRecurring);
               setAskPayDate(false);
               setBulkSheet(false);
               setSelected(new Set());
@@ -13921,7 +13964,7 @@ function DetailRow({ label, value, copyable, showToast, mono }){
   );
 }
 
-function RequisitionDetail({ req, vendors, reqs, setReqs, expenses, setExpenses, lists, setLists, goTo, showToast, onBack, onEdit, onExport, onDuplicate }){
+function RequisitionDetail({ req, vendors, reqs, setReqs, expenses, setExpenses, lists, setLists, goTo, showToast, onBack, onEdit, onExport, onDuplicate, recurring, setRecurring }){
   const [convert, setConvert] = useState(null);
   const [linking, setLinking] = useState(false);
   const [pick, setPick] = useState(new Set());
@@ -13956,6 +13999,7 @@ function RequisitionDetail({ req, vendors, reqs, setReqs, expenses, setExpenses,
 
   function savePayment(details){
     setReqs(reqs.map(r => r.id === req.id ? { ...r, paymentStatus:"Paid", ...details } : r));
+    settleRecurringOnPaidNames([req.name], recurring, setRecurring);
     setAskPayment(false);
     showToast("Moved to Payment Register");
     onBack();
@@ -14123,6 +14167,7 @@ function RequisitionDetail({ req, vendors, reqs, setReqs, expenses, setExpenses,
                 paymentDate: r.paymentDate || req.paymentDate || req.date,
                 paymentMode: r.paymentMode || req.paymentMode || "" }
             : r));
+          settleRecurringOnPaidNames(rows.map(r=>r.name), recurring, setRecurring);
           setPick(new Set());
           setLinking(false);
           showToast(`${rows.length} payment(s) rolled into ${req.refNo || "this entry"}`);
@@ -16889,7 +16934,7 @@ function DirectPaymentForm({ f, setF, vendors, lists, setLists, onCancel, onSave
   );
 }
 
-function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cashTxns, cards, lists, setLists, showToast, goTo, sync }){
+function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cashTxns, cards, lists, setLists, showToast, goTo, sync, recurring, setRecurring }){
   const [month, setMonth] = useState("all");
   const [site, setSite] = useState("all");
   const [preview, setPreview] = useState(null);
@@ -16988,6 +17033,7 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
       `Already on file as ${clash.map(r=>r.refNo||"no ref").join(", ")}\n\nAdd it anyway?`
     )) return;
     setReqs([...reqs, record]);
+    settleRecurringOnPaidNames([record.name], recurring, setRecurring);
     setAdding(null);
     showToast(`${record.refNo} added to the register`);
   }
@@ -17041,6 +17087,7 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
   function markPaid(details){
     if (!payTarget) return;
     setReqs(reqs.map(r => r.id === payTarget.id ? { ...r, paymentStatus:"Paid", ...details } : r));
+    settleRecurringOnPaidNames([payTarget.name], recurring, setRecurring);
     setPayTarget(null);
     showToast("Moved to Payment Register");
   }
@@ -17056,6 +17103,7 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
     setReqs(reqs.map(r => ids.has(r.id)
       ? { ...r, paymentStatus:"Paid", paidAmount:r.amount, paymentDate:details.paymentDate, paymentMode:details.paymentMode }
       : r));
+    settleRecurringOnPaidNames(reqs.filter(r=>ids.has(r.id)).map(r=>r.name), recurring, setRecurring);
     const count = ids.size;
     setSelected(new Set());
     setBulkPayOpen(false);
@@ -17242,6 +17290,7 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
       };
     });
     setReqs(next);
+    settleRecurringOnPaidNames(preview.matched.map(m=>m.target.name), recurring, setRecurring);
     showToast(`${preview.matched.length} payment(s) updated`);
     setPreview(null);
   }
@@ -17476,7 +17525,7 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
     const live = reqs.find(r => r.id === openReq.id);
     if (!live) { setOpenReq(null); return null; }
     return <RequisitionDetail req={live} vendors={vendors} reqs={reqs} setReqs={setReqs}
-      expenses={expenses} setExpenses={setExpenses} lists={lists} setLists={setLists} goTo={goTo} showToast={showToast}
+      expenses={expenses} setExpenses={setExpenses} lists={lists} setLists={setLists} goTo={goTo} showToast={showToast} recurring={recurring} setRecurring={setRecurring}
       onBack={()=>setOpenReq(null)}
       onEdit={()=>{ setOpenReq(null); setEditReq(live); }}
       onExport={()=>{}} onDuplicate={()=>{}} />;
