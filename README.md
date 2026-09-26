@@ -965,6 +965,24 @@ if a duplicate had already been pushed to Master, that row still needs to
 be removed from your Google Sheet by hand. The review screen tells you
 whenever that applies to what you've selected.
 
+## New in v6.48: marking a payment Paid in the app now settles a matching Rent & EMI item too
+
+v6.6 added: a paid row whose name exactly matches an active Rent & EMI item
+settles that item automatically — advances its due date, counts the
+instalment. It only ever ran for rows arriving via a Google Sheets sync into
+Requisitions. Every other way of marking a payment Paid inside the app —
+Payment Register's single or bulk Mark Paid, a direct payment, the
+bank-statement match import, the Requests tab's bulk Mark Paid, a
+Requisition's own Record Payment, or attaching payments into another —
+never touched the Rent & EMI schedule, so an instalment paid straight in
+the app just sat there still showing as due (and overdue) until someone
+opened Rent & EMI and confirmed it by hand.
+
+The same exact-name match now runs everywhere a payment is marked Paid.
+It only ever advances the Rent & EMI schedule — it never tags the
+requisition itself as Rent-&-EMI-linked, so a payment that came from
+Master still writes its payment date back to Master exactly as before.
+
 ## New in v6.47: Office Master no longer imports a Vendor into Expenses
 
 Vendor is no longer picked up from any sheet source (Office Master or
