@@ -965,6 +965,25 @@ if a duplicate had already been pushed to Master, that row still needs to
 be removed from your Google Sheet by hand. The review screen tells you
 whenever that applies to what you've selected.
 
+## New in v6.49: fixed real lag on Ledgers and Diesel & Machinery, plus a silently-broken Ledgers filter
+
+The Ledgers screen recalculated each vendor's full payment position from the
+whole requisitions list 5-7 separate times on every render (search, sort,
+summary card, the three filter-chip counts, and once per card shown). With
+vendors grown large from auto-created ledgers and requisitions in the
+thousands, that was millions of redundant calculations on every keystroke —
+easily what felt like the app hanging whenever Ledgers was open. Each
+vendor's position is now computed once per render and reused everywhere.
+
+The same pattern is fixed on Diesel & Machinery's Machines list and its
+Purchases/Usage list. Both screens' lists are also now windowed like
+Requisitions, Payment Register and Expenses (v6.44) — only the visible rows
+are rendered, so scrolling stays smooth regardless of how much data piles up.
+
+Also fixed, found while testing the above: the We owe / They owe us /
+Settled filter chips on Ledgers did nothing unless a Site was also picked —
+a pre-existing bug in the filter logic that this performance fix surfaced.
+
 ## New in v6.48: marking a payment Paid in the app now settles a matching Rent & EMI item too
 
 v6.6 added: a paid row whose name exactly matches an active Rent & EMI item
