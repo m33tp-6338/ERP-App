@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.49";
+const APP_VERSION = "6.50";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -80,6 +80,11 @@ const GOOGLE_DRIVE_APP_ID = "60621934527";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.50", date:"2026-09-27", title:"Expenses synced from Office Master now pick up a corrected Date instead of ignoring it", items:[
+    "Fixed: correcting a Date on a row already brought in from Office Master (or any Expenses source) and syncing again used to do nothing — the app could only add brand-new expenses, never update one already here, no matter what changed in the sheet.",
+    "An expense synced again is now recognised as the same one — by an ID from an earlier export when the sheet has one, otherwise by Paid By + Amount + Description + Sub-Category matching (deliberately not Date) — and a corrected Date (or Site, Category, Sub-Category, Type, Settled To, or Payment Date) is applied to the existing expense instead of being silently dropped or added as a second entry. \"Import from Excel\" gets the identical fix for the same reason.",
+    "Trade-off, accepted at the user's request: two genuinely separate expenses that happen to share the same person, amount, description and sub-category on two different days will now be treated as one being corrected rather than two — only the newer date is kept, and the second is not added. If that's ever a real risk for how a source sheet is kept, a stable per-row ID column is the safer alternative and can be switched to later.",
+  ]},
   { v:"6.49", date:"2026-09-26", title:"Fixed real lag on the Ledgers and Diesel & Machinery screens, plus a silently-broken Ledgers filter", items:[
     "Fixed: the Ledgers screen recalculated each vendor's full payment position (everything they're owed or owe) from scratch, from the WHOLE requisitions list, 5 to 7 separate times on every single render — once for the search filter, once for sorting, once for the summary card, three times over for the We owe/They owe us/Settled counts, and once more per vendor card shown. With vendors having grown large (every unique Master-import vendor gets its own ledger automatically) and requisitions in the thousands, this was millions of redundant calculations on every keystroke in the search box — and since a background tick (a toast, a Drive sync) could re-render the screen too, it could feel like the whole app had frozen while Ledgers was open. Every vendor's position is now worked out once per render and reused everywhere it's needed on that screen.",
     "Fixed the same pattern on Diesel & Machinery's Machines list (redoing fuel-efficiency math per machine against the whole diesel log every render) and its Purchases/Usage list (a full machine-list search for every row). Both now look each machine up instantly instead of re-scanning.",
@@ -1019,6 +1024,9 @@ const SYNC_KIND_META = {
     label: "Expenses", newLabel: "New expenses", itemLabel: "expense",
     describe: (d) => `${d.description || d.expenseType || "—"} · ₹${fmtINR(d.amount)}${d.date || d.periodText ? ` · ${d.date ? fmtDate(d.date) : d.periodText}` : " · no date"}`,
     dupDesc: "Same date, payer, amount and description as something already recorded, so these are not added again.",
+    updateLabel: "Already in the app — will be updated",
+    updateDesc: "Matched to an expense already here by an ID from an earlier export, or otherwise by Paid By + Amount + Description + Sub-Category (deliberately not Date) — so a Date corrected in the source file updates the existing expense instead of adding a second one.",
+    updateSummary: (n) => `${n} updated`,
   },
   cash: {
     label: "Cash & Card", newLabel: "New cash entries", itemLabel: "cash entry",
@@ -3887,13 +3895,30 @@ function ERPApp(){
     const toAdd = [], duplicates = [], errors = [];
 
     if (kind === "expenses") {
-      // Mirrors ImportTab's own "expenses" row handling (see ImportTab.buildPreview),
-      // kept as its own copy here since this tab intentionally stays append-only —
-      // simpler than the update-merge logic Import from Excel supports.
+      // Mirrors ImportTab's own "expenses" row handling (see ImportTab.buildPreview).
       const existingKeys = new Set((expenses||[]).map(e =>
         [e.date || e.periodText, String(e.paidBy||"").toLowerCase(), Number(e.amount||0),
          String(e.description||"").toLowerCase(), String(e.subCategory||"").toLowerCase()].join("|")));
+
+      // v6.50: an ID from an earlier export always wins, so a correction lands
+      // on the right row. Below that, a row is also matched by Paid By +
+      // Amount + Description + Sub-Category alone — deliberately NOT Date —
+      // so a corrected Date in Office Master is recognised as "this same
+      // expense, corrected" instead of either being silently dropped (its old
+      // key no longer matches anything) or added again as a second entry,
+      // which is what happened before this version for every field this tab
+      // used to treat as append-only. Trade-off accepted at the user's
+      // request, same as the Requisitions dupKey change accepted for the same
+      // reason (v6.33/37): two genuinely separate expenses that happen to
+      // share the same person, amount, description and sub-category on two
+      // different days will be seen as one being corrected rather than two —
+      // only the newer date wins, and the other is not added.
+      const correctionKeyOf = (e) => [String(e.paidBy||"").trim().toLowerCase(), Number(e.amount||0),
+        String(e.description||"").trim().toLowerCase(), String(e.subCategory||"").trim().toLowerCase()].join("|");
+      const byCorrectionKey = new Map((expenses||[]).map(e => [correctionKeyOf(e), e]));
+      const usedExpense = new Set();
       const seenKeys = new Set();
+      const toUpdate = [];
 
       collected.forEach((c, i) => {
         const { out, problems } = mapRowGeneric(c.row, tpl, map);
@@ -3915,15 +3940,26 @@ function ERPApp(){
         if (out.paidDate && !String(out.settledTo||"").trim()) out.settledTo = out.paidBy || "";
         if (!out.site) out.site = c.source;
 
+        const idHit = out.id ? (expenses||[]).find(x => x.id === String(out.id).trim() && !usedExpense.has(x.id)) : null;
+        if (idHit) { usedExpense.add(idHit.id); toUpdate.push({ existing:idHit, data:out, source:c.source }); return; }
+
         const k = [out.date || out.periodText, String(out.paidBy||"").toLowerCase(), Number(out.amount||0),
                    String(out.description||"").toLowerCase(), String(out.subCategory||"").toLowerCase()].join("|");
         if (existingKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"already in the app" }); return; }
+
+        const corrHit = byCorrectionKey.get(correctionKeyOf(out));
+        if (corrHit && !usedExpense.has(corrHit.id)) {
+          usedExpense.add(corrHit.id);
+          toUpdate.push({ existing:corrHit, data:out, source:c.source });
+          return;
+        }
+
         if (seenKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"repeated inside this sync" }); return; }
         seenKeys.add(k);
         toAdd.push({ data:out, source:c.source });
       });
 
-      queueResult({ kind, toAdd, toUpdate:[], duplicates, errors, failures, missing, map, headers, list, fileReport, skippedFiles, seenFiles, notes });
+      queueResult({ kind, toAdd, toUpdate, duplicates, errors, failures, missing, map, headers, list, fileReport, skippedFiles, seenFiles, notes });
       return;
     }
 
@@ -4375,10 +4411,23 @@ function ERPApp(){
     const stamp = new Date().toISOString();
 
     if (preview.kind === "expenses") {
+      // v6.50: same merge rule as vendors/employees/recurring above — only
+      // non-empty sheet cells overwrite the existing record, and "id" is
+      // never one of them (that's the app's own internal id, never the
+      // sheet's — overwriting it would break claimId/attach links pointing
+      // at this expense). This is what actually applies a matched
+      // correction (e.g. a fixed Date) found by buildPreview above.
+      let base = [...(expenses||[])];
+      (preview.toUpdate||[]).forEach(u => {
+        base = base.map(x => x.id === u.existing.id
+          ? { ...x, ...Object.fromEntries(Object.entries(u.data).filter(([k,val]) => k !== "id" && val !== "" && val !== undefined)) }
+          : x);
+      });
+
       const added = preview.toAdd.map((a, idx) => ({
         ...emptyExpense, ...a.data, id: uid(), claimId:"", claimRef:"", createdAt: Date.now() + idx,
       }));
-      setExpenses([...(expenses||[]), ...added]);
+      setExpenses([...base, ...added]);
 
       const L = lists || DEFAULT_LISTS;
       const nl = { ...L, sites:[...(L.sites||[])], categories:[...(L.categories||[])],
@@ -4393,7 +4442,8 @@ function ERPApp(){
       setLists(nl);
 
       setSheets(sheets.map(x => (preview.list || []).some(l => l.id === x.id) ? { ...x, lastSync: stamp } : x));
-      showToast(`${added.length} expense(s) brought in`);
+      const updCount = (preview.toUpdate||[]).length;
+      showToast(`${added.length} expense(s) brought in${updCount ? ` · ${updCount} updated` : ""}`);
       setSheetPreviewQueue(q => q.slice(1));
       return;
     }
@@ -12521,6 +12571,12 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
           // "Pending → Paid" when the patch actually promotes, and lists
           // whatever else changed either way instead of assuming.
           const CORRECTION_LABELS = { date:"Date", category:"Category", subCategory:"Sub-Category", name:"Name", paymentDate:"Payment Date" };
+          // v6.50: Expenses can now show up here too (see buildPreview), so
+          // it gets the same "what's actually changing" treatment as
+          // Requisitions rather than just describing the old, pre-correction
+          // record — the whole point is showing the corrected Date (or any
+          // other non-blank field the source now carries) before it's applied.
+          const EXP_CORRECTION_LABELS = { date:"Date", site:"Site", category:"Category", subCategory:"Sub-Category", expenseType:"Type", settledTo:"Settled To", paidDate:"Payment Date" };
           const rowBody = (u) => preview.kind === "requisitions"
             ? <React.Fragment>
                 <strong>{u.existing.name}</strong> · ₹{fmtINR(u.existing.amount)}
@@ -12532,6 +12588,17 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
                   .map(f => (
                     <span key={f} style={{ color:MUTED }}>
                       {" "}· {CORRECTION_LABELS[f]} → {(f === "date" || f === "paymentDate") ? fmtDate(u.patch[f]) : u.patch[f]}
+                    </span>
+                  ))}
+              </React.Fragment>
+            : preview.kind === "expenses"
+            ? <React.Fragment>
+                {syncKindMeta(preview.kind).describe(u.existing)}
+                {Object.keys(EXP_CORRECTION_LABELS)
+                  .filter(f => u.data[f] !== "" && u.data[f] !== undefined && String(u.data[f]) !== String(u.existing[f] ?? ""))
+                  .map(f => (
+                    <span key={f} style={{ color:MUTED }}>
+                      {" "}· {EXP_CORRECTION_LABELS[f]} → {f === "date" || f === "paidDate" ? fmtDate(u.data[f]) : u.data[f]}
                     </span>
                   ))}
               </React.Fragment>
@@ -15150,11 +15217,20 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
     const seenRefs = new Set();
     const existingKeys = new Set((kind === "requisitions" || kind === "register") ? reqs.map(importDupKey) : []);
     const seenKeys = new Set();
+    // v6.50: matches an existing expense by Paid By + Amount + Description +
+    // Sub-Category only — deliberately NOT Date — so a corrected Date in the
+    // source file is recognised as "this same expense, corrected" instead of
+    // silently failing to match (its old exact key, which used to include
+    // Date, no longer matches anything once Date changes). Same trade-off
+    // knowingly accepted as the live Google Sheets sync's identical change:
+    // two genuinely separate expenses sharing person+amount+description+
+    // sub-category on two different days will be seen as one being
+    // corrected, not two.
     const expenseByKey = new Map();
     if (kind === "expenses") {
       (expenses||[]).forEach(e => {
-        const k = [e.date || e.periodText, String(e.paidBy||"").toLowerCase(), Number(e.amount||0),
-                   String(e.description||"").toLowerCase(), String(e.subCategory||"").toLowerCase()].join("|");
+        const k = [String(e.paidBy||"").trim().toLowerCase(), Number(e.amount||0),
+                   String(e.description||"").trim().toLowerCase(), String(e.subCategory||"").trim().toLowerCase()].join("|");
         if (!expenseByKey.has(k)) expenseByKey.set(k, e);
       });
     }
@@ -15355,7 +15431,13 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
 
         const ek = [out.date || out.periodText, String(out.paidBy||"").toLowerCase(), Number(out.amount||0),
                     String(out.description||"").toLowerCase(), String(out.subCategory||"").toLowerCase()].join("|");
-        const sameRow = expenseByKey.get(ek);
+        // v6.50: matched on Paid By + Amount + Description + Sub-Category
+        // only (see expenseByKey above) — NOT on ek (which still includes
+        // Date, kept below for within-file duplicate detection only) — so a
+        // corrected Date is recognised as this same row, not a miss.
+        const ck = [String(out.paidBy||"").trim().toLowerCase(), Number(out.amount||0),
+                    String(out.description||"").trim().toLowerCase(), String(out.subCategory||"").trim().toLowerCase()].join("|");
+        const sameRow = expenseByKey.get(ck);
         if (sameRow && !usedExpense.has(sameRow.id)) {
           usedExpense.add(sameRow.id);
           toUpdate.push({ existing:sameRow, data:out, rowNum:i+offset });

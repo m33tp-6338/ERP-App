@@ -965,6 +965,27 @@ if a duplicate had already been pushed to Master, that row still needs to
 be removed from your Google Sheet by hand. The review screen tells you
 whenever that applies to what you've selected.
 
+## New in v6.50: Expenses synced from Office Master now pick up a corrected Date
+
+Correcting a Date on an expense already brought in from Office Master (or any
+Expenses source) and syncing again used to do nothing — the Expenses sync
+could only ever add brand-new rows, never update one already here, no matter
+what changed in the sheet.
+
+An expense synced again is now recognised as the same one — by an ID from an
+earlier export when the sheet has one, otherwise by Paid By + Amount +
+Description + Sub-Category (deliberately not Date) — and a corrected Date
+(or Site, Category, Sub-Category, Type, Settled To, or Payment Date) is
+applied to the existing expense instead of being silently dropped or added
+as a second entry. "Import from Excel" gets the identical fix.
+
+**One trade-off to know, accepted at the user's request:** two genuinely
+separate expenses that happen to share the same person, amount, description
+and sub-category on two different days will now be treated as one being
+corrected rather than two — only the newer date is kept, and the second is
+not added. If that's ever a real risk for how a source sheet is kept, a
+stable per-row ID column is the safer alternative.
+
 ## New in v6.49: fixed real lag on Ledgers and Diesel & Machinery, plus a silently-broken Ledgers filter
 
 The Ledgers screen recalculated each vendor's full payment position from the
