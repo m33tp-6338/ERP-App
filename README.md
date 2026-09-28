@@ -965,6 +965,40 @@ if a duplicate had already been pushed to Master, that row still needs to
 be removed from your Google Sheet by hand. The review screen tells you
 whenever that applies to what you've selected.
 
+## New in v6.51: search-box fix, sync tick/untick on every kind, Travel/Office from Site
+
+Three fixes, all requested together:
+
+**1. Search boxes that did nothing.** The search box on Rent & EMI, Utilities,
+Cash & Card, and Expenses did nothing when you typed into it — each screen's
+list was memoized without watching the search text, so it never
+recalculated as you typed. Every other search box in the app (Ledgers,
+Vendor Ledger, the requisition/attach pickers, Export, Employee Master,
+Payment Register) was already working correctly.
+
+**2. "Sync from Google Sheets" tick/untick now works on every kind.** The
+review screen before a sync goes in only ever showed tick/untick checkboxes
+for Requisitions — every other kind (Expenses, Cash & Card, Diesel, Diesel
+Log, Ledgers, Rent & EMI) showed a plain list with no way to leave a row
+out. It ran deeper than the missing checkboxes: even where the UI did show
+them, unticking a row for any of those kinds had no effect at import time —
+only Requisitions actually respected what was ticked. Both are fixed now:
+every kind shows real checkboxes, and unticking a row genuinely leaves it
+out, matching how "Import from Excel" already worked.
+
+**3. Travel/Office expenses filed by Site now get their chip.** If your
+sheet has no separate Expense Type column but its Site column holds exactly
+"Office" or "Travel" for a row (used as a cost-centre marker rather than an
+actual site name), that value is now used as the Expense Type too — so the
+row gets a real Travel/Office chip on the attach-expenses screen instead of
+sitting in "Not set." Site itself is left exactly as it is. This only reads
+what you've already written in the sheet — it's not a guess, doesn't touch
+rows where Site is a real site name, and never overrides an Expense Type
+the sheet does provide. A row already sitting in the app with a blank type
+from before this fix gets it filled in on the next ordinary sync, even if
+nothing else on that row changed; a type already set (by hand or otherwise)
+is never touched.
+
 ## New in v6.50: Expenses synced from Office Master now pick up a corrected Date
 
 Correcting a Date on an expense already brought in from Office Master (or any

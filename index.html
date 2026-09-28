@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.50";
+const APP_VERSION = "6.51";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -80,6 +80,11 @@ const GOOGLE_DRIVE_APP_ID = "60621934527";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.51", date:"2026-09-28", title:"Search boxes fixed on 4 screens, tick/untick now works on every sync kind, and Travel/Office expenses get their type from Site", items:[
+    "Fixed: the search box on Rent & EMI, Utilities, Cash & Card, and Expenses did nothing when you typed into it — each screen's list was memoized without watching the search text, so the filtered list never recalculated as you typed and kept showing the unfiltered (or stale) result. Every other search box in the app (Ledgers, Vendor Ledger, the requisition/attach pickers, Export, Employee Master, Payment Register) was already working correctly and is unaffected.",
+    "Fixed: the \"Sync from Google Sheets\" review screen only ever showed tick/untick checkboxes for Requisitions — every other kind (Expenses, Cash & Card, Diesel, Diesel Log entries/purchases/machines, Ledgers, Rent & EMI) showed a plain list with no way to leave a row out. Worse, even the checkbox UI that did exist would have had no effect for those kinds — the actual import step only ever respected what was ticked for Requisitions, so unticking a row anywhere else was purely cosmetic. Both are fixed: every kind now shows real tick/untick checkboxes, and unticking a row now genuinely leaves it out, exactly like it already does in \"Import from Excel.\"",
+    "Fixed: an expense from a source with no Expense Type column at all (Office Master, for most of you) always landed with a blank type, so it never got a Travel or Office chip on the attach-expenses screen no matter how it was filed in the sheet. If your sheet's Site column holds exactly \"Office\" or \"Travel\" for a row (used as a cost-centre marker rather than an actual site name) and the row has no separate Expense Type, that value is now used as the Expense Type too — Site itself is left exactly as it is, so nothing you rely on there changes. This is read directly from what you've already written in the sheet, not a guess — it does not affect rows where Site is a real site name, and never overrides an Expense Type the sheet does provide. A row already sitting in the app with a blank type from before this fix gets it filled in the next time you sync (even if nothing else on that row changed); a type you set by hand, or that's already filled in, is never touched.",
+  ]},
   { v:"6.50", date:"2026-09-27", title:"Expenses synced from Office Master now pick up a corrected Date instead of ignoring it", items:[
     "Fixed: correcting a Date on a row already brought in from Office Master (or any Expenses source) and syncing again used to do nothing — the app could only add brand-new expenses, never update one already here, no matter what changed in the sheet.",
     "An expense synced again is now recognised as the same one — by an ID from an earlier export when the sheet has one, otherwise by Paid By + Amount + Description + Sub-Category matching (deliberately not Date) — and a corrected Date (or Site, Category, Sub-Category, Type, Settled To, or Payment Date) is applied to the existing expense instead of being silently dropped or added as a second entry. \"Import from Excel\" gets the identical fix for the same reason.",
@@ -1025,7 +1030,7 @@ const SYNC_KIND_META = {
     describe: (d) => `${d.description || d.expenseType || "—"} · ₹${fmtINR(d.amount)}${d.date || d.periodText ? ` · ${d.date ? fmtDate(d.date) : d.periodText}` : " · no date"}`,
     dupDesc: "Same date, payer, amount and description as something already recorded, so these are not added again.",
     updateLabel: "Already in the app — will be updated",
-    updateDesc: "Matched to an expense already here by an ID from an earlier export, or otherwise by Paid By + Amount + Description + Sub-Category (deliberately not Date) — so a Date corrected in the source file updates the existing expense instead of adding a second one.",
+    updateDesc: "Matched to an expense already here by an ID from an earlier export, or otherwise by Paid By + Amount + Description + Sub-Category (deliberately not Date) — so a Date corrected in the source file updates the existing expense instead of adding a second one. Also matched when nothing else changed but the app's copy is missing an Expense Type that the sheet's Site column (\"Office\"/\"Travel\") now fills in.",
     updateSummary: (n) => `${n} updated`,
   },
   cash: {
@@ -3896,9 +3901,9 @@ function ERPApp(){
 
     if (kind === "expenses") {
       // Mirrors ImportTab's own "expenses" row handling (see ImportTab.buildPreview).
-      const existingKeys = new Set((expenses||[]).map(e =>
-        [e.date || e.periodText, String(e.paidBy||"").toLowerCase(), Number(e.amount||0),
-         String(e.description||"").toLowerCase(), String(e.subCategory||"").toLowerCase()].join("|")));
+      const existingByKey = new Map((expenses||[]).map(e =>
+        [[e.date || e.periodText, String(e.paidBy||"").toLowerCase(), Number(e.amount||0),
+          String(e.description||"").toLowerCase(), String(e.subCategory||"").toLowerCase()].join("|"), e]));
 
       // v6.50: an ID from an earlier export always wins, so a correction lands
       // on the right row. Below that, a row is also matched by Paid By +
@@ -3938,6 +3943,9 @@ function ERPApp(){
         // the sheet genuinely has an Expense Type/Type/Head column, whatever
         // it says is kept as-is; otherwise the field is left blank.
         if (out.paidDate && !String(out.settledTo||"").trim()) out.settledTo = out.paidBy || "";
+        // v6.51: see expenseTypeFromSite — a Site of "Office"/"Travel" with no
+        // Expense Type column becomes the Expense Type instead of blank.
+        if (!out.expenseType) { const t = expenseTypeFromSite(out.site); if (t) out.expenseType = t; }
         if (!out.site) out.site = c.source;
 
         const idHit = out.id ? (expenses||[]).find(x => x.id === String(out.id).trim() && !usedExpense.has(x.id)) : null;
@@ -3945,7 +3953,23 @@ function ERPApp(){
 
         const k = [out.date || out.periodText, String(out.paidBy||"").toLowerCase(), Number(out.amount||0),
                    String(out.description||"").toLowerCase(), String(out.subCategory||"").toLowerCase()].join("|");
-        if (existingKeys.has(k)) { duplicates.push({ data:out, source:c.source, why:"already in the app" }); return; }
+        const exactHit = existingByKey.get(k);
+        if (exactHit) {
+          // v6.51: an exact re-sync normally means nothing changed, so it's
+          // silently skipped below as a duplicate — but if the app's copy has
+          // no Expense Type yet and this sync just worked one out from the
+          // Site column (see expenseTypeFromSite), that's still worth
+          // applying, so the Office/Travel backlog clears on an ordinary
+          // re-sync instead of needing every old row touched by hand. Only
+          // the Expense Type field is patched — nothing else on the row.
+          if (!exactHit.expenseType && out.expenseType && !usedExpense.has(exactHit.id)) {
+            usedExpense.add(exactHit.id);
+            toUpdate.push({ existing:exactHit, data:{ expenseType: out.expenseType }, source:c.source });
+            return;
+          }
+          duplicates.push({ data:out, source:c.source, why:"already in the app" });
+          return;
+        }
 
         const corrHit = byCorrectionKey.get(correctionKeyOf(out));
         if (corrHit && !usedExpense.has(corrHit.id)) {
@@ -4410,6 +4434,20 @@ function ERPApp(){
     if (preview.toAdd.length === 0 && !hasUpdates) return;
     const stamp = new Date().toISOString();
 
+    // v6.51: rows the person unticked on the "Check before importing" screen
+    // used to be left out only for Requisitions (the one kind that screen's
+    // tick/untick UI covered, per the v6.29 scope) — every other kind below
+    // read preview.toAdd/toUpdate directly, so unticking a row there had no
+    // effect at all once the UI was extended to show checkboxes for every
+    // kind. keptToAdd/keptToUpdate are now computed once, up front, and used
+    // by every branch below, same rule ImportTab's own apply() already uses.
+    const keptToAdd = preview.toAdd.filter((_, n) => !sheetSkip.has("a" + n));
+    const keptToUpdate = (preview.toUpdate || []).filter((_, n) => !sheetSkip.has("u" + n));
+    if (!keptToAdd.length && !keptToUpdate.length) {
+      showToast("Nothing is ticked", "error");
+      return;
+    }
+
     if (preview.kind === "expenses") {
       // v6.50: same merge rule as vendors/employees/recurring above — only
       // non-empty sheet cells overwrite the existing record, and "id" is
@@ -4418,13 +4456,13 @@ function ERPApp(){
       // at this expense). This is what actually applies a matched
       // correction (e.g. a fixed Date) found by buildPreview above.
       let base = [...(expenses||[])];
-      (preview.toUpdate||[]).forEach(u => {
+      keptToUpdate.forEach(u => {
         base = base.map(x => x.id === u.existing.id
           ? { ...x, ...Object.fromEntries(Object.entries(u.data).filter(([k,val]) => k !== "id" && val !== "" && val !== undefined)) }
           : x);
       });
 
-      const added = preview.toAdd.map((a, idx) => ({
+      const added = keptToAdd.map((a, idx) => ({
         ...emptyExpense, ...a.data, id: uid(), claimId:"", claimRef:"", createdAt: Date.now() + idx,
       }));
       setExpenses([...base, ...added]);
@@ -4442,8 +4480,7 @@ function ERPApp(){
       setLists(nl);
 
       setSheets(sheets.map(x => (preview.list || []).some(l => l.id === x.id) ? { ...x, lastSync: stamp } : x));
-      const updCount = (preview.toUpdate||[]).length;
-      showToast(`${added.length} expense(s) brought in${updCount ? ` · ${updCount} updated` : ""}`);
+      showToast(`${added.length} expense(s) brought in${keptToUpdate.length ? ` · ${keptToUpdate.length} updated` : ""}`);
       setSheetPreviewQueue(q => q.slice(1));
       return;
     }
@@ -4457,7 +4494,7 @@ function ERPApp(){
             || newCards.find(c => String(c.name||"").trim().toLowerCase() === t) || null;
       };
       const seqBase = (cashTxns||[]).reduce((m,t)=>Math.max(m, Number(t.seq||0)), 0);
-      const added = preview.toAdd.map((a, idx) => {
+      const added = keptToAdd.map((a, idx) => {
         const d = { ...a.data };
         const cName = d.__cardName || "";
         delete d.__cardName;
@@ -4504,7 +4541,7 @@ function ERPApp(){
                                      || String(m.regNo||"").trim().toLowerCase() === t)
             || newMachines.find(m => String(m.name||"").trim().toLowerCase() === t) || null;
       };
-      const added = preview.toAdd.map((a, idx) => {
+      const added = keptToAdd.map((a, idx) => {
         const d = { ...a.data };
         const mName = d.__machineName || "";
         delete d.__machineName;
@@ -4533,7 +4570,7 @@ function ERPApp(){
     }
 
     if (preview.kind === "diesellogEntries") {
-      const added = preview.toAdd.map((a, idx) => ({ ...emptyDieselLogEntry, ...a.data, id: uid(), createdAt: Date.now() + idx }));
+      const added = keptToAdd.map((a, idx) => ({ ...emptyDieselLogEntry, ...a.data, id: uid(), createdAt: Date.now() + idx }));
       setDieselLog([...(dieselLog||[]), ...added]);
       setSheets(sheets.map(x => (preview.list || []).some(l => l.id === x.id) ? { ...x, lastSync: stamp } : x));
       showToast(`${added.length} log entry(ies) brought in`);
@@ -4542,7 +4579,7 @@ function ERPApp(){
     }
 
     if (preview.kind === "diesellogPurchases") {
-      const added = preview.toAdd.map((a, idx) => ({ ...emptyDieselLogPurchase, ...a.data, id: uid(), createdAt: Date.now() + idx }));
+      const added = keptToAdd.map((a, idx) => ({ ...emptyDieselLogPurchase, ...a.data, id: uid(), createdAt: Date.now() + idx }));
       setDieselLogPurchases([...(dieselLogPurchases||[]), ...added]);
       setSheets(sheets.map(x => (preview.list || []).some(l => l.id === x.id) ? { ...x, lastSync: stamp } : x));
       showToast(`${added.length} purchase(s) brought in`);
@@ -4551,15 +4588,14 @@ function ERPApp(){
     }
 
     if (preview.kind === "diesellogMachines") {
-      const added = preview.toAdd.map((a, idx) => ({ ...emptyDieselLogMachine, ...a.data, id: uid(), active:true, createdAt: Date.now() + idx }));
+      const added = keptToAdd.map((a, idx) => ({ ...emptyDieselLogMachine, ...a.data, id: uid(), active:true, createdAt: Date.now() + idx }));
       let next = [...(dieselLogMachines||[]), ...added];
-      (preview.toUpdate||[]).forEach(u => {
+      keptToUpdate.forEach(u => {
         next = next.map(m => m.id === u.existing.id ? { ...m, ...u.patch } : m);
       });
       setDieselLogMachines(next);
       setSheets(sheets.map(x => (preview.list || []).some(l => l.id === x.id) ? { ...x, lastSync: stamp } : x));
-      const updCount = (preview.toUpdate||[]).length;
-      showToast(`${added.length} machine(s) added${updCount ? ` · ${updCount} updated` : ""}`);
+      showToast(`${added.length} machine(s) added${keptToUpdate.length ? ` · ${keptToUpdate.length} updated` : ""}`);
       setSheetPreviewQueue(q => q.slice(1));
       return;
     }
@@ -4570,17 +4606,16 @@ function ERPApp(){
       // sheet that only tracks a few columns never blanks out details kept
       // elsewhere in the app (bank details added by hand, for instance).
       let next = [...vendors];
-      (preview.toUpdate||[]).forEach(u => {
+      keptToUpdate.forEach(u => {
         next = next.map(v => v.id === u.existing.id
           ? { ...v, ...Object.fromEntries(Object.entries(u.data).filter(([,val]) => val !== "" && val !== undefined)) }
           : v);
       });
-      next = [...next, ...preview.toAdd.map(a => a.data)];
+      next = [...next, ...keptToAdd.map(a => a.data)];
       setVendors(next);
       setSheets(sheets.map(x => (preview.list || []).some(l => l.id === x.id) ? { ...x, lastSync: stamp } : x));
-      const updCount = (preview.toUpdate||[]).length;
       const kindWord = preview.kind === "employees" ? "employee" : "vendor";
-      showToast(`${preview.toAdd.length} ${kindWord}(s) added${updCount ? ` · ${updCount} updated` : ""}`);
+      showToast(`${keptToAdd.length} ${kindWord}(s) added${keptToUpdate.length ? ` · ${keptToUpdate.length} updated` : ""}`);
       setSheetPreviewQueue(q => q.slice(1));
       return;
     }
@@ -4591,7 +4626,7 @@ function ERPApp(){
       // (Owner for Rent/Other, Financier for Instalment) — see makeLedger
       // in ImportTab for the identical logic this mirrors.
       let next = [...recurring];
-      (preview.toUpdate||[]).forEach(u => {
+      keptToUpdate.forEach(u => {
         next = next.map(r => r.id === u.existing.id
           ? { ...r, ...Object.fromEntries(Object.entries(u.data).filter(([k,val]) => k !== "_costGroupInferred" && val !== "" && val !== undefined)) }
           : r);
@@ -4616,11 +4651,11 @@ function ERPApp(){
       };
 
       let inferredCount = 0;
-      [...preview.toAdd.map(a=>a.data), ...(preview.toUpdate||[]).map(u=>u.data)].forEach(d => {
+      [...keptToAdd.map(a=>a.data), ...keptToUpdate.map(u=>u.data)].forEach(d => {
         if (d._costGroupInferred) inferredCount++;
       });
 
-      const added = preview.toAdd.map((a, idx) => {
+      const added = keptToAdd.map((a, idx) => {
         const d = { ...a.data };
         delete d._costGroupInferred;
         const payTo = String(d.payTo || "").trim();
@@ -4640,7 +4675,7 @@ function ERPApp(){
 
       // rows that merely updated an existing entry still need their payee on file
       next = next.map(r => {
-        const upd = (preview.toUpdate||[]).find(u => u.existing.id === r.id);
+        const upd = keptToUpdate.find(u => u.existing.id === r.id);
         if (!upd) return r;
         const payTo = String(upd.data.payTo || r.ownerName || "").trim();
         if (!payTo) return r;
@@ -4654,7 +4689,7 @@ function ERPApp(){
       const L = lists || DEFAULT_LISTS;
       const nl = { ...L, sites:[...(L.sites||[])], categories:[...(L.categories||[])],
                    subCategories:{...(L.subCategories||{})}, types:[...(L.types||DEFAULT_LISTS.types)] };
-      [...added, ...(preview.toUpdate||[]).map(u=>u.data)].forEach(d => {
+      [...added, ...keptToUpdate.map(u=>u.data)].forEach(d => {
         if (d.site && !nl.sites.includes(d.site)) nl.sites.push(d.site);
         if (d.category && !nl.categories.includes(d.category)) nl.categories.push(d.category);
         if (d.type && !nl.types.includes(d.type)) nl.types.push(d.type);
@@ -4667,24 +4702,14 @@ function ERPApp(){
       setLists(nl);
 
       setSheets(sheets.map(x => (preview.list || []).some(l => l.id === x.id) ? { ...x, lastSync: stamp } : x));
-      const updCount = (preview.toUpdate||[]).length;
-      showToast(`${added.length} rent/EMI item(s) added${updCount ? ` · ${updCount} updated` : ""}`
+      showToast(`${added.length} rent/EMI item(s) added${keptToUpdate.length ? ` · ${keptToUpdate.length} updated` : ""}`
         + `${newOwners.length ? ` · ${newOwners.length} ledger(s) created` : ""}`
         + `${inferredCount ? ` · ${inferredCount} group-guessed, please check` : ""}`);
       setSheetPreviewQueue(q => q.slice(1));
       return;
     }
 
-    // Rows the person unticked on this preview (requisitions only — the one
-    // sync kind this selection UI covers, per the confirmed v6.29 scope) are
-    // left out entirely, same rule as ImportTab's own "apply" below.
-    const keptToAdd = preview.toAdd.filter((_, n) => !sheetSkip.has("a" + n));
-    const keptToUpdate = (preview.toUpdate || []).filter((_, n) => !sheetSkip.has("u" + n));
-    if (!keptToAdd.length && !keptToUpdate.length) {
-      showToast("Nothing is ticked", "error");
-      return;
-    }
-
+    // Requisitions/register fallback — the original, oldest sync kind.
     const added = [];
     const recurringUpdates = [];
     keptToAdd.forEach((a, idx) => {
@@ -6994,7 +7019,7 @@ function RecurringTab({ vendors, setVendors, recurring, setRecurring, reqs, setR
       if (stateFilter === "Paused")    return r.active === false;
       if (stateFilter === "Completed") return done;
       return true;
-    }), [recurring, groupFilter, stateFilter, siteFilter]);
+    }), [recurring, groupFilter, stateFilter, siteFilter, query]);
   const sorted = useMemo(
     () => sortBy(sortedRaw, (REC_SORTS.find(x=>x.k===sortKey)||REC_SORTS[0]).get, desc),
     [sortedRaw, sortKey, desc]);
@@ -8549,7 +8574,7 @@ function UtilitiesTab({ utilities, setUtilities, cards, lists, setLists, showToa
       if (typeFilter !== "All" && u.utilityType !== typeFilter) return false;
       if (!matches(query, dateTerms(u.dueDate, u.paymentDate), u.month, monthLabel(u.month), u.utilityType, u.provider, u.consumerNo, u.billNo, u.site, u.notes, u.billAmount)) return false;
       return true;
-    }), [utilities, monthFilter, placeFilter, typeFilter]);
+    }), [utilities, monthFilter, placeFilter, typeFilter, query]);
   const visible = useMemo(
     () => sortBy(visibleRaw, (UTIL_SORTS.find(x=>x.k===sortKey)||UTIL_SORTS[0]).get, desc),
     [visibleRaw, sortKey, desc]);
@@ -10324,7 +10349,7 @@ function CashTab({ cards, setCards, cashTxns, setCashTxns, cashCounts, setCashCo
       if (onlyMissingBill && !(t.type === "Spend" && !t.hasBill)) return false;
       if (!matches(query, dateTerms(t.date), t.vendorName, t.description, t.category, t.subCategory, t.site, t.billNo, t.ref, t.authorisedBy, t.amount)) return false;
       return true;
-    }), [cashTxns, cardFilter, monthFilter, onlyMissingBill]);
+    }), [cashTxns, cardFilter, monthFilter, onlyMissingBill, query]);
   const visible = useMemo(
     () => sortBy(visibleRaw, (CASH_SORTS.find(x=>x.k===sortKey)||CASH_SORTS[0]).get, desc),
     [visibleRaw, sortKey, desc]);
@@ -12495,10 +12520,12 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
         )}
 
         {preview.toAdd.length > 0 && (() => {
-          // Per-row tick/untick (v6.29) is scoped to Requisitions only, per
-          // the confirmed scope — every other sync kind keeps its original
-          // plain, non-selectable list exactly as before.
-          const selectable = preview.kind === "requisitions";
+          // v6.51: per-row tick/untick used to be scoped to Requisitions only
+          // (v6.29) — every other sync kind's "Check before importing" screen
+          // showed a plain list with no way to leave a row out. Now on for
+          // every kind, matching "Import from Excel"'s own review screen,
+          // which has never had this restriction.
+          const selectable = true;
           const keptCount = selectable ? preview.toAdd.filter((_,n)=>!skip.has("a"+n)).length : preview.toAdd.length;
           const allOn = keptCount === preview.toAdd.length;
           const rowBody = (a) => (
@@ -12562,7 +12589,7 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
           ); })()}
 
         {preview.toUpdate && preview.toUpdate.length > 0 && (() => {
-          const selectable = preview.kind === "requisitions";
+          const selectable = true; // v6.51: on for every kind — see the toAdd block above
           const keptCount = selectable ? preview.toUpdate.filter((_,n)=>!skip.has("u"+n)).length : preview.toUpdate.length;
           const allOn = keptCount === preview.toUpdate.length;
           // v6.39: a toUpdate row is no longer always a Paid-promotion — it
@@ -12684,7 +12711,7 @@ function SheetSyncTab({ sheets, setSheets, reqs, setReqs, vendors, setVendors, l
 
         {(() => {
           const meta = syncKindMeta(preview.kind);
-          const selectable = preview.kind === "requisitions";
+          const selectable = true; // v6.51: on for every kind — see the toAdd block above
           const keptAdd = selectable ? preview.toAdd.filter((_,n)=>!skip.has("a"+n)).length : preview.toAdd.length;
           const keptUpd = selectable
             ? (preview.toUpdate||[]).filter((_,n)=>!skip.has("u"+n)).length
@@ -13135,7 +13162,7 @@ function ExpensesTab({ expenses, setExpenses, reqs, setReqs, lists, setLists, sh
     if (personFilter !== "All" && e.paidBy !== personFilter) return false;
     if (!matches(query, dateTerms(e.date, e.paidDate), e.description, e.expenseType, e.category, e.subCategory, e.vendorName, e.site, e.paidBy, e.settledTo, e.claimRef, e.amount)) return false;
     return true;
-  }), [sorted, view, personFilter]);
+  }), [sorted, view, personFilter, query]);
 
   const unclaimed = sorted.filter(e => !expenseSettled(e));
 
@@ -14944,6 +14971,21 @@ const CASH_TEMPLATE = [
   { key:"ref",          headers:["Reference","Ref","ATM Reference","Transaction Ref"] },
 ];
 
+// v6.51: Office Master (and some other sheets) has no Expense Type column at
+// all — instead, for these rows, the Site column itself is used as a
+// cost-centre marker holding "Office" or "Travel" rather than an actual site
+// name. Previously that meant every such row landed in Expenses with a blank
+// Expense Type (shown as "Not set"), and the Travel/Office chip never
+// appeared for them on the attach-expense screen. This is checked only when
+// Expense Type is genuinely blank — a sheet that has both a real Expense
+// Type column AND a Site column is left exactly as it is.
+function expenseTypeFromSite(site) {
+  const t = String(site || "").trim().toLowerCase();
+  if (t === "office") return "Office";
+  if (t === "travel") return "Travel";
+  return "";
+}
+
 const EXPENSE_TEMPLATE = [
   { key:"id",          headers:["ID","Id","Record ID","RecordID"] },
 
@@ -15424,6 +15466,9 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
         // Settling on a date means the money went back to whoever spent it,
         // unless the sheet names someone else.
         if (out.paidDate && !String(out.settledTo||"").trim()) out.settledTo = out.paidBy || "";
+        // v6.51: see expenseTypeFromSite — a Site of "Office"/"Travel" with no
+        // Expense Type column becomes the Expense Type instead of blank.
+        if (!out.expenseType) { const t = expenseTypeFromSite(out.site); if (t) out.expenseType = t; }
 
         // An ID from an export always wins, so a correction lands on the right row.
         const idHitE = (expenses||[]).find(x => out.id && x.id === String(out.id).trim());
