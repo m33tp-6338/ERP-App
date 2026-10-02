@@ -965,6 +965,48 @@ if a duplicate had already been pushed to Master, that row still needs to
 be removed from your Google Sheet by hand. The review screen tells you
 whenever that applies to what you've selected.
 
+## New in v6.54: Every import now accepts .xlsb files too
+
+All three Excel file pickers — Import from Excel (every kind: Ledgers,
+Payment Register, Requisitions, Rent & EMI, Employees, Expenses, Cash &
+Card, Machinery, Utilities, Attendance, Diesel), Diesel Log's own Import,
+and Payment Register's bank-statement match — used to only let you choose
+a .xlsx, .xls or .csv file, so a bank or office file saved as .xlsb
+(Excel Binary Workbook) wouldn't even show up in the file picker. The
+bundled Excel-reading library already fully understands .xlsb — this was
+only the picker's own filter being too narrow — so all three now also
+accept .xlsb. Since Cash & Card uses the same main Import tab as
+everything else, this covers card and cash imports too, not just Diesel.
+
+## New in v6.53: Rent & EMI due dates now always advance, and a hide button for Paid to date
+
+**1. Rent & EMI settling, closed for good.** Writing a Payment Date on a
+requisition that matches a Rent & EMI item is supposed to move that item's
+due date forward and count the instalment automatically. That already
+worked for the main "mark Paid" actions (Payment Register, Record Payment,
+bulk Mark Paid, bank-statement match import), but three other ways a
+requisition becomes Paid were missed:
+
+- Editing a requisition directly in the app — on Requisitions, Payment
+  Register, or Data Check — including writing a brand-new one as already
+  Paid.
+- An existing Pending requisition getting its Payment Date filled in later
+  through "Sync from Google Sheets." A brand-new already-Paid row arriving
+  from a sync was handled; the same thing happening to a row already sitting
+  in the app, promoted to Paid by a later sync, was not.
+- "Import from Excel" for Requisitions/Register — this one never settled
+  Rent & EMI at all, for either a new or a promoted row.
+
+All three now use the exact same rule as everywhere else: an exact
+(case-insensitive) name match against exactly one active Rent & EMI item,
+and only on a genuine not-Paid-to-Paid transition, so re-saving or
+re-syncing an already-paid row never advances the schedule a second time.
+
+**2. Hide "Paid to date" on the Dashboard.** A small eye icon on that card
+blurs the figure behind dots — tap again to bring it back. It resets to
+visible every time the app is opened; nothing is saved, so it can't be left
+hidden by accident.
+
 ## New in v6.52: Spend Search, and a card-funding matching fix
 
 **1. Spend Search (new screen, under Reports).** Type a material, category,

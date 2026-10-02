@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.52";
+const APP_VERSION = "6.54";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -80,6 +80,13 @@ const GOOGLE_DRIVE_APP_ID = "60621934527";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.54", date:"2026-10-02", title:"All Excel/CSV imports now also accept .xlsb files", items:[
+    "Fixed: every \"Import from Excel\" file picker — the main Import tab (Ledgers, Payment Register, Requisitions, Rent & EMI, Employees, Expenses, Cash & Card, Machinery, Utilities, Attendance, Diesel), Diesel Log's own import, and Payment Register's bank-statement match — only let you choose a .xlsx, .xls or .csv file. If your bank or office gives you a .xlsb (Excel Binary Workbook) file, the file picker wouldn't even show it. The bundled Excel-reading library already fully understands .xlsb — this was purely the file picker's own filter being too narrow — so all three pickers now also accept .xlsb, and every kind (including Cash & Card, which shares the main Import tab's picker) is covered by this one fix.",
+  ]},
+  { v:"6.53", date:"2026-10-02", title:"A Rent & EMI item's due date now always advances when its payment is marked Paid — in-app edits and imports included — plus a hide button for Dashboard's Paid to date", items:[
+    "Fixed: writing a Payment Date on a requisition that matches a Rent & EMI item used to settle that item (move the due date forward, count the instalment) only when done through a few specific \"mark Paid\" actions. Three other ways a requisition becomes Paid were missed and never settled anything: editing a requisition directly in the app (on the Requisitions, Payment Register, or Data Check screen, or when writing a brand-new one as already Paid), an existing Pending requisition getting its Payment Date filled in later through \"Sync from Google Sheets\" (a brand-new already-Paid row synced in was handled; an existing one promoted to Paid by a later sync was not), and \"Import from Excel\" for Requisitions/Register, which never settled Rent & EMI at all. All three now use the identical rule already used everywhere else — exact (case-insensitive) name match, exactly one active Rent & EMI item, only on a genuine not-Paid-to-Paid transition so re-saving or re-syncing an already-paid row never advances the schedule a second time.",
+    "New: a small eye icon on the Dashboard's \"Paid to date\" card hides that figure behind dots — tap again to reveal it. It's a plain on/off toggle for the current screen, not saved anywhere, so it's always showing again next time the app is opened (no risk of leaving it hidden and forgetting where the number went).",
+  ]},
   { v:"6.52", date:"2026-09-28", title:"New: Spend Search — search steel, cement or any material/vendor across Requisitions, Expenses and Cash & Card at once, plus a card-funding matching fix", items:[
     "New \"Spend Search\" screen (under Reports): type a material, category, vendor name or description — e.g. \"steel\", \"cement\", a contractor's name — and see every place that money was spent on it in one place: paid Requisitions, Expenses, and Cash & Card spends together, instead of checking three separate screens by hand. Filter by site and by month, tap any total (by source, by category, or by vendor/person) to drill into the exact entries behind it, and export the current search result to Excel.",
     "Uses the same \"real money, no double count\" rule already used on the Dashboard and Site Summary: when a Requisition is a reimbursement payment for an Expense you've already claimed, only the Expense is shown (with its real category and vendor, e.g. \"Steel\") — the Requisition itself is left out, since counting both would double the spend and a reimbursement's own category is usually just \"Reimbursement\", which a material search would never find anyway. An Expense not yet reimbursed is still shown (it's a real purchase) but clearly labelled \"Pending\" and kept out of the money-actually-out total, so the numbers you see always mean what they say.",
@@ -2018,6 +2025,8 @@ function Icon({ name, size=18, color="currentColor" }) {
     menu:     "M4 7h16M4 12h16M4 17h16",
     back:     "M19 12H5M12 19l-7-7 7-7",
     arrow:    "M5 12h14M13 6l6 6-6 6",
+    eye:      "M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z",
+    eyeOff:   "M3 3l18 18M10.6 10.6a3 3 0 0 0 4.2 4.2M9.4 5.3A10.4 10.4 0 0 1 12 5c6.5 0 10 7 10 7a15.6 15.6 0 0 1-3.2 4.1M6.3 6.4A15.9 15.9 0 0 0 2 12s3.5 7 10 7a9.9 9.9 0 0 0 4.1-.9",
   };
   const d = P[name];
   if (!d) return null;
@@ -4754,6 +4763,33 @@ function ERPApp(){
     // not added again as a second row. Applied in the same setReqs call as the
     // brand-new rows so the list only re-renders once.
     const updatePatches = new Map(keptToUpdate.map(u => [u.id, u.patch]));
+    // v6.53: an EXISTING Pending requisition promoted to Paid by this sync
+    // (its Payment Date now filled in, or an explicit Paid status) settles a
+    // matching Rent & EMI item too — same rule as every in-app "mark Paid"
+    // action. Previously only a brand-new matched row (above) did this, so
+    // a row already in the app that only later got its payment date never
+    // advanced the schedule. Matched by name against the existing record
+    // (not the incoming sheet row, in case the sheet's Name differs), and
+    // only for a genuine not-Paid-to-Paid transition — merged into the same
+    // recurringUpdates batch so there's still one setRecurring call below.
+    const activeRecurringForUpdates = (recurring||[]).filter(r => r.active !== false);
+    keptToUpdate.forEach(u => {
+      if (!u.patch || u.patch.paymentStatus !== "Paid" || u.existing.paymentStatus === "Paid") return;
+      const nm = String(u.existing.name || "").trim().toLowerCase();
+      if (!nm) return;
+      const nameMatches = activeRecurringForUpdates.filter(r => String(r.name||"").trim().toLowerCase() === nm);
+      if (nameMatches.length !== 1) return;
+      const item = nameMatches[0];
+      if (recurringUpdates.some(x => x.id === item.id)) return;
+      const upd = { ...item };
+      if (item.frequency === "One-time") upd.active = false;
+      else upd.nextDueDate = addInterval(item.nextDueDate, item.frequency);
+      if (isInstalment(item) && item.installmentsPaid !== "") {
+        upd.installmentsPaid = (Number(item.installmentsPaid)||0) + 1;
+        if (Number(item.totalInstallments) && upd.installmentsPaid >= Number(item.totalInstallments)) upd.active = false;
+      }
+      recurringUpdates.push(upd);
+    });
     // v6.38: this is a sheet sync bringing rows IN from Google Sheets, not a
     // live "mark Paid" tap in the app — never auto-push back to Master for it.
     suppressAutoPushRef.current = true;
@@ -4975,7 +5011,7 @@ function ERPApp(){
         {tab==="dashboard" && <Dashboard vendors={vendors} reqs={reqs} setReqs={setReqs} recurring={recurring} setRecurring={setRecurring} expenses={expenses} cashTxns={cashTxns} goTo={navigate} showToast={showToast} sync={syncProps} />}
         {tab==="vendors" && <VendorsTab vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport}
           sheets={sheets} syncSheets={syncSheets} sheetSyncBusy={sheetSyncBusy} />}
-        {tab==="requisition" && <RequisitionForm vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} expenses={expenses} setExpenses={setExpenses} lists={lists} setLists={setLists} goTo={navigate} openImport={openImport} showToast={showToast} />}
+        {tab==="requisition" && <RequisitionForm vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} expenses={expenses} setExpenses={setExpenses} lists={lists} setLists={setLists} goTo={navigate} openImport={openImport} showToast={showToast} recurring={recurring} setRecurring={setRecurring} />}
         {tab==="export" && <ExportTab reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} expenses={expenses} setExpenses={setExpenses} goTo={navigate} openImport={openImport} showToast={showToast} sheets={sheets} syncSheets={syncSheets} sheetSyncBusy={sheetSyncBusy} recurring={recurring} setRecurring={setRecurring} />}
         {tab==="recurring" && <RecurringTab vendors={vendors} setVendors={setVendors} recurring={recurring} setRecurring={setRecurring} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport}
           sheets={sheets} syncSheets={syncSheets} sheetSyncBusy={sheetSyncBusy} />}
@@ -4984,7 +5020,7 @@ function ERPApp(){
           sheets={sheets} syncSheets={syncSheets} sheetSyncBusy={sheetSyncBusy} />}
         {tab==="categorybreakdown" && <CategoryBreakdownTab reqs={reqs} goTo={navigate} />}
         {tab==="spendsearch" && <SpendSearchTab reqs={reqs} expenses={expenses} cashTxns={cashTxns} cards={cards} showToast={showToast} goTo={navigate} />}
-        {tab==="datacheck" && <DataCheckTab reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} expenses={expenses} setExpenses={setExpenses} lists={lists} setLists={setLists} goTo={navigate} openImport={openImport} showToast={showToast} />}
+        {tab==="datacheck" && <DataCheckTab reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} expenses={expenses} setExpenses={setExpenses} lists={lists} setLists={setLists} goTo={navigate} openImport={openImport} showToast={showToast} recurring={recurring} setRecurring={setRecurring} />}
         {tab==="changelog" && <ChangelogTab settings={settings} setSettings={setSettings} goTo={navigate} />}
         {tab==="utilities" && <UtilitiesTab utilities={utilities} setUtilities={setUtilities} cards={cards}
           lists={lists} setLists={setLists} showToast={showToast} goTo={navigate}
@@ -5075,6 +5111,12 @@ function ERPApp(){
 /* ================= DASHBOARD ================= */
 function Dashboard({ vendors, reqs, setReqs, recurring, setRecurring, expenses, cashTxns, goTo, showToast, sync }){
   const [trueCost, setTrueCost] = useState(false);
+  // v6.53: lets the figure be blurred out before handing the phone to someone
+  // else, or turning the screen toward a meeting. Deliberately a plain
+  // in-memory toggle, not saved anywhere — it always starts visible again
+  // next time the app is opened, so it can never be left hidden by mistake
+  // and forgotten about.
+  const [hidePaid, setHidePaid] = useState(false);
   const stats = useMemo(() => {
     const totalPending = reqs.filter(r=>r.paymentStatus==="Pending").reduce((s,r)=>s+Number(r.amount||0),0);
     const totalApproved = reqs.filter(r=>r.paymentStatus==="Approved").reduce((s,r)=>s+Number(r.amount||0),0);
@@ -5235,9 +5277,17 @@ function Dashboard({ vendors, reqs, setReqs, recurring, setRecurring, expenses, 
           <div style={{ fontSize:11.5, color:MUTED, fontWeight:600 }}>Approved</div>
           <div className="num" style={{ fontSize:17, fontWeight:700, color:AMBER, marginTop:2 }}>₹{fmtINR(stats.totalApproved)}</div>
         </div>
-        <div style={{ background:SURFACE, borderRadius:18, padding:15, border:`1px solid ${SAND}`, boxShadow:SHADOW }}>
-          <div style={{ fontSize:11.5, color:MUTED, fontWeight:600 }}>Paid to date</div>
-          <div className="num" style={{ fontSize:17, fontWeight:700, color:GREEN, marginTop:2 }}>₹{fmtINR(stats.totalPaid)}</div>
+        <div style={{ background:SURFACE, borderRadius:18, padding:15, border:`1px solid ${SAND}`, boxShadow:SHADOW, position:"relative" }}>
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+            <div style={{ fontSize:11.5, color:MUTED, fontWeight:600 }}>Paid to date</div>
+            <button onClick={()=>setHidePaid(h=>!h)} title={hidePaid ? "Show amount" : "Hide amount"}
+              style={{ background:"none", border:"none", padding:2, margin:"-2px -2px -2px 0", cursor:"pointer", display:"flex", color:MUTED }}>
+              <Icon name={hidePaid ? "eyeOff" : "eye"} size={14} />
+            </button>
+          </div>
+          <div className="num" style={{ fontSize:17, fontWeight:700, color:GREEN, marginTop:2 }}>
+            {hidePaid ? "••••••" : `₹${fmtINR(stats.totalPaid)}`}
+          </div>
         </div>
         <button onClick={()=>goTo("fixedcost")}
           style={{ textAlign:"left", background:SURFACE, borderRadius:18, padding:15, border:`1px solid ${SAND}`, boxShadow:SHADOW, cursor:"pointer" }}>
@@ -6243,7 +6293,7 @@ function VendorLedger({ vendor, reqs, setReqs, vendors, setVendors, showToast, o
 }
 
 /* ================= REQUISITION FORM (single screen) ================= */
-function RequisitionForm({ vendors, setVendors, reqs, setReqs, expenses, setExpenses, lists, setLists, goTo, openImport, showToast, editItem=null, onDone=null }){
+function RequisitionForm({ vendors, setVendors, reqs, setReqs, expenses, setExpenses, lists, setLists, goTo, openImport, showToast, editItem=null, onDone=null, recurring, setRecurring }){
   const [form, setForm] = useState(editItem ? { ...editItem } : { ...emptyReq, id:uid(), date:todayStr() });
   const [linked, setLinked] = useState(new Set());
   const [showPicker, setShowPicker] = useState(false);
@@ -6355,6 +6405,15 @@ function RequisitionForm({ vendors, setVendors, reqs, setReqs, expenses, setExpe
     }
     if (editItem) {
       setReqs(reqs.map(r => r.id===form.id ? { ...form } : r));
+      // v6.53: editing a requisition straight in the app — e.g. writing a
+      // Payment Date so an entry moves from Pending to Paid — used to never
+      // settle a matching Rent & EMI item, unlike every dedicated "mark
+      // Paid" action (Payment Register, Record Payment, bulk Mark Paid...).
+      // Only fires on the actual Pending-to-Paid transition, so re-saving an
+      // already-paid requisition never advances the schedule a second time.
+      if (editItem.paymentStatus !== "Paid" && form.paymentStatus === "Paid" && recurring && setRecurring) {
+        settleRecurringOnPaidNames([form.name], recurring, setRecurring);
+      }
       if (!promoted) showToast("Requisition updated");
       if (onDone) onDone();
     } else {
@@ -6371,6 +6430,12 @@ function RequisitionForm({ vendors, setVendors, reqs, setReqs, expenses, setExpe
         record.paidBy = "Company";
       }
       setReqs([...reqs, record]);
+      // v6.53: a brand-new requisition entered directly as Paid (status set,
+      // date filled in) settles a matching Rent & EMI item too — same gap,
+      // same fix as the edit branch above.
+      if (record.paymentStatus === "Paid" && recurring && setRecurring) {
+        settleRecurringOnPaidNames([record.name], recurring, setRecurring);
+      }
       if (linked.size) {
         setExpenses((expenses||[]).map(e => linked.has(e.id)
           ? { ...e, claimId, claimRef: ref, settledTo: record.name || e.paidBy || "" }
@@ -6803,7 +6868,7 @@ function ExportTab({ reqs, setReqs, vendors, setVendors, lists, setLists, expens
 
   if (editingRow) {
     return <RequisitionForm vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists}
-      showToast={showToast} editItem={editingRow}
+      showToast={showToast} editItem={editingRow} recurring={recurring} setRecurring={setRecurring}
       onDone={()=>{ setEditingRow(null); }} />;
   }
 
@@ -10116,7 +10181,7 @@ function DieselLogTab({ dieselLog, setDieselLog, dieselLogPurchases, setDieselLo
             cursor: sheetSyncBusy ? "default" : "pointer" }}>
           {sheetSyncBusy ? "Syncing…" : "Sync Now"}
         </button>
-        <input ref={fileInputRef} type="file" accept=".xlsx,.xls" style={{ display:"none" }} onChange={handleImportFile} />
+        <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.xlsb" style={{ display:"none" }} onChange={handleImportFile} />
       </div>
 
       <div style={{ display:"flex", gap:8, marginBottom:16 }}>
@@ -16057,6 +16122,23 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
       next = [...next, ...added];
       setReqs(next);
 
+      // v6.53: "Import from Excel" never settled a matching Rent & EMI item
+      // for a requisition/register row — neither a brand-new row that
+      // arrives already Paid, nor an existing Pending row promoted to Paid
+      // by this import — unlike the live Google Sheets sync and every
+      // in-app "mark Paid" action. Same rule, same guard (only a genuine
+      // not-Paid-to-Paid transition counts, so re-importing an
+      // already-paid row never double-advances the schedule).
+      const paidNames = [
+        ...added.filter(d => d.paymentStatus === "Paid").map(d => d.name),
+        ...kept.toUpdate
+          .filter(u => u.data.paymentStatus === "Paid" && u.existing.paymentStatus !== "Paid")
+          .map(u => u.existing.name),
+      ];
+      if (paidNames.length && recurring && setRecurring) {
+        settleRecurringOnPaidNames(paidNames, recurring, setRecurring);
+      }
+
       // salary rows mean the party is an employee
       const touched = [...added, ...kept.toUpdate.map(u => ({ ...u.existing, ...u.data }))];
       const promoted = promoteSalaryLedgers(vendors, touched);
@@ -16471,7 +16553,7 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
             background:GRAD, color:"#fff", cursor:"pointer", boxShadow:"0 8px 20px -8px rgba(79,70,229,0.55)" }}>
             Choose your Excel file
           </span>
-          <input type="file" accept=".xlsx,.xls,.csv" style={{ display:"none" }}
+          <input type="file" accept=".xlsx,.xls,.xlsb,.csv" style={{ display:"none" }}
             onChange={(e)=>{ const f = e.target.files[0]; e.target.value=""; if (f) readFile(f, kind); }} />
         </label>
         <button onClick={()=>downloadTemplate(kind)}
@@ -17711,7 +17793,7 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
   if (editReq) {
     return <RequisitionForm vendors={vendors} setVendors={()=>{}} reqs={reqs} setReqs={setReqs}
       expenses={expenses} setExpenses={setExpenses} lists={lists} setLists={setLists}
-      showToast={showToast} editItem={editReq} onDone={()=>setEditReq(null)} />;
+      showToast={showToast} editItem={editReq} onDone={()=>setEditReq(null)} recurring={recurring} setRecurring={setRecurring} />;
   }
 
   if (openReq) {
@@ -18019,7 +18101,7 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
             background:SAND, color:INK, cursor:"pointer" }}>
             Update dates &amp; modes from a downloaded sheet accounts returned
           </span>
-          <input type="file" accept=".xlsx,.xls,.csv" onChange={handleImport} style={{ display:"none" }} />
+          <input type="file" accept=".xlsx,.xls,.xlsb,.csv" onChange={handleImport} style={{ display:"none" }} />
         </label>
         {sync && sync.driveConnected && (
           <button onClick={handleImportFromDrive} disabled={drivePicking}
@@ -18468,7 +18550,7 @@ function SpendSearchTab({ reqs, expenses, cashTxns, cards, showToast, goTo }){
 // an invalid calendar date, or paid before it was even raised) rather than
 // a real business situation. Tapping a flagged row opens it directly in
 // the normal requisition edit form so the date can be corrected on the spot.
-function DataCheckTab({ reqs, setReqs, vendors, setVendors, expenses, setExpenses, lists, setLists, goTo, openImport, showToast }){
+function DataCheckTab({ reqs, setReqs, vendors, setVendors, expenses, setExpenses, lists, setLists, goTo, openImport, showToast, recurring, setRecurring }){
   const [editingRow, setEditingRow] = useState(null);
 
   const today = todayStr();
@@ -18497,7 +18579,7 @@ function DataCheckTab({ reqs, setReqs, vendors, setVendors, expenses, setExpense
   if (editingRow) {
     return <RequisitionForm vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqs}
       expenses={expenses} setExpenses={setExpenses} lists={lists} setLists={setLists} goTo={goTo} openImport={openImport}
-      showToast={showToast} editItem={editingRow} onDone={()=>setEditingRow(null)} />;
+      showToast={showToast} editItem={editingRow} onDone={()=>setEditingRow(null)} recurring={recurring} setRecurring={setRecurring} />;
   }
 
   return (
