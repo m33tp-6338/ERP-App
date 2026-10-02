@@ -965,6 +965,35 @@ if a duplicate had already been pushed to Master, that row still needs to
 be removed from your Google Sheet by hand. The review screen tells you
 whenever that applies to what you've selected.
 
+## New in v6.52: Spend Search, and a card-funding matching fix
+
+**1. Spend Search (new screen, under Reports).** Type a material, category,
+vendor name, or description — "steel", "cement", a contractor's name — and
+see every place that money was spent on it in one place: paid Requisitions,
+Expenses, and Cash & Card spends together, instead of checking three
+screens by hand. Filter by site and by month; tap any total (by source, by
+category, or by vendor/person) to drill into the exact entries behind it;
+export the current search result to Excel.
+
+It uses the same "real money, no double count" rule already used on the
+Dashboard and Site Summary: when a Requisition is a reimbursement payment
+for an Expense you've already claimed, only the Expense is shown — with
+its real category and vendor (e.g. "Steel"), not the Requisition's own
+generic "Reimbursement" category, which a material search would never
+find. The Requisition itself is left out so the spend isn't counted twice.
+An Expense not yet reimbursed is still shown, since it's a real purchase,
+but it's clearly labelled "Pending" and kept out of the money-actually-out
+total.
+
+**2. Card-funding matching fix.** Reconciling a Cash & Card refill against
+the matching Payment Register entry (so a bank funding isn't counted as
+spend twice, in Monthly Statement and Site Summary) used to match on date
+and amount alone. With more than one site card, two unrelated fundings to
+different cards on the same date for the same round amount could wrongly
+cancel each other out. The match now also requires the site to agree when
+both sides have one on file — a blank site, from older or incomplete rows,
+still matches as before, so nothing you've already entered breaks.
+
 ## New in v6.51: search-box fix, sync tick/untick on every kind, Travel/Office from Site
 
 Three fixes, all requested together:

@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.51";
+const APP_VERSION = "6.52";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -80,6 +80,11 @@ const GOOGLE_DRIVE_APP_ID = "60621934527";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.52", date:"2026-09-28", title:"New: Spend Search — search steel, cement or any material/vendor across Requisitions, Expenses and Cash & Card at once, plus a card-funding matching fix", items:[
+    "New \"Spend Search\" screen (under Reports): type a material, category, vendor name or description — e.g. \"steel\", \"cement\", a contractor's name — and see every place that money was spent on it in one place: paid Requisitions, Expenses, and Cash & Card spends together, instead of checking three separate screens by hand. Filter by site and by month, tap any total (by source, by category, or by vendor/person) to drill into the exact entries behind it, and export the current search result to Excel.",
+    "Uses the same \"real money, no double count\" rule already used on the Dashboard and Site Summary: when a Requisition is a reimbursement payment for an Expense you've already claimed, only the Expense is shown (with its real category and vendor, e.g. \"Steel\") — the Requisition itself is left out, since counting both would double the spend and a reimbursement's own category is usually just \"Reimbursement\", which a material search would never find anyway. An Expense not yet reimbursed is still shown (it's a real purchase) but clearly labelled \"Pending\" and kept out of the money-actually-out total, so the numbers you see always mean what they say.",
+    "Fixed: reconciling a Cash & Card refill (money loaded onto a card) against the matching Payment Register entry — so it isn't counted as spend twice, in Monthly Statement and Site Summary — used to match on date and amount alone. With more than one site card, two unrelated fundings to different cards on the same date for the same round amount could wrongly cancel each other out. The match now also requires the site to agree when both sides have one on file (a blank site, from older or incomplete rows, still matches as before — nothing you've already entered breaks).",
+  ]},
   { v:"6.51", date:"2026-09-28", title:"Search boxes fixed on 4 screens, tick/untick now works on every sync kind, and Travel/Office expenses get their type from Site", items:[
     "Fixed: the search box on Rent & EMI, Utilities, Cash & Card, and Expenses did nothing when you typed into it — each screen's list was memoized without watching the search text, so the filtered list never recalculated as you typed and kept showing the unfiltered (or stale) result. Every other search box in the app (Ledgers, Vendor Ledger, the requisition/attach pickers, Export, Employee Master, Payment Register) was already working correctly and is unaffected.",
     "Fixed: the \"Sync from Google Sheets\" review screen only ever showed tick/untick checkboxes for Requisitions — every other kind (Expenses, Cash & Card, Diesel, Diesel Log entries/purchases/machines, Ledgers, Rent & EMI) showed a plain list with no way to leave a row out. Worse, even the checkbox UI that did exist would have had no effect for those kinds — the actual import step only ever respected what was ticked for Requisitions, so unticking a row anywhere else was purely cosmetic. Both are fixed: every kind now shows real tick/untick checkboxes, and unticking a row now genuinely leaves it out, exactly like it already does in \"Import from Excel.\"",
@@ -2412,6 +2417,7 @@ const MENU_SECTIONS = [
   ]},
   { group:"Reports", items:[
     { id:"categorybreakdown", label:"Category Breakdown", desc:"Payment Register, paid, all-time by category" },
+    { id:"spendsearch", label:"Spend Search", desc:"Search steel, cement, any material or vendor across Requisitions, Expenses and Cash & Card" },
     { id:"fixedcost",   label:"Fixed Cost Summary",  desc:"Rent, instalments and salaries per month" },
     { id:"statement",   label:"Monthly Statement",   desc:"One month: raised, paid, outstanding" },
     { id:"sitesummary", label:"Site Summary",        desc:"Spend and balances site by site" },
@@ -4925,7 +4931,7 @@ function ERPApp(){
       }} />;
   }
 
-  const TAB_TITLES = { dashboard:"Overview", vendors:"Ledgers", requisition:"New Payment Requisition", export:"Requisitions & Export", settings:"Settings", recurring:"Rent & EMI", company:"Company Details", payments:"Payment Register", import:"Import from Excel", receivables:"Receivables", expenses:"Expenses", sheets:"Sync from Google Sheets", statement:"Monthly Statement", sitesummary:"Site Summary", employees:"Employee Master", cash:"Cash & Card", diesel:"Diesel & Machinery", diesellog:"Diesel Log", utilities:"Utilities", changelog:"What is New", fixedcost:"Fixed Cost Summary", payroll:"Payroll", categorybreakdown:"Category Breakdown", datacheck:"Data Check" };
+  const TAB_TITLES = { dashboard:"Overview", vendors:"Ledgers", requisition:"New Payment Requisition", export:"Requisitions & Export", settings:"Settings", recurring:"Rent & EMI", company:"Company Details", payments:"Payment Register", import:"Import from Excel", receivables:"Receivables", expenses:"Expenses", sheets:"Sync from Google Sheets", statement:"Monthly Statement", sitesummary:"Site Summary", employees:"Employee Master", cash:"Cash & Card", diesel:"Diesel & Machinery", diesellog:"Diesel Log", utilities:"Utilities", changelog:"What is New", fixedcost:"Fixed Cost Summary", payroll:"Payroll", categorybreakdown:"Category Breakdown", datacheck:"Data Check", spendsearch:"Spend Search" };
 
   const openImport = (kind, cardId) => { setImportFocus(kind || ""); setImportCardHint(cardId || ""); setTab("import"); };
   const toPayCount = reqs.filter(r => r.paymentStatus !== "Paid" || !r.paymentDate).length;
@@ -4977,6 +4983,7 @@ function ERPApp(){
         {tab==="fixedcost" && <FixedCostTab recurring={recurring} setRecurring={setRecurring} vendors={vendors} machines={machines} reqs={reqs} setReqs={setReqs} showToast={showToast} goTo={navigate}
           sheets={sheets} syncSheets={syncSheets} sheetSyncBusy={sheetSyncBusy} />}
         {tab==="categorybreakdown" && <CategoryBreakdownTab reqs={reqs} goTo={navigate} />}
+        {tab==="spendsearch" && <SpendSearchTab reqs={reqs} expenses={expenses} cashTxns={cashTxns} cards={cards} showToast={showToast} goTo={navigate} />}
         {tab==="datacheck" && <DataCheckTab reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} expenses={expenses} setExpenses={setExpenses} lists={lists} setLists={setLists} goTo={navigate} openImport={openImport} showToast={showToast} />}
         {tab==="changelog" && <ChangelogTab settings={settings} setSettings={setSettings} goTo={navigate} />}
         {tab==="utilities" && <UtilitiesTab utilities={utilities} setUtilities={setUtilities} cards={cards}
@@ -7944,8 +7951,11 @@ function checkReqDateIssues(r, todayISO){
 // Money out comes from two places: the bank, and cash held at site.
 // A card refill is the bank funding the cash, so if that refill is also sitting
 // in the register as a payment, it is the same money twice. Refills that match a
-// register payment on date and amount are counted once, and the rest are shown
-// separately so a missing bank statement is obvious rather than silently wrong.
+// register payment on date, amount, AND site (v6.52 — with more than one
+// card/site, two unrelated fundings can otherwise land on the same date for
+// the same round amount and wrongly cancel each other out) are counted once,
+// and the rest are shown separately so a missing bank statement is obvious
+// rather than silently wrong.
 function combinedSpending(reqs, cashTxns, monthFilter, siteFilter, cards){
   const inMonth = (d) => monthFilter === "all" || String(d||"").slice(0,7) === monthFilter;
   const cardSiteOf = (t) => t.site || ((cards||[]).find(c => c.id === t.cardId)||{}).site || "";
@@ -7963,13 +7973,17 @@ function combinedSpending(reqs, cashTxns, monthFilter, siteFilter, cards){
   const refillRows = (cashTxns||[]).filter(t =>
     t.type === "Refill" && inMonth(t.date) && onSite(cardSiteOf(t)));
 
-  // a refill is already in the bank column if a register payment shares its date and amount
+  // a refill is already in the bank column if a register payment shares its date
+  // and amount, on the same site — unless either side's site is blank (missing
+  // data, not evidence of a different site), in which case site is not checked.
   const used = new Set();
   let matched = 0, matchedCount = 0;
   refillRows.forEach(t => {
+    const tSite = cardSiteOf(t);
     const hit = bankRows.find(r => !used.has(r.id) &&
       Number(r.amount||0) === Number(t.amount||0) &&
-      String(r.paymentDate || r.date || "") === String(t.date || ""));
+      String(r.paymentDate || r.date || "") === String(t.date || "") &&
+      (!tSite || !r.site || tSite === r.site));
     if (hit) { used.add(hit.id); matched += Number(t.amount||0); matchedCount++; }
   });
   const refills = refillRows.reduce((a,t)=>a+Number(t.amount||0), 0);
@@ -18210,6 +18224,238 @@ function CategoryBreakdownTab({ reqs, goTo }){
                 </button>
               );
             })}
+          </div>
+        </React.Fragment>
+      )}
+    </div>
+  );
+}
+
+// v6.52: Spend Search — search by material/category (e.g. "steel", "cement")
+// across every module that spends money: paid Requisitions, Expenses, and
+// Cash & Card, all at once, instead of checking each screen separately.
+//
+// Double-count rule, same money-out logic already used elsewhere (Dashboard's
+// "true cost" view, Site Summary's per-site sourcesFor): a reimbursement
+// requisition is never counted alongside the expense it reimburses — the
+// expense carries the real category/site (a reimbursement payment's own
+// category is often just "Reimbursement", which would make it invisible to
+// a material search anyway), so the requisition is dropped in that case and
+// the expense stands in for it. An expense not yet reimbursed still
+// represents a real purchase, so it's kept and clearly labeled as pending —
+// distinct from money that has actually left the company's bank.
+function SpendSearchTab({ reqs, expenses, cashTxns, cards, showToast, goTo }){
+  const cashSite = (t) => t.site || ((cards||[]).find(c => c.id === t.cardId)||{}).site || "";
+  const [query, setQuery] = useState("");
+  const [siteFilter, setSiteFilter] = useState("All");
+  const [monthFilter, setMonthFilter] = useState("all");
+  const [openGroup, setOpenGroup] = useState(null); // { kind:"source"|"category"|"who", value }
+
+  const claimedIds = useMemo(
+    () => new Set((expenses||[]).filter(e=>e.claimId).map(e=>e.claimId)), [expenses]);
+
+  const allRows = useMemo(() => {
+    const out = [];
+    (reqs||[]).forEach(r => {
+      if (!isInRegister(r) || isRolledUp(r)) return;
+      if (r.isReimbursement && claimedIds.has(r.claimId)) return; // stands in below, via its expense lines
+      out.push({ id:"r_"+r.id, source:"Bank Payment", sourceKey:"bank",
+        date: r.paymentDate || r.date, site: r.site || "Unspecified",
+        category: r.category || "", subCategory: r.subCategory || "",
+        who: r.name || "", description: r.description || "",
+        amount: Number(r.amount||0), ref: r.refNo || "" });
+    });
+    (expenses||[]).forEach(e => {
+      const reimbursed = !!e.claimId;
+      out.push({ id:"e_"+e.id, source: reimbursed ? "Reimbursed Expense" : "Pending Expense (not yet reimbursed)",
+        sourceKey: reimbursed ? "reimbursed" : "pending",
+        date: e.date || e.periodText, site: e.site || "Unspecified",
+        category: e.category || e.expenseType || "", subCategory: e.subCategory || "",
+        who: e.vendorName || e.paidBy || "", description: e.description || "",
+        amount: Number(e.amount||0), ref: e.claimRef || "" });
+    });
+    (cashTxns||[]).forEach(t => {
+      if (t.type !== "Spend") return;
+      out.push({ id:"c_"+t.id, source:"Cash & Card", sourceKey:"cash",
+        date: t.date, site: cashSite(t) || "Unspecified",
+        category: t.category || "", subCategory: t.subCategory || "",
+        who: t.vendorName || "", description: t.description || "",
+        amount: Number(t.amount||0), ref: t.ref || "" });
+    });
+    return out;
+  }, [reqs, expenses, cashTxns, cards, claimedIds]);
+
+  const sites = useMemo(() => [...new Set(allRows.map(r=>r.site))].sort(), [allRows]);
+  const months = useMemo(
+    () => [...new Set(allRows.map(r=>(r.date||"").slice(0,7)).filter(Boolean))].sort().reverse(), [allRows]);
+
+  const filtered = useMemo(() => allRows
+    .filter(r => siteFilter === "All" || r.site === siteFilter)
+    .filter(r => monthFilter === "all" || (r.date||"").slice(0,7) === monthFilter)
+    .filter(r => matches(query, r.category, r.subCategory, r.description, r.who, r.site))
+    .sort((a,b) => String(b.date||"").localeCompare(String(a.date||""))),
+    [allRows, siteFilter, monthFilter, query]);
+
+  const total = filtered.reduce((s,r)=>s+r.amount, 0);
+  const pendingTotal = filtered.filter(r=>r.sourceKey==="pending").reduce((s,r)=>s+r.amount, 0);
+
+  function groupBy(pick, label){
+    const map = new Map();
+    filtered.forEach(r => {
+      const k = pick(r) || label;
+      const cur = map.get(k) || { key:k, total:0, count:0 };
+      cur.total += r.amount; cur.count += 1;
+      map.set(k, cur);
+    });
+    return [...map.values()].sort((a,b)=>b.total-a.total);
+  }
+  const bySource = useMemo(() => groupBy(r=>r.source, "—"), [filtered]);
+  const byCategory = useMemo(() => groupBy(r=>r.category, "Uncategorised"), [filtered]);
+  const byWho = useMemo(() => groupBy(r=>r.who, "Unnamed"), [filtered]);
+  const byMonth = useMemo(() => {
+    const map = new Map();
+    filtered.forEach(r => {
+      const k = (r.date||"").slice(0,7) || "No date";
+      const cur = map.get(k) || { key:k, total:0 };
+      cur.total += r.amount;
+      map.set(k, cur);
+    });
+    return [...map.values()].sort((a,b)=>a.key.localeCompare(b.key));
+  }, [filtered]);
+
+  function exportResults(){
+    if (!filtered.length) { showToast("Nothing to export for this search", "error"); return; }
+    const data = filtered.map(r => ({
+      Date: fmtDate(r.date), Source:r.source, Site:r.site, Category:r.category, "Sub-Category":r.subCategory,
+      "Paid To / By":r.who, Description:r.description, Amount:r.amount, Ref:r.ref,
+    }));
+    const ws = XLSX.utils.json_to_sheet(data);
+    ws["!cols"] = [{wch:12},{wch:28},{wch:14},{wch:16},{wch:16},{wch:20},{wch:28},{wch:12},{wch:14}];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Spend Search");
+    XLSX.writeFile(wb, `Spend_Search_${(query||"all").replace(/[^a-z0-9]+/gi,"_")}_${todayStr()}.xlsx`);
+  }
+
+  if (openGroup) {
+    const rows = filtered.filter(r =>
+      openGroup.kind === "source" ? r.source === openGroup.value
+      : openGroup.kind === "category" ? (r.category || "Uncategorised") === openGroup.value
+      : (r.who || "Unnamed") === openGroup.value);
+    const grpTotal = rows.reduce((s,r)=>s+r.amount, 0);
+    return (
+      <div>
+        <button onClick={()=>setOpenGroup(null)}
+          style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
+          <Icon name="back" size={16} /> Back to Spend Search
+        </button>
+        <div style={{ background:SURFACE, borderRadius:16, padding:20, marginBottom:14, border:`1.5px solid ${SAND}` }}>
+          <div style={{ fontSize:12, fontWeight:600, color:MUTED }}>{openGroup.value}</div>
+          <div style={{ fontSize:26, fontWeight:700, color:INK }}>₹{fmtINR(grpTotal)}</div>
+          <div style={{ fontSize:12, color:MUTED, marginTop:2 }}>{rows.length} entr{rows.length===1?"y":"ies"}</div>
+        </div>
+        <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+          {rows.map(r => (
+            <div key={r.id} style={{ background:SURFACE, borderRadius:14, padding:14, border:`1px solid ${SAND}`, boxShadow:SHADOW }}>
+              <div style={{ display:"flex", justifyContent:"space-between", gap:8 }}>
+                <div style={{ fontWeight:700, color:INK, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                  {r.description || r.category || r.source}
+                </div>
+                <div style={{ fontWeight:700, color:INK, flexShrink:0 }}>₹{fmtINR(r.amount)}</div>
+              </div>
+              <div style={{ fontSize:12, color:MUTED, marginTop:3 }}>
+                {fmtDate(r.date)} · {r.site} · {r.source}{r.who ? ` · ${r.who}` : ""}{r.subCategory ? ` · ${r.subCategory}` : ""}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <button onClick={()=>goTo("dashboard")}
+        style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
+        <Icon name="back" size={16} /> Back to dashboard
+      </button>
+
+      <SearchBox value={query} onChange={setQuery}
+        placeholder="Search material, category, description or person (e.g. steel, cement)" />
+
+      <div style={{ display:"flex", gap:8, marginBottom:14 }}>
+        <select style={{ ...inputStyle, flex:1 }} value={siteFilter} onChange={e=>setSiteFilter(e.target.value)}>
+          <option value="All">All sites</option>
+          {sites.map(s => <option key={s} value={s}>{s}</option>)}
+        </select>
+        <select style={{ ...inputStyle, flex:1 }} value={monthFilter} onChange={e=>setMonthFilter(e.target.value)}>
+          <option value="all">All months</option>
+          {months.map(m => <option key={m} value={m}>{monthLabel(m)}</option>)}
+        </select>
+      </div>
+
+      <div style={{ background:GRAD_INK, borderRadius:22, padding:20, marginBottom:14, boxShadow:SHADOW_LG }}>
+        <div style={{ fontSize:11.5, fontWeight:600, color:"#8FA0BC", textTransform:"uppercase", letterSpacing:"0.08em" }}>
+          {query ? `Matching "${query}"` : "All spend"}
+          {siteFilter !== "All" ? ` · ${siteFilter}` : ""}{monthFilter !== "all" ? ` · ${monthLabel(monthFilter)}` : ""}
+        </div>
+        <div className="num" style={{ fontSize:30, fontWeight:800, color:"#fff", marginTop:6 }}>₹{fmtINR(total)}</div>
+        <div style={{ fontSize:12, color:"#8FA0BC", marginTop:4 }}>{filtered.length} entr{filtered.length===1?"y":"ies"}</div>
+        {pendingTotal > 0 && (
+          <div style={{ marginTop:12, paddingTop:12, borderTop:"1px solid rgba(255,255,255,0.14)", fontSize:12, color:"#8FA0BC" }}>
+            Of which ₹{fmtINR(pendingTotal)} is still pending reimbursement — a real purchase, but not yet money out of the company's bank.
+          </div>
+        )}
+      </div>
+
+      {filtered.length === 0 ? (
+        <EmptyState text={query ? `Nothing matches "${query}" for this filter.` : "No spend recorded for this filter yet."} />
+      ) : (
+        <React.Fragment>
+          <BigButton icon="sheet" label="Export These Results to Excel" onClick={exportResults} tone="green" full />
+
+          <div style={{ background:SURFACE, borderRadius:20, padding:18, marginTop:14, marginBottom:12, border:`1px solid ${SAND}`, boxShadow:SHADOW }}>
+            <div style={{ fontWeight:700, marginBottom:12, color:INK }}>By source</div>
+            {bySource.map(g => (
+              <button key={g.key} onClick={()=>setOpenGroup({ kind:"source", value:g.key })}
+                style={{ display:"block", width:"100%", textAlign:"left", background:"none", border:"none", cursor:"pointer", padding:0, marginBottom:10 }}>
+                <TotalRow label={`${g.key} (${g.count})`} value={g.total} />
+              </button>
+            ))}
+          </div>
+
+          <div style={{ background:SURFACE, borderRadius:20, padding:18, marginBottom:12, border:`1px solid ${SAND}`, boxShadow:SHADOW }}>
+            <div style={{ fontWeight:700, marginBottom:12, color:INK }}>By category{siteFilter !== "All" ? ` — ${siteFilter}` : ""}</div>
+            <BarList data={byCategory.map(g=>[g.key, g.total])} color={AMBER}
+              empty="Nothing to break down for this filter." />
+            {byCategory.length > 0 && (
+              <div style={{ display:"flex", flexWrap:"wrap", gap:8, marginTop:8 }}>
+                {byCategory.map(g => (
+                  <button key={g.key} onClick={()=>setOpenGroup({ kind:"category", value:g.key })}
+                    style={{ fontSize:11.5, fontWeight:600, padding:"6px 12px", borderRadius:999, background:CREAM, border:`1px solid ${SAND}`, cursor:"pointer", color:INK }}>
+                    {g.key} →
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div style={{ background:SURFACE, borderRadius:20, padding:18, marginBottom:12, border:`1px solid ${SAND}`, boxShadow:SHADOW }}>
+            <div style={{ fontWeight:700, marginBottom:12, color:INK }}>By vendor / person — tap for their full history</div>
+            {byWho.slice(0, 12).map(g => (
+              <button key={g.key} onClick={()=>setOpenGroup({ kind:"who", value:g.key })}
+                style={{ display:"block", width:"100%", textAlign:"left", background:"none", border:"none", cursor:"pointer", padding:0, marginBottom:10 }}>
+                <TotalRow label={`${g.key} (${g.count})`} value={g.total} />
+              </button>
+            ))}
+            {byWho.length > 12 && (
+              <div style={{ fontSize:12, color:MUTED, marginTop:4 }}>+{byWho.length - 12} more — narrow the search to see them.</div>
+            )}
+          </div>
+
+          <div style={{ background:SURFACE, borderRadius:20, padding:18, marginBottom:24, border:`1px solid ${SAND}`, boxShadow:SHADOW }}>
+            <div style={{ fontWeight:700, marginBottom:12, color:INK }}>By month</div>
+            <BarList data={byMonth.map(g=>[monthLabel(g.key), g.total])} color={GREEN}
+              empty="Nothing to show month by month for this filter." />
           </div>
         </React.Fragment>
       )}
