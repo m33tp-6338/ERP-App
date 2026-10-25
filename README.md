@@ -965,6 +965,34 @@ if a duplicate had already been pushed to Master, that row still needs to
 be removed from your Google Sheet by hand. The review screen tells you
 whenever that applies to what you've selected.
 
+## New in v6.55: Amount After TDS, and three "Total Paid" figures fixed to match
+
+If your Payment Requisitions or Payment Register sheet now carries an
+**Amount After TDS** column (because tax is being withheld at source — say,
+salaries above about ₹1,20,000, or services/rentals above ₹30,000), the app
+recognizes it on both Import from Excel and Sync from Google Sheets. It
+never calculates the TDS itself — it only ever uses the exact figure you've
+entered in that column — and that figure becomes the amount actually paid,
+so it flows into every "money actually paid" total already in the app:
+Dashboard's Paid to date, Payment Register, Monthly Statement, Site
+Summary, and the vendor ledger.
+
+While wiring this in, three existing totals were found to be quietly
+summing the full billed amount instead of what was actually paid — harmless
+until now, since few payments ever had a different "amount actually paid"
+on them, but they would have overstated by the TDS withheld on every
+payment going forward: **Dashboard's "Paid to date" card, Category
+Breakdown's totals, and Spend Search's Bank Payment total.** All three are
+now fixed to match.
+
+Recording a payment directly in the app for less than the billed amount
+(Record Payment) used to warn "still unpaid" for any shortfall at all —
+even a deliberate TDS deduction. Record Payment now has an optional **TDS
+Deducted** field for exactly this case, so that warning is reserved for a
+genuine, unexplained shortfall. Requisition Detail now shows "TDS
+deducted" next to "Amount paid" whenever it's set, and the main exports
+gained matching "Amount After TDS"/"TDS Deducted" columns.
+
 ## New in v6.54: Every import now accepts .xlsb files too
 
 All three Excel file pickers — Import from Excel (every kind: Ledgers,
