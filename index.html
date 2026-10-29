@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.56";
+const APP_VERSION = "6.58";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -80,6 +80,16 @@ const GOOGLE_DRIVE_APP_ID = "60621934527";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.58", date:"2026-10-29", title:"The back button/gesture now moves between the app's own screens instead of exiting the app", items:[
+    "Fixed: switching screens (the bottom navigation, the menu, the Company/Settings buttons, or any \"see more\" link inside a screen) only ever changed what was on screen — the phone's own back button/gesture never knew the app had navigated anywhere, so the very first back press had nowhere else in the app to go and closed it outright. Every screen switch now also tells the browser it happened, so pressing back moves to whatever screen was open just before, the same way back behaves in any other app — all the way back to the first screen the app was opened on, where back goes on to close the app as it normally would (there being nothing further back within the app to return to).",
+    "This only changes what the back button/gesture does between screens — nothing about what each screen shows, or any of the app's data, was touched.",
+  ]},
+  { v:"6.57", date:"2026-10-29", title:"Category Breakdown can now be narrowed to a Sub-Category (e.g. Rent → Machinery) and broken down by site, exportable", items:[
+    "New: opening a category on Category Breakdown now shows a Sub-Category filter when that category has more than one (e.g. Category \"Rent\" split into \"Machinery\" and \"Land/House\") — tap one to narrow to just that slice, such as how much has been spent on rented machinery specifically.",
+    "New: a \"By site\" breakdown shows the total and payment count for every site within whatever's currently selected (a whole category, or narrowed to one sub-category), with the figure's share of the total. Tap a site to narrow the list to just that site; tap it again (or \"Show all sites\") to go back to seeing every site.",
+    "New: \"Export This to Excel\" now exports whatever is currently selected — the whole category, or narrowed down to a sub-category and/or a single site — as three sheets: a short Summary (what was selected and the total), a By Site breakdown, and the individual payment rows.",
+    "Fixed, found while building this: the total shown when a category is opened was still summing the full billed Amount instead of the amount actually paid, missed when every other \"Total Paid\" figure in the app was corrected for Amount After TDS back in v6.55. It now matches the top-level Category Breakdown total, which was already correct.",
+  ]},
   { v:"6.56", date:"2026-10-25", title:"Fixed the app hanging/lagging on Cash & Card, Payment Register and Site Summary — the same cause already fixed on Ledgers and Diesel & Machinery in v6.49, found in three more places", items:[
     "Fixed: Cash & Card's main card list, its \"running balance dips below zero\" warning, the cash-count screen, and a card's own detail page were each re-scanning the ENTIRE cash transaction history — for every card, not just the one being shown — on every single render, including every keystroke in a filter or search box. The exact same slowdown already found and fixed on the Ledgers screen and the Diesel & Machinery screen back in v6.49 (\"this is very likely what hangs on every screen actually was\") was still present here, unfixed, and with cash entries piling up daily across every site's card this was very likely the biggest single cause of the app feeling slow or stuck, however it was described.",
     "Fixed the same way, two more places: Payment Register's duplicate-payment warning banner was re-scanning every requisition on every render instead of only when requisitions actually change, and Site Summary's single-site detail view was re-scanning every requisition, expense, cash entry, diesel entry and utility bill in the whole app every time a category was expanded or collapsed, instead of only that one site's figures.",
@@ -2826,15 +2836,54 @@ function ERPApp(){
   const [menuOpen, setMenuOpen] = useState(false);
   const [importFocus, setImportFocus] = useState("");
   const [importCardHint, setImportCardHint] = useState("");
+  // v6.58: previously, switching tabs only ever changed React state (`tab`)
+  // - the browser's own history was never told anything happened. On
+  // Android (and in a browser tab), the back gesture/button walks the
+  // BROWSER's history, not this app's internal state; with nothing pushed
+  // there, the very first back press had nowhere else in this app to go,
+  // so it exited the app outright (and, since this app keeps all its
+  // navigation state in memory, reopening it looked like everything had
+  // "reset" back to Dashboard). goToTab() is now the one place every tab
+  // switch in the app goes through (navigate/goTo, the bottom nav, the
+  // Company/Settings header buttons, and openImport below all call it) -
+  // it pushes a tagged history entry whenever the tab actually changes, so
+  // a later back press is caught by the popstate listener just below and
+  // moves back within the app's own tabs instead of leaving it. Back only
+  // ever exits the app once it reaches the very first tab the app opened
+  // on (there is nothing further back WITHIN the app to return to at that
+  // point) - this matches how every native app's back button behaves.
+  const tabRef = React.useRef(tab);
+  useEffect(() => { tabRef.current = tab; }, [tab]);
+
+  const goToTab = useCallback((nextTab) => {
+    if (nextTab !== tabRef.current) {
+      try { history.pushState({ erpTab: nextTab }, "", location.href); } catch (e) {}
+    }
+    setTab(nextTab);
+  }, []);
+
+  useEffect(() => {
+    try {
+      const cur = history.state;
+      if (!cur || !cur.erpTab) history.replaceState({ erpTab: tabRef.current }, "", location.href);
+    } catch (e) {}
+    const onPopState = (e) => {
+      const t = e.state && e.state.erpTab;
+      if (t) setTab(t);
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
   const navigate = useCallback((t) => {
     if (typeof t === "string" && t.indexOf("import:") === 0) {
       setImportFocus(t.slice(7));
-      setTab("import");
+      goToTab("import");
       return;
     }
     if (t === "import") setImportFocus("");
-    setTab(t);
-  }, []);
+    goToTab(t);
+  }, [goToTab]);
   const [locked, setLocked] = useState(() => {
     try {
       const raw = localStorage.getItem("erp:settings");
@@ -4999,8 +5048,8 @@ function ERPApp(){
   // setImportCardHint/setTab are plain useState setters, stable by React's
   // own guarantee, so this never goes stale.
   const openImport = useCallback((kind, cardId) => {
-    setImportFocus(kind || ""); setImportCardHint(cardId || ""); setTab("import");
-  }, []);
+    setImportFocus(kind || ""); setImportCardHint(cardId || ""); goToTab("import");
+  }, [goToTab]);
   // toPayCount used to be recomputed (a full scan of reqs) on every single
   // render of the whole app, however unrelated - memoized so it only
   // recomputes when reqs actually changes.
@@ -5032,14 +5081,14 @@ function ERPApp(){
             <div style={{ color:"#fff", fontWeight:700, fontSize:18, lineHeight:1.2 }}>{TAB_TITLES[tab]}</div>
             <div style={{ fontSize:12, color:"#8FA0BC" }}>Your Business Ledger</div>
           </div>
-          <button onClick={()=>setTab("company")}
+          <button onClick={()=>navigate("company")}
             title="Company details"
             style={{ flexShrink:0, width:34, height:34, borderRadius:"50%", border:`1.5px solid ${tab==="company"?AMBER:"#2A3A5C"}`,
               background: tab==="company"?AMBER:"transparent", color:"#fff", fontSize:15, cursor:"pointer",
               display:"flex", alignItems:"center", justifyContent:"center" }}>
             <Icon name="account" size={17} color="#fff" />
           </button>
-          <SaveChip {...syncProps} onTap={()=>setTab("settings")} />
+          <SaveChip {...syncProps} onTap={()=>navigate("settings")} />
         </div>
       </div>
 
@@ -5096,7 +5145,7 @@ function ERPApp(){
             {id:"__more",icon:"settings",label:"More"},
           ].map(it => {
             const active = it.id === "__more" ? menuOpen : tab===it.id;
-            const onTap = () => it.id === "__more" ? setMenuOpen(true) : setTab(it.id);
+            const onTap = () => it.id === "__more" ? setMenuOpen(true) : navigate(it.id);
             if (it.big) {
               return (
                 <button key={it.id} onClick={onTap}
@@ -18331,6 +18380,14 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
 // Excel.
 function CategoryBreakdownTab({ reqs, goTo }){
   const [openCat, setOpenCat] = useState(null);
+  // v6.57: lets a category be narrowed to one Sub-Category (e.g. Category
+  // "Rent" -> Sub-Category "Machinery") and broken down by site, or
+  // narrowed to one site too - both reset to "All" whenever a different
+  // category is opened, via backToCats() below.
+  const [subCatFilter, setSubCatFilter] = useState("All");
+  const [siteFilter, setSiteFilter] = useState("All");
+  function openCategory(cat){ setOpenCat(cat); setSubCatFilter("All"); setSiteFilter("All"); }
+  function backToCats(){ setOpenCat(null); setSubCatFilter("All"); setSiteFilter("All"); }
 
   const paid = useMemo(() => reqs.filter(r => isInRegister(r) && !isRolledUp(r)), [reqs]);
   // v6.55: net of TDS when that applies — this is explicitly a "Total Paid"
@@ -18363,7 +18420,32 @@ function CategoryBreakdownTab({ reqs, goTo }){
     XLSX.writeFile(wb, `Category_Breakdown_AllTime_${todayStr()}.xlsx`);
   }
 
-  function exportCategory(cat, rows){
+  // v6.57: exports whatever is currently narrowed down to - Category alone,
+  // Category + Sub-Category (e.g. Rent + Machinery), or that plus one Site -
+  // as a "Rows" sheet (same columns as before) plus a "By Site" sheet so the
+  // site-wise split doesn't have to be worked out by hand after exporting.
+  function exportCategory(cat, subCat, site, rows, siteBreakdown){
+    const wb = XLSX.utils.book_new();
+    const total = rows.reduce((s,r)=>s+Number(r.paidAmount || r.amount || 0), 0);
+    const sum = [
+      { Item:"Category", Value:cat },
+      { Item:"Sub-Category", Value: subCat === "All" ? "(all)" : subCat },
+      { Item:"Site", Value: site === "All" ? "(all sites)" : site },
+      { Item:"Payments", Value: rows.length },
+      { Item:"Total Paid", Value: total },
+    ];
+    const sws = XLSX.utils.json_to_sheet(sum);
+    sws["!cols"] = [{wch:16},{wch:24}];
+    XLSX.utils.book_append_sheet(wb, sws, "Summary");
+
+    const siteRows = siteBreakdown.map(s => ({
+      Site:s.site, Payments:s.count, "Total Paid":s.total,
+      "Share %": total ? +((s.total/total)*100).toFixed(1) : 0,
+    }));
+    const bws = XLSX.utils.json_to_sheet(siteRows);
+    bws["!cols"] = [{wch:20},{wch:12},{wch:16},{wch:12}];
+    XLSX.utils.book_append_sheet(wb, bws, "By Site");
+
     const data = rows.map(r => ({
       "Ref No.":r.refNo||"", Date:fmtDate(r.date), Site:r.site||"", Name:r.name||"",
       "Sub Category":r.subCategory||"", Amount:Number(r.amount)||0,
@@ -18372,37 +18454,106 @@ function CategoryBreakdownTab({ reqs, goTo }){
     }));
     const ws = XLSX.utils.json_to_sheet(data);
     ws["!cols"] = [{wch:16},{wch:12},{wch:16},{wch:22},{wch:14},{wch:12},{wch:14},{wch:28},{wch:14},{wch:14}];
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, cat.slice(0,28) || "Category");
-    XLSX.writeFile(wb, `Category_${cat.replace(/[^a-z0-9]+/gi,"_")}_${todayStr()}.xlsx`);
+    XLSX.utils.book_append_sheet(wb, ws, "Rows");
+
+    const nameBits = [cat, subCat !== "All" ? subCat : "", site !== "All" ? site : "AllSites"].filter(Boolean);
+    XLSX.writeFile(wb, `Category_${nameBits.join("_").replace(/[^a-z0-9]+/gi,"_")}_${todayStr()}.xlsx`);
   }
 
   if (openCat) {
-    const rows = paid
-      .filter(r => (String(r.category||"").trim() || "Uncategorised") === openCat)
+    const allRowsForCat = paid.filter(r => (String(r.category||"").trim() || "Uncategorised") === openCat);
+    const subCatOptions = [...new Set(allRowsForCat.map(r => String(r.subCategory||"").trim()).filter(Boolean))].sort();
+    const bySubCat = subCatFilter === "All" ? allRowsForCat
+      : allRowsForCat.filter(r => String(r.subCategory||"").trim() === subCatFilter);
+
+    // By-site breakdown always reflects the Sub-Category filter (if any) but
+    // never the Site filter itself - so switching sites doesn't hide the
+    // other sites you'd want to compare against.
+    const siteMap = new Map();
+    bySubCat.forEach(r => {
+      const s = r.site || "Unspecified";
+      const cur = siteMap.get(s) || { site:s, total:0, count:0 };
+      cur.total += Number(r.paidAmount || r.amount || 0);
+      cur.count += 1;
+      siteMap.set(s, cur);
+    });
+    const siteBreakdown = [...siteMap.values()].sort((a,b)=>b.total-a.total);
+
+    const rows = (siteFilter === "All" ? bySubCat : bySubCat.filter(r => (r.site || "Unspecified") === siteFilter))
       .sort((a,b) => String(b.paymentDate||"").localeCompare(String(a.paymentDate||"")));
-    const catTotal = rows.reduce((s,r)=>s+Number(r.amount||0), 0);
+    // v6.57: now nets out TDS the same way the top-level total/byCategory
+    // already did since v6.55 - this per-category total had been missed.
+    const catTotal = rows.reduce((s,r)=>s+Number(r.paidAmount || r.amount || 0), 0);
+
+    const chip = (active, onClick, label) => (
+      <button key={label} onClick={onClick}
+        style={{ padding:"6px 12px", borderRadius:99, fontSize:12.5, fontWeight:600, cursor:"pointer",
+          background: active?INK:"#fff", color: active?"#fff":INK, border:`1px solid ${active?INK:SAND}` }}>
+        {label}
+      </button>
+    );
+
     return (
       <div>
-        <button onClick={()=>setOpenCat(null)}
+        <button onClick={backToCats}
           style={{ display:"flex", alignItems:"center", gap:6, marginBottom:16, fontSize:14, fontWeight:600, color:INK, background:"none", border:"none", cursor:"pointer" }}>
           <Icon name="back" size={16} /> Back to Category Breakdown
         </button>
 
         <div style={{ background:SURFACE, borderRadius:16, padding:20, marginBottom:14, border:`1.5px solid ${SAND}` }}>
-          <div style={{ fontSize:12, fontWeight:600, color:MUTED }}>{openCat}</div>
+          <div style={{ fontSize:12, fontWeight:600, color:MUTED }}>
+            {openCat}{subCatFilter!=="All" ? ` · ${subCatFilter}` : ""}{siteFilter!=="All" ? ` · ${siteFilter}` : ""}
+          </div>
           <div style={{ fontSize:26, fontWeight:700, color:INK }}>₹{fmtINR(catTotal)}</div>
           <div style={{ fontSize:12, color:MUTED, marginTop:2 }}>{rows.length} payment(s), all-time</div>
         </div>
 
-        <BigButton icon="sheet" label="Export This Category to Excel" onClick={()=>exportCategory(openCat, rows)} tone="green" full />
+        {subCatOptions.length > 0 && (
+          <div style={{ marginBottom:14 }}>
+            <SectionLabel>Sub-Category</SectionLabel>
+            <div style={{ display:"flex", gap:7, flexWrap:"wrap" }}>
+              {chip(subCatFilter==="All", ()=>{ setSubCatFilter("All"); setSiteFilter("All"); }, "All")}
+              {subCatOptions.map(sc => chip(subCatFilter===sc, ()=>{ setSubCatFilter(sc); setSiteFilter("All"); }, sc))}
+            </div>
+          </div>
+        )}
+
+        {siteBreakdown.length > 0 && (
+          <div style={{ background:SURFACE, borderRadius:20, padding:18, marginBottom:14, border:`1px solid ${SAND}`, boxShadow:SHADOW }}>
+            <SectionLabel>By site</SectionLabel>
+            <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+              {siteBreakdown.map(s => {
+                const active = siteFilter === s.site;
+                const siteGrandTotal = siteBreakdown.reduce((a,x)=>a+x.total,0);
+                const pct = siteGrandTotal ? (s.total/siteGrandTotal)*100 : 0;
+                return (
+                  <button key={s.site} onClick={()=>setSiteFilter(active ? "All" : s.site)}
+                    style={{ textAlign:"left", display:"flex", justifyContent:"space-between", alignItems:"center", gap:10,
+                      padding:"8px 10px", borderRadius:12, cursor:"pointer",
+                      background: active ? "#F1F4F9" : "transparent", border:`1px solid ${active?INK:"transparent"}` }}>
+                    <span style={{ fontSize:13.5, color:INK, fontWeight: active?700:500 }}>{s.site}</span>
+                    <span style={{ fontSize:13.5, color:INK, fontWeight:700, flexShrink:0 }}>
+                      ₹{fmtINR(s.total)} <span style={{ color:MUTED, fontWeight:500 }}>· {s.count} · {pct.toFixed(1)}%</span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            {siteFilter!=="All" && (
+              <div style={{ marginTop:8 }}>{chip(false, ()=>setSiteFilter("All"), "Show all sites")}</div>
+            )}
+          </div>
+        )}
+
+        <BigButton icon="sheet" label="Export This to Excel"
+          onClick={()=>exportCategory(openCat, subCatFilter, siteFilter, rows, siteBreakdown)} tone="green" full />
 
         <div style={{ display:"flex", flexDirection:"column", gap:8, marginTop:14 }}>
           {rows.map(r => (
             <div key={r.id} style={{ background:SURFACE, borderRadius:16, padding:14, border:`1px solid ${SAND}`, boxShadow:SHADOW }}>
               <div style={{ display:"flex", justifyContent:"space-between", gap:8 }}>
                 <div style={{ fontWeight:700, color:INK, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{r.name}</div>
-                <div style={{ fontWeight:700, color:INK, flexShrink:0 }}>₹{fmtINR(r.amount)}</div>
+                <div style={{ fontWeight:700, color:INK, flexShrink:0 }}>₹{fmtINR(r.paidAmount || r.amount)}</div>
               </div>
               <div style={{ fontSize:12, color:MUTED, marginTop:3 }}>
                 {fmtDate(r.paymentDate)} · {r.site} · {r.refNo || "no ref"}{r.subCategory ? ` · ${r.subCategory}` : ""}
@@ -18436,7 +18587,7 @@ function CategoryBreakdownTab({ reqs, goTo }){
             {byCategory.map(c => {
               const pct = total ? (c.total/total)*100 : 0;
               return (
-                <button key={c.category} onClick={()=>setOpenCat(c.category)}
+                <button key={c.category} onClick={()=>openCategory(c.category)}
                   style={{ textAlign:"left", background:SURFACE, borderRadius:16, padding:14, border:`1px solid ${SAND}`,
                     boxShadow:SHADOW, cursor:"pointer" }}>
                   <div style={{ display:"flex", justifyContent:"space-between", gap:10, marginBottom:6 }}>

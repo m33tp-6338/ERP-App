@@ -965,6 +965,43 @@ if a duplicate had already been pushed to Master, that row still needs to
 be removed from your Google Sheet by hand. The review screen tells you
 whenever that applies to what you've selected.
 
+## New in v6.58: the back button/gesture now stays inside the app
+
+Pressing back (the phone's back gesture, or a browser's back button) used
+to exit the app outright the moment you'd switched screens at all — since
+the app never told the phone's back history that you'd navigated anywhere.
+Now every screen switch — the bottom bar, the menu, the Company/Settings
+buttons, any "see more" link inside a screen — is remembered, so back
+takes you to whatever screen you were on just before, the same way back
+works in any other app. Back still closes the app once you reach the very
+first screen you opened it on — there's nothing further back within the
+app to return to at that point.
+
+Nothing about what any screen shows, or your data, changed — this only
+fixes what the back button/gesture does between screens.
+
+## New in v6.57: Category Breakdown now splits by Sub-Category and by site, exportable
+
+Open any category on Category Breakdown and, if it has more than one
+Sub-Category, you'll now see a filter chip for each — tap one to narrow to
+just that slice. The example this was built for: Category "Rent" split
+into "Machinery" and "Land/House," so you can isolate exactly how much has
+been spent on rented machinery.
+
+Below that, a **By site** breakdown shows the total and payment count for
+every site within whatever's currently selected, with each site's share
+of the total. Tap a site to narrow the list to just that one; tap it again
+(or "Show all sites") to go back.
+
+**Export This to Excel** now exports whatever's currently selected — the
+whole category, or narrowed to a sub-category and/or one site — as three
+sheets: a short summary, the by-site breakdown, and the individual rows.
+
+Also fixed: the total shown when a category is opened now correctly nets
+out any TDS withheld, matching the figure on the Category Breakdown list
+itself (which was already correct since v6.55) — it had been missed when
+that fix went in.
+
 ## New in v6.56: fixed the app hanging/lagging on Cash & Card, Payment Register and Site Summary
 
 If the app has felt slow or stuck lately — especially on Cash & Card, but
