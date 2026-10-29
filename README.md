@@ -965,6 +965,28 @@ if a duplicate had already been pushed to Master, that row still needs to
 be removed from your Google Sheet by hand. The review screen tells you
 whenever that applies to what you've selected.
 
+## New in v6.56: fixed the app hanging/lagging on Cash & Card, Payment Register and Site Summary
+
+If the app has felt slow or stuck lately — especially on Cash & Card, but
+hard to pin to any one screen — this release fixes the cause on three
+screens that had it. It's the same bug already fixed once before, on the
+Ledgers and Diesel & Machinery screens (v6.49): a calculation that should
+only need to be redone when your data actually changes was instead being
+redone from scratch on every single thing you did on screen — typing in a
+search box, opening a card, expanding a category. With months of daily
+cash entries, that adds up to a real, repeated slowdown every time.
+
+Cash & Card's main card list, the "running balance dips below zero"
+warning, the cash-count screen and a card's own detail page are now fixed.
+So is Payment Register's duplicate-payment warning banner, and Site
+Summary's single-site detail view. None of the actual figures change —
+balances, totals and warnings all come out exactly the same as before —
+this release only changes how often they get recalculated.
+
+If the app still feels slow anywhere after updating, that's useful to
+know — it would point to a different screen having the same underlying
+issue, not yet found.
+
 ## New in v6.55: Amount After TDS, and three "Total Paid" figures fixed to match
 
 If your Payment Requisitions or Payment Register sheet now carries an

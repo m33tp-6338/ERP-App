@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.55";
+const APP_VERSION = "6.56";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -80,6 +80,12 @@ const GOOGLE_DRIVE_APP_ID = "60621934527";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.56", date:"2026-10-25", title:"Fixed the app hanging/lagging on Cash & Card, Payment Register and Site Summary — the same cause already fixed on Ledgers and Diesel & Machinery in v6.49, found in three more places", items:[
+    "Fixed: Cash & Card's main card list, its \"running balance dips below zero\" warning, the cash-count screen, and a card's own detail page were each re-scanning the ENTIRE cash transaction history — for every card, not just the one being shown — on every single render, including every keystroke in a filter or search box. The exact same slowdown already found and fixed on the Ledgers screen and the Diesel & Machinery screen back in v6.49 (\"this is very likely what hangs on every screen actually was\") was still present here, unfixed, and with cash entries piling up daily across every site's card this was very likely the biggest single cause of the app feeling slow or stuck, however it was described.",
+    "Fixed the same way, two more places: Payment Register's duplicate-payment warning banner was re-scanning every requisition on every render instead of only when requisitions actually change, and Site Summary's single-site detail view was re-scanning every requisition, expense, cash entry, diesel entry and utility bill in the whole app every time a category was expanded or collapsed, instead of only that one site's figures.",
+    "Each fix works the same way as the original v6.49 fix: the expensive scan now runs once per render and is cached, instead of being redone from scratch every time something on screen changes. The underlying figures are completely unchanged — this only changes how often they get recalculated, not what they come out to.",
+    "Two smaller findings along the way, fixed as part of the same sweep: a function passed down to most of the app's screens (used by the \"Import from Excel\" shortcut button) was being recreated fresh on every render, which on its own can quietly defeat this kind of fix even after it's applied; and the Requisitions \"needs attention\" count on the main navigation was being recalculated on every render of the entire app, however unrelated, instead of only when requisitions change.",
+  ]},
   { v:"6.55", date:"2026-10-13", title:"Payment Requisitions/Register now recognize an Amount After TDS column — and three pre-existing \"Total Paid\" figures that were silently ignoring it (card charges aside) are now TDS-aware too", items:[
     "New: a \"payment to be done\" sheet (Requisitions or Payment Register, via Import from Excel or Sync from Google Sheets) can now carry an Amount After TDS column — the net amount actually transferred once tax is withheld at source (e.g. salaries above ~₹1,20,000, or services/rentals above ₹30,000, matched to the user's own thresholds). The app never calculates TDS itself — only the figure actually entered in that column is ever used — and it becomes the requisition's existing \"amount actually paid\" field, exactly as a manually recorded part-payment already works, so it's picked up everywhere that figure already is: Dashboard's Paid to date, Payment Register, Monthly Statement, Site Summary, the vendor ledger.",
     "Fixed, found while wiring this in: Dashboard's \"Paid to date\" card, Category Breakdown's totals, and Spend Search's Bank Payment total were all summing the full billed Amount instead of the amount actually paid — unnoticed until now because paidAmount was rarely set, but would have overstated every one of these by the TDS withheld on each payment, once TDS entries started coming in. All three now use the same \"actual paid\" figure the rest of the app already relies on.",
@@ -4984,8 +4990,23 @@ function ERPApp(){
 
   const TAB_TITLES = { dashboard:"Overview", vendors:"Ledgers", requisition:"New Payment Requisition", export:"Requisitions & Export", settings:"Settings", recurring:"Rent & EMI", company:"Company Details", payments:"Payment Register", import:"Import from Excel", receivables:"Receivables", expenses:"Expenses", sheets:"Sync from Google Sheets", statement:"Monthly Statement", sitesummary:"Site Summary", employees:"Employee Master", cash:"Cash & Card", diesel:"Diesel & Machinery", diesellog:"Diesel Log", utilities:"Utilities", changelog:"What is New", fixedcost:"Fixed Cost Summary", payroll:"Payroll", categorybreakdown:"Category Breakdown", datacheck:"Data Check", spendsearch:"Spend Search" };
 
-  const openImport = (kind, cardId) => { setImportFocus(kind || ""); setImportCardHint(cardId || ""); setTab("import"); };
-  const toPayCount = reqs.filter(r => r.paymentStatus !== "Paid" || !r.paymentDate).length;
+  // v6.56: openImport was a plain function, recreated on every single
+  // ERPApp render with a new identity each time - passed down to most tabs
+  // as a prop, that alone would break React.memo on any of them (a new
+  // function reference looks like a changed prop even when nothing the
+  // user did actually changed). Wrapped in useCallback so tabs that don't
+  // otherwise need to re-render can actually skip it. setImportFocus/
+  // setImportCardHint/setTab are plain useState setters, stable by React's
+  // own guarantee, so this never goes stale.
+  const openImport = useCallback((kind, cardId) => {
+    setImportFocus(kind || ""); setImportCardHint(cardId || ""); setTab("import");
+  }, []);
+  // toPayCount used to be recomputed (a full scan of reqs) on every single
+  // render of the whole app, however unrelated - memoized so it only
+  // recomputes when reqs actually changes.
+  const toPayCount = useMemo(
+    () => reqs.filter(r => r.paymentStatus !== "Paid" || !r.paymentDate).length,
+    [reqs]);
 
   const syncProps = {
     fsSupported: FS_SUPPORTED, fileHandle, fileName, needsReconnect, dirty, lastSaved, saving,
@@ -10444,6 +10465,42 @@ function CashTab({ cards, setCards, cashTxns, setCashTxns, cashCounts, setCashCo
     return out;
   }, [cashTxns, cards, balOrder]);
 
+  // v6.56: cardBalance()/lowestBalance() each re-scan the WHOLE cashTxns
+  // array for a single card. This screen's main card list, its "running
+  // balance dips below zero" check, the counting view, and the per-card
+  // detail view each called one or both of them directly in the render body
+  // - never cached - so every card was re-scanning the entire transaction
+  // history of EVERY OTHER card too, redone from scratch on every render
+  // (any filter/search keystroke, opening a card, closing a modal). With
+  // cashTxns piling up daily across every site's card over months, this is
+  // the same "hangs on every screen" pattern already found and fixed on the
+  // Ledgers screen (v6.49, see posByVendor above) and the Diesel &
+  // Machinery screen (v6.49, see machineStatsById) - just never swept here.
+  // One pass per card, computed once per render and reused everywhere below
+  // instead of ever calling cardBalance()/lowestBalance() a second time for
+  // the same card. The underlying functions are reused unchanged so the
+  // figures are identical to before - only when they get recomputed changes.
+  const cardStatsById = useMemo(() => {
+    const m = new Map();
+    (cards||[]).forEach(c => {
+      m.set(c.id, {
+        balance: cardBalance(c, cashTxns),
+        missingBill: cashTxns.filter(t => t.cardId===c.id && t.type==="Spend" && !t.hasBill).length,
+        low: lowestBalance(c, cashTxns, balOrder),
+        lastCount: (cashCounts||[]).filter(x=>x.cardId===c.id)
+          .sort((a,b)=>String(b.date||"").localeCompare(String(a.date||"")))[0],
+      });
+    });
+    return m;
+  }, [cards, cashTxns, cashCounts, balOrder]);
+  const statsOf = (c) => cardStatsById.get(c.id) || {
+    balance: cardBalance(c, cashTxns),
+    missingBill: cashTxns.filter(t => t.cardId===c.id && t.type==="Spend" && !t.hasBill).length,
+    low: lowestBalance(c, cashTxns, balOrder),
+    lastCount: (cashCounts||[]).filter(x=>x.cardId===c.id)
+      .sort((a,b)=>String(b.date||"").localeCompare(String(a.date||"")))[0],
+  };
+
   const CASH_SORTS = [
     { k:"entry",  label:"As entered", get:t=>Number(t.seq||0) || Number(t.createdAt||0) },
     { k:"date",   label:"Date",     get:t=>t.date||"" },
@@ -10706,7 +10763,7 @@ function CashTab({ cards, setCards, cashTxns, setCashTxns, cashCounts, setCashCo
 
   if (counting) {
     const card = cards.find(c => c.id === counting.cardId);
-    const book = card ? cardBalance(card, cashTxns) : 0;
+    const book = card ? statsOf(card).balance : 0;
     const diff = Number(counting.counted || 0) - book;
     return (
       <div>
@@ -11037,10 +11094,7 @@ function CashTab({ cards, setCards, cashTxns, setCashTxns, cashCounts, setCashCo
         </div>
       );
     }
-    const bal = cardBalance(card, cashTxns);
-    const miss = cashTxns.filter(t => t.cardId===card.id && t.type==="Spend" && !t.hasBill).length;
-    const lastCount = (cashCounts||[]).filter(x=>x.cardId===card.id)
-      .sort((a,b)=>String(b.date||"").localeCompare(String(a.date||"")))[0];
+    const { balance: bal, missingBill: miss, lastCount } = statsOf(card);
     return (
       <div>
         <button onClick={()=>{ setOpenCardId(null); setCardFilter("All"); setSelected(new Set()); }}
@@ -11124,10 +11178,7 @@ function CashTab({ cards, setCards, cashTxns, setCashTxns, cashCounts, setCashCo
       ) : (
         <div style={{ display:"flex", flexDirection:"column", gap:10, marginBottom:14 }}>
           {cards.map(c => {
-            const bal = cardBalance(c, cashTxns);
-            const miss = cashTxns.filter(t => t.cardId===c.id && t.type==="Spend" && !t.hasBill).length;
-            const lastCount = (cashCounts||[]).filter(x=>x.cardId===c.id)
-              .sort((a,b)=>String(b.date||"").localeCompare(String(a.date||"")))[0];
+            const { balance: bal, missingBill: miss, lastCount } = statsOf(c);
             return (
               <div key={c.id} onClick={()=>{ setCardFilter(c.id); setSelected(new Set()); setOpenCardId(c.id); }}
                 style={{ background:GRAD_INK, borderRadius:20, padding:18, boxShadow:SHADOW_LG, cursor:"pointer",
@@ -11179,7 +11230,7 @@ function CashTab({ cards, setCards, cashTxns, setCashTxns, cashCounts, setCashCo
       )}
 
       {(() => {
-        const bad = cards.map(c => ({ card:c, low: lowestBalance(c, cashTxns, balOrder) }))
+        const bad = cards.map(c => ({ card:c, low: statsOf(c).low }))
                          .filter(x => x.low < -0.5);
         if (!bad.length) return null;
         return (
@@ -12218,9 +12269,20 @@ function SiteSummaryTab({ reqs, expenses, cashTxns, cards, diesel, utilities, ma
 
   const grand = sites.reduce((s,x)=>s+x.total, 0);
 
+  // v6.56: sourcesFor() scans the WHOLE reqs/expenses/cashTxns/diesel/
+  // utilities arrays (filtering each down to one site) - the all-sites view
+  // above already caches this per site inside the `sites` useMemo, but
+  // opening a single site called it again directly in the render body,
+  // unmemoized, re-scanning every one of those global arrays again on every
+  // render of the site-detail view (e.g. just expanding/collapsing a "Where
+  // it went" head). Same "hangs on every screen" pattern as elsewhere in
+  // this release; cached the same way, once per render instead of every one.
+  const openSiteParts = useMemo(() => openSite ? sourcesFor(openSite) : null,
+    [openSite, reqs, expenses, cashTxns, cards, diesel, utilities]);
+
   /* ---------- one site ---------- */
   if (openSite) {
-    const parts = sourcesFor(openSite);
+    const parts = openSiteParts;
     const total = parts.reduce((a,p)=>a+p.total, 0);
 
     // what each head is made of, whichever part of the app it came from
@@ -17361,6 +17423,14 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
     .sort((a,b) => String(a.date||"").localeCompare(String(b.date||""))), [reqs]);
   const toPayTotal = toPay.reduce((s,r)=>s+Number(r.amount||0), 0);
 
+  // v6.56: findDuplicateReqs() was called directly in the render body, below
+  // - unmemoized, it re-scanned the whole reqs array from scratch on every
+  // render of the register screen, including every search/filter keystroke.
+  // Same "hangs on every screen" pattern as cardStatsById/posByVendor; fixed
+  // the same way, once per render instead of every one.
+  const dupes = useMemo(() => findDuplicateReqs(reqs), [reqs]);
+  const noRef = useMemo(() => reqs.filter(r => !String(r.refNo||"").trim()), [reqs]);
+
   // A payment made straight from the bank, never raised as a requisition.
   // It is stored as a requisition already marked Paid, so it behaves like any other.
   function saveDirectPayment(f){
@@ -17897,8 +17967,6 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
       </div>
 
       {(() => {
-        const dupes = findDuplicateReqs(reqs);
-        const noRef = reqs.filter(r => !String(r.refNo||"").trim());
         if (!dupes.length && !noRef.length) return null;
         return (
           <div style={{ background:"#EEF0FE", border:`1.5px solid ${AMBER}`, borderRadius:18, padding:16, marginBottom:14 }}>
