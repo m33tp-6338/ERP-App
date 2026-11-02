@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.58";
+const APP_VERSION = "6.59";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -80,6 +80,12 @@ const GOOGLE_DRIVE_APP_ID = "60621934527";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.59", date:"2026-10-31", title:"Amounts shown on a paid transaction now reflect TDS everywhere, not just on two small lines on its detail screen", items:[
+    "The main Requisitions & Export list, a vendor's Transaction History, Payment Register's own Paid list, the Monthly Statement's \"Raised this month\" list, and the Data Check screen were all still showing the gross billed amount for a Paid requisition instead of what was actually paid after TDS.",
+    "Payment Register's \"Total paid\" headline and its by-site breakdown were adding up gross billed amounts too, so they overstated money actually paid out whenever any payment had TDS withheld — this also means the duplicate-payment warning's \"may be inflated by this much\" figure now agrees with the corrected Total paid.",
+    "Biggest fix: opening a paid transaction now shows the net amount actually paid as the large headline number, with \"Billed ₹X · TDS ₹Y deducted\" directly underneath when TDS applies — instead of the gross amount up top and the TDS figure buried as a small secondary line with no visible effect.",
+    "A requisition still awaiting payment is unaffected — it has no paid amount yet, so it keeps showing its billed amount exactly as before. Excel exports, delete-confirmation dialogs, and the duplicate-detection matching logic were deliberately left showing/using the billed amount, since those are either raw-data exports (which already have a separate TDS column) or identification text, not totals.",
+  ]},
   { v:"6.58", date:"2026-10-29", title:"The back button/gesture now moves between the app's own screens instead of exiting the app", items:[
     "Fixed: switching screens (the bottom navigation, the menu, the Company/Settings buttons, or any \"see more\" link inside a screen) only ever changed what was on screen — the phone's own back button/gesture never knew the app had navigated anywhere, so the very first back press had nowhere else in the app to go and closed it outright. Every screen switch now also tells the browser it happened, so pressing back moves to whatever screen was open just before, the same way back behaves in any other app — all the way back to the first screen the app was opened on, where back goes on to close the app as it normally would (there being nothing further back within the app to return to).",
     "This only changes what the back button/gesture does between screens — nothing about what each screen shows, or any of the app's data, was touched.",
@@ -6348,7 +6354,7 @@ function VendorLedger({ vendor, reqs, setReqs, vendors, setVendors, showToast, o
                 <div style={{ flex:1, minWidth:0 }}>
                   <div style={{ display:"flex", justifyContent:"space-between" }}>
                     <div style={{ fontSize:12, color:MUTED }}>{fmtDate(r.date)} · {r.site}</div>
-                    <div style={{ fontWeight:700, color:INK }}>₹{fmtINR(r.amount)}</div>
+                    <div style={{ fontWeight:700, color:INK }}>₹{fmtINR(r.paidAmount || r.amount)}</div>
                   </div>
                   <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginTop:6 }}>
                     <span style={{ fontSize:12, color:MUTED }}>{r.category}{r.subCategory?" / "+r.subCategory:""}</span>
@@ -7033,7 +7039,7 @@ function ExportTab({ reqs, setReqs, vendors, setVendors, lists, setLists, expens
                 <div style={{ flex:1, minWidth:0 }}>
                   <div style={{ display:"flex", justifyContent:"space-between", gap:8 }}>
                     <div style={{ fontWeight:700, color:INK, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{r.name||"Unnamed"}</div>
-                    <div style={{ fontWeight:700, color:INK, flexShrink:0 }}>₹{fmtINR(r.amount)}</div>
+                    <div style={{ fontWeight:700, color:INK, flexShrink:0 }}>₹{fmtINR(r.paidAmount || r.amount)}</div>
                   </div>
                   <div style={{ fontSize:12, color:MUTED, marginTop:2 }}>{fmtDate(r.date)} · {r.site} · {r.category}</div>
                   <div style={{ display:"flex", alignItems:"center", gap:8, marginTop:8 }}>
@@ -12231,7 +12237,7 @@ function MonthlyStatementTab({ reqs, expenses, cashTxns, cards, recurring, showT
                     {dateFlagged && <span title="Suspect date — see Data Check in Settings" style={{ color:AMBER, marginRight:4 }}>⚠</span>}
                     {r.name}
                   </span>
-                  <span style={{ fontWeight:700, fontSize:14, color:INK, flexShrink:0 }}>₹{fmtINR(r.amount)}</span>
+                  <span style={{ fontWeight:700, fontSize:14, color:INK, flexShrink:0 }}>₹{fmtINR(r.paidAmount || r.amount)}</span>
                 </div>
                 <div style={{ fontSize:12, color:MUTED, marginTop:2 }}>
                   {fmtDate(r.date)} · {r.site} · {isInRegister(r) ? "Paid" : (r.paymentStatus || "Pending")}
@@ -14401,7 +14407,12 @@ function RequisitionDetail({ req, vendors, reqs, setReqs, expenses, setExpenses,
       <div style={{ background:SURFACE, borderRadius:16, padding:20, marginBottom:14, border:`1px solid ${SAND}` }}>
         <div style={{ fontSize:13, color:MUTED, marginBottom:4 }}>{req.refNo || "No reference"}</div>
         <div style={{ fontSize:19, fontWeight:700, color:INK, lineHeight:1.25 }}>{req.name || "Unnamed"}</div>
-        <div style={{ fontSize:30, fontWeight:700, color:INK, marginTop:8 }}>₹{fmtINR(req.amount)}</div>
+        <div style={{ fontSize:30, fontWeight:700, color:INK, marginTop:8 }}>₹{fmtINR(req.paidAmount || req.amount)}</div>
+        {req.paymentStatus === "Paid" && Number(req.tdsAmount||0) > 0 && (
+          <div style={{ fontSize:12.5, color:MUTED, marginTop:2 }}>
+            Billed ₹{fmtINR(req.amount)} · TDS ₹{fmtINR(req.tdsAmount)} deducted
+          </div>
+        )}
         <div style={{ marginTop:12, display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
           <span style={{ fontSize:12, fontWeight:700, padding:"5px 12px", borderRadius:999, color:"#fff", background:STATUS_COLOR[req.paymentStatus] }}>
             {req.paymentStatus}
@@ -17436,7 +17447,7 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
   }, [paid]);
   const duplicateExtraCount = paidDuplicateGroups.reduce((s,g) => s + g.length - 1, 0);
   const duplicateExtraAmount = paidDuplicateGroups.reduce((s,g) =>
-    s + g.slice(1).reduce((s2,r) => s2 + Number(r.amount||0), 0), 0);
+    s + g.slice(1).reduce((s2,r) => s2 + Number(r.paidAmount || r.amount || 0), 0), 0);
 
   function openDupReview(){
     const toCheck = new Set();
@@ -17608,11 +17619,11 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
     }).sort((a,b) => (b.paymentDate||b.date||"").localeCompare(a.paymentDate||a.date||""));
   }, [paid, month, site, query]);
 
-  const total = filtered.reduce((s,r)=>s+Number(r.amount||0), 0);
+  const total = filtered.reduce((s,r)=>s+Number(r.paidAmount || r.amount || 0), 0);
 
   const bySite = useMemo(() => {
     const map = {};
-    filtered.forEach(r => { const k = r.site||"Unspecified"; map[k]=(map[k]||0)+Number(r.amount||0); });
+    filtered.forEach(r => { const k = r.site||"Unspecified"; map[k]=(map[k]||0)+Number(r.paidAmount || r.amount || 0); });
     return Object.entries(map).sort((a,b)=>b[1]-a[1]);
   }, [filtered]);
 
@@ -18094,7 +18105,7 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
                         {r.refNo || "no ref"} · {fmtDate(r.paymentDate || r.date)}
                       </div>
                     </div>
-                    <span className="num" style={{ fontWeight:700, color:INK, flexShrink:0 }}>₹{fmtINR(r.amount)}</span>
+                    <span className="num" style={{ fontWeight:700, color:INK, flexShrink:0 }}>₹{fmtINR(r.paidAmount || r.amount)}</span>
                     {ri > 0 ? (
                       <button onClick={()=>{
                           if (!confirm(`Delete this copy?\n\n${r.name} · ₹${fmtINR(r.amount)} · ${r.refNo||"no ref"}\n\nThe first one stays.`)) return;
@@ -18227,7 +18238,7 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
               {paidDuplicateGroups.map((group, gi) => (
                 <div key={gi} style={{ background:SURFACE, borderRadius:12, padding:12, marginBottom:10, border:`1px solid ${SAND}` }}>
                   <div style={{ fontSize:12.5, fontWeight:700, color:INK, marginBottom:8 }}>
-                    {group[0].name} · ₹{fmtINR(group[0].amount)} · {group[0].site}
+                    {group[0].name} · ₹{fmtINR(group[0].paidAmount || group[0].amount)} · {group[0].site}
                   </div>
                   {group.map((r, ri) => {
                     const checked = dupDeleteChecked.has(r.id);
@@ -18320,7 +18331,7 @@ function PaymentRegisterTab({ reqs, setReqs, vendors, expenses, setExpenses, cas
                   const n = new Set(prev); n.has(r.id) ? n.delete(r.id) : n.add(r.id); return n;
                 })} />
                 <div style={{ flex:1, minWidth:0, fontWeight:700, color:INK, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{r.name}</div>
-                <div style={{ fontWeight:700, color:INK, flexShrink:0 }}>₹{fmtINR(r.amount)}</div>
+                <div style={{ fontWeight:700, color:INK, flexShrink:0 }}>₹{fmtINR(r.paidAmount || r.amount)}</div>
               </div>
               <div style={{ fontSize:12, color:MUTED, marginTop:3 }}>
                 {fmtDate(r.paymentDate || r.date)} · {r.site} · {r.refNo || "no ref"}
@@ -18915,7 +18926,7 @@ function DataCheckTab({ reqs, setReqs, vendors, setVendors, expenses, setExpense
                   boxShadow:SHADOW, cursor:"pointer" }}>
                 <div style={{ display:"flex", justifyContent:"space-between", gap:8 }}>
                   <span style={{ fontWeight:700, color:INK, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{r.name || "(no name)"}</span>
-                  <span style={{ fontWeight:700, color:INK, flexShrink:0 }}>₹{fmtINR(r.amount)}</span>
+                  <span style={{ fontWeight:700, color:INK, flexShrink:0 }}>₹{fmtINR(r.paidAmount || r.amount)}</span>
                 </div>
                 <div style={{ fontSize:12, color:MUTED, marginTop:2 }}>
                   {r.date || "no date"}{r.paymentDate ? ` · paid ${r.paymentDate}` : ""} · {r.site || "no site"} · {r.refNo || "no ref"}

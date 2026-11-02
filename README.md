@@ -965,6 +965,35 @@ if a duplicate had already been pushed to Master, that row still needs to
 be removed from your Google Sheet by hand. The review screen tells you
 whenever that applies to what you've selected.
 
+## Fixed in v6.59: amounts shown on a paid transaction now reflect TDS everywhere
+
+v6.55 and v6.57 made a handful of totals TDS-aware (Dashboard's "Paid to
+date", Category Breakdown's totals, Spend Search's bank total) — but every
+per-row "Amount" shown in a list, and Payment Register's own "Total paid"
+and by-site breakdown, were still quietly adding up the gross billed amount
+instead of what was actually paid after TDS. The worst of it: opening a
+paid transaction showed the gross amount as the big headline number, with
+the TDS figure buried as a small secondary line below that had no visible
+effect — exactly the "it is shown but it is useless" complaint.
+
+Fixed everywhere a Paid requisition's amount is displayed:
+- The main Requisitions & Export list, a vendor's Transaction History, Payment
+  Register's own Paid list, Monthly Statement's "Raised this month" list, and
+  the Data Check screen now show the net paid amount, not the gross bill.
+- Payment Register's "Total paid" card and its by-site breakdown now net out
+  TDS — and the duplicate-payment warning's "may be inflated by this much"
+  figure was corrected to match, since it annotates that same total.
+- Opening a paid transaction now shows the **net amount actually paid** as
+  the large headline number, with "Billed ₹X · TDS ₹Y deducted" directly
+  underneath whenever TDS applies — instead of the gross amount up top and
+  the TDS figure stuck below with no weight to it.
+
+A requisition still awaiting payment is untouched — it has no paid amount
+yet, so it keeps showing its billed amount exactly as before. Excel exports
+(which already carry a separate "Amount After TDS" column), delete
+confirmation dialogs, and the duplicate-detection matching logic were left
+alone on purpose — those identify or export a record, they don't total one.
+
 ## New in v6.58: the back button/gesture now stays inside the app
 
 Pressing back (the phone's back gesture, or a browser's back button) used
