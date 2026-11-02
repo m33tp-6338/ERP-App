@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.59";
+const APP_VERSION = "6.60";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -80,6 +80,11 @@ const GOOGLE_DRIVE_APP_ID = "60621934527";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.60", date:"2026-11-02", title:"Critical fix: the app was crashing to a completely blank screen on every normal open", items:[
+    "Root cause: two small pieces of app-navigation logic (added in v6.56 to stop the app recomputing them on every screen) were declared just below the app's own \"still loading\"/\"locked\" screens instead of above them. React requires that kind of logic to run in the exact same order on every single screen draw, with no exceptions - the loading screen (the first thing you ever see) skipped over them, so the moment the app finished loading your data and tried to draw the real screen, it found logic running that hadn't run a moment ago, and simply gave up rather than risk showing the wrong thing - which showed as a blank screen with nothing on it, every time, for everyone.",
+    "Fixed by moving both pieces of logic above those two screens, so they always run in the same order no matter what's on screen - nothing about what any screen looks like, or any of your data, changed.",
+    "This was first introduced in v6.56 and has been present in every release since (v6.56 through v6.59) - if you were on any of those versions, this is why the app went blank. Confirmed fixed by actually loading this version and watching it render, not just by reading the code, since a check that only reads the code had already missed this once.",
+  ]},
   { v:"6.59", date:"2026-10-31", title:"Amounts shown on a paid transaction now reflect TDS everywhere, not just on two small lines on its detail screen", items:[
     "The main Requisitions & Export list, a vendor's Transaction History, Payment Register's own Paid list, the Monthly Statement's \"Raised this month\" list, and the Data Check screen were all still showing the gross billed amount for a Paid requisition instead of what was actually paid after TDS.",
     "Payment Register's \"Total paid\" headline and its by-site breakdown were adding up gross billed amounts too, so they overstated money actually paid out whenever any payment had TDS withheld — this also means the duplicate-payment warning's \"may be inflated by this much\" figure now agrees with the corrected Total paid.",
@@ -5021,6 +5026,36 @@ function ERPApp(){
     showToast("Data file disconnected");
   }, [showToast]);
 
+  // v6.60: openImport (useCallback, added v6.56) and toPayCount (useMemo,
+  // added v6.56) used to be declared AFTER the "if (!loaded) return ..."
+  // and "if (locked...) return ..." early-return guards below. Hooks must
+  // run unconditionally on every render - the very first render (loaded
+  // is false on mount) hit the early return before ever reaching these two,
+  // so React recorded a shorter hook list; the very next render, once data
+  // finished loading, read past that guard and called these two hooks for
+  // the first time, which is exactly "Rendered more hooks than during the
+  // previous render" (React error #310) - a hard crash with no error
+  // boundary, so the whole app went blank. Moved both above every
+  // conditional return so they execute every render, no exceptions.
+  //
+  // v6.56: openImport was a plain function, recreated on every single
+  // ERPApp render with a new identity each time - passed down to most tabs
+  // as a prop, that alone would break React.memo on any of them (a new
+  // function reference looks like a changed prop even when nothing the
+  // user did actually changed). Wrapped in useCallback so tabs that don't
+  // otherwise need to re-render can actually skip it. setImportFocus/
+  // setImportCardHint/setTab are plain useState setters, stable by React's
+  // own guarantee, so this never goes stale.
+  const openImport = useCallback((kind, cardId) => {
+    setImportFocus(kind || ""); setImportCardHint(cardId || ""); goToTab("import");
+  }, [goToTab]);
+  // toPayCount used to be recomputed (a full scan of reqs) on every single
+  // render of the whole app, however unrelated - memoized so it only
+  // recomputes when reqs actually changes.
+  const toPayCount = useMemo(
+    () => reqs.filter(r => r.paymentStatus !== "Paid" || !r.paymentDate).length,
+    [reqs]);
+
   if (!loaded) {
     return <div style={{height:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:CREAM}}>
       <Icon name="loader" size={28} color={AMBER} />
@@ -5044,24 +5079,6 @@ function ERPApp(){
   }
 
   const TAB_TITLES = { dashboard:"Overview", vendors:"Ledgers", requisition:"New Payment Requisition", export:"Requisitions & Export", settings:"Settings", recurring:"Rent & EMI", company:"Company Details", payments:"Payment Register", import:"Import from Excel", receivables:"Receivables", expenses:"Expenses", sheets:"Sync from Google Sheets", statement:"Monthly Statement", sitesummary:"Site Summary", employees:"Employee Master", cash:"Cash & Card", diesel:"Diesel & Machinery", diesellog:"Diesel Log", utilities:"Utilities", changelog:"What is New", fixedcost:"Fixed Cost Summary", payroll:"Payroll", categorybreakdown:"Category Breakdown", datacheck:"Data Check", spendsearch:"Spend Search" };
-
-  // v6.56: openImport was a plain function, recreated on every single
-  // ERPApp render with a new identity each time - passed down to most tabs
-  // as a prop, that alone would break React.memo on any of them (a new
-  // function reference looks like a changed prop even when nothing the
-  // user did actually changed). Wrapped in useCallback so tabs that don't
-  // otherwise need to re-render can actually skip it. setImportFocus/
-  // setImportCardHint/setTab are plain useState setters, stable by React's
-  // own guarantee, so this never goes stale.
-  const openImport = useCallback((kind, cardId) => {
-    setImportFocus(kind || ""); setImportCardHint(cardId || ""); goToTab("import");
-  }, [goToTab]);
-  // toPayCount used to be recomputed (a full scan of reqs) on every single
-  // render of the whole app, however unrelated - memoized so it only
-  // recomputes when reqs actually changes.
-  const toPayCount = useMemo(
-    () => reqs.filter(r => r.paymentStatus !== "Paid" || !r.paymentDate).length,
-    [reqs]);
 
   const syncProps = {
     fsSupported: FS_SUPPORTED, fileHandle, fileName, needsReconnect, dirty, lastSaved, saving,
