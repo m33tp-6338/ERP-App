@@ -52,7 +52,7 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useMemo } = React;
 
-const APP_VERSION = "6.60";
+const APP_VERSION = "6.62";
 
 /* ---------- Google Drive backup ----------
    Paste your own OAuth Client ID below (from Google Cloud Console — see README.md,
@@ -80,6 +80,17 @@ const GOOGLE_DRIVE_APP_ID = "60621934527";
 
 /* Newest first. Add a block each time something changes. */
 const CHANGELOG = [
+  { v:"6.62", date:"2026-11-17", title:"Correcting a misspelled name in your sheet no longer imports it as a second, duplicate entry", items:[
+    "Reported case: one person who is both a salaried employee and a house/land owner, whose name had been written two slightly different ways across your sheets - fixing the spelling to be consistent made the next sync try to bring it in as a brand-new entry instead of recognising it as the same person, corrected.",
+    "Root cause: every place that decides \"is this sheet row already in the app, or is it new\" used to include the Name field as part of that test, with no way around it except a Ref No. (which most of your sheets don't carry). The very first sync after a name is corrected changes that test's result, so the row stopped matching its own existing record and came in again as a second one - this was true for Payment Requisitions, Payment Register, Expenses/Office Master, Vendors, Employees, and Rent & EMI alike, both on live Google Sheets sync and on Import from Excel.",
+    "Fixed two ways, together: (1) Payment Requisitions/Register and Expenses/Office Master now also try matching on Date+Site+Amount (or Date+Amount+Description) alone, leaving Name out of it - so the very first time a name is corrected, it's still recognised as the same payment and the stored name is corrected to match, automatically. This is only trusted when exactly one existing record fits, so two different people paid the same amount on the same day at the same site are never merged by mistake - an ambiguous case is left alone and comes in as a new entry, same as before this version. (2) Vendors, Employees, Rent & EMI and both sides of the Requisitions/Expenses matching above now also recognise a name pair you've confirmed once on the Sheets tab's \"Remembered name spellings\" panel - previously that panel only ever helped push a payment date back OUT to your Master sheet; now a confirmed pair protects every sync and import in the app.",
+    "Where this still needs you: a vendor/employee/rent ledger has no date or amount to fall back on the way a payment does, so the very first time THAT kind of name gets corrected, there's nothing automatic to catch it - open the Sheets tab, use \"Remembered name spellings\" to confirm the old and new spelling are the same person once, and every sync from then on recognises them as one ledger.",
+  ]},
+  { v:"6.61", date:"2026-11-03", title:"Fixed the menu getting stuck open after a back gesture, and a Payment Register date column being silently ignored", items:[
+    "The hamburger/\"More\" menu kept its own open/closed state separately from the rest of the app's navigation - a back press/gesture correctly moved the screen behind it, but never told the menu to close, so it could stay open on top of whatever screen you landed on instead of the one you opened it from. Fixed: the menu now always closes on a back press/gesture, so you never see it floating over a screen it wasn't opened from.",
+    "Payment Register sheet sync/import only ever recognized a payment date written INTO the Payment Status column itself (the date, or the word Pending) - a separate column literally named \"Payment Date\" (the convention every other sheet in this app uses) wasn't recognized at all here, so filling it in did nothing and the row stayed Pending no matter what. Fixed: a dedicated Payment Date column now also works for Payment Register, alongside the original Payment-Status-column convention, which still works exactly as before.",
+    "Also widened: \"Paid Date\" is now recognized everywhere \"Payment Date\"/\"Date Paid\" already were (Payment Requisitions, Payment Register, Expenses/Office Master, Utilities), in case that's the wording your sheet actually uses.",
+  ]},
   { v:"6.60", date:"2026-11-02", title:"Critical fix: the app was crashing to a completely blank screen on every normal open", items:[
     "Root cause: two small pieces of app-navigation logic (added in v6.56 to stop the app recomputing them on every screen) were declared just below the app's own \"still loading\"/\"locked\" screens instead of above them. React requires that kind of logic to run in the exact same order on every single screen draw, with no exceptions - the loading screen (the first thing you ever see) skipped over them, so the moment the app finished loading your data and tried to draw the real screen, it found logic running that hadn't run a moment ago, and simply gave up rather than risk showing the wrong thing - which showed as a blank screen with nothing on it, every time, for everyone.",
     "Fixed by moving both pieces of logic above those two screens, so they always run in the same order no matter what's on screen - nothing about what any screen looks like, or any of your data, changed.",
@@ -2881,6 +2892,16 @@ function ERPApp(){
     const onPopState = (e) => {
       const t = e.state && e.state.erpTab;
       if (t) setTab(t);
+      // v6.61: a back gesture/press only ever moved the underlying tab -
+      // the hamburger/"More" navigation drawer (menuOpen) is its own
+      // independent open/closed state, anchored to ERPApp itself rather
+      // than to whichever tab is showing, and was never told to close on
+      // a back press. The tab underneath would silently change while the
+      // drawer stayed open on top of it, so back could land you on a
+      // dimmed drawer floating over a screen you never opened it from -
+      // looked broken, because it was. Force it closed on every popstate,
+      // no exceptions, so a back press always leaves a clean screen behind.
+      setMenuOpen(false);
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
@@ -4005,7 +4026,13 @@ function ERPApp(){
       // share the same person, amount, description and sub-category on two
       // different days will be seen as one being corrected rather than two —
       // only the newer date wins, and the other is not added.
-      const correctionKeyOf = (e) => [String(e.paidBy||"").trim().toLowerCase(), Number(e.amount||0),
+      // v6.62: Paid By resolved through nameAliases first (same confirmed
+      // pairs the Master write-back already trusts), so a rename confirmed
+      // once via "Remembered name spellings" is recognised here immediately.
+      // No-op when nameAliases is empty.
+      const correctionKeyOf = (e) => [
+        String((nameAliases && nameAliases.length) ? resolveAliasName(e.paidBy, nameAliases) : (e.paidBy||"")).trim().toLowerCase(),
+        Number(e.amount||0),
         String(e.description||"").trim().toLowerCase(), String(e.subCategory||"").trim().toLowerCase()].join("|");
       const byCorrectionKey = new Map((expenses||[]).map(e => [correctionKeyOf(e), e]));
       const usedExpense = new Set();
@@ -4062,6 +4089,27 @@ function ERPApp(){
         if (corrHit && !usedExpense.has(corrHit.id)) {
           usedExpense.add(corrHit.id);
           toUpdate.push({ existing:corrHit, data:out, source:c.source });
+          return;
+        }
+
+        // v6.62: ImportTab's own "Import from Excel" has always had this
+        // fallback (see its own copy of this comment) for exactly the case
+        // reported — a Paid By spelling corrected in Office Master, with
+        // nothing else about the row changed. Live Sheet Sync never had the
+        // equivalent, so that same correction always landed here as a
+        // brand-new, duplicate expense instead. Matches on Date + Amount +
+        // Description alone, leaving Paid By and Sub-Category out of the key
+        // entirely, and — same safeguard as the Requisitions soft match
+        // above — only trusted when precisely ONE not-yet-used expense
+        // shares that key.
+        const softKey = [out.date || out.periodText, Number(out.amount||0),
+                          String(out.description||"").trim().toLowerCase()].join("|");
+        const softCandidates = (expenses||[]).filter(e => !usedExpense.has(e.id) &&
+          [e.date || e.periodText || "", Number(e.amount||0),
+           String(e.description||"").trim().toLowerCase()].join("|") === softKey);
+        if (softCandidates.length === 1) {
+          usedExpense.add(softCandidates[0].id);
+          toUpdate.push({ existing:softCandidates[0], data:out, source:c.source });
           return;
         }
 
@@ -4187,9 +4235,19 @@ function ERPApp(){
           ? String(out.sitesRaw).split(/[,;|/]/).map(x=>x.trim()).filter(Boolean) : [];
         delete out.sitesRaw;
 
+        // v6.62: name compared through nameAliases (same confirmed pairs the
+        // Master write-back already trusts) so a vendor whose name was
+        // spelled two ways — one Employee/Owner role recorded under each
+        // spelling — is recognised as the same ledger once the user
+        // confirms the pair, instead of matching neither and creating a
+        // third, duplicate ledger on the next sync. sameVendorName falls
+        // back to a plain trim+lowercase compare, so this is a no-op
+        // whenever nameAliases is empty.
+        const sameVendorName = (a, b) => String(resolveAliasName(a, nameAliases)||"").trim().toLowerCase()
+          === String(resolveAliasName(b, nameAliases)||"").trim().toLowerCase();
         const existing = vendors.find(v =>
           (out.gstin && v.gstin && v.gstin.toUpperCase() === out.gstin) ||
-          String(v.name||"").trim().toLowerCase() === String(out.name||"").trim().toLowerCase());
+          sameVendorName(v.name, out.name));
         if (existing) {
           if (siteList.length) out.sites = siteList;
           if (!out.ledgerType) delete out.ledgerType;
@@ -4236,9 +4294,11 @@ function ERPApp(){
         const idHit = idKey ? vendors.find(v => v.id === idKey) : null;
         if (idHit) { toUpdate.push({ existing:idHit, data:out, source:c.source }); return; }
 
+        // v6.62: same nameAliases fallback as the Vendors branch above —
+        // see its comment for why.
         const existing = vendors.find(v =>
           (out.empCode && v.empCode && String(v.empCode).trim().toLowerCase() === String(out.empCode).trim().toLowerCase()) ||
-          String(v.name||"").trim().toLowerCase() === String(out.name||"").trim().toLowerCase());
+          String(resolveAliasName(v.name, nameAliases)||"").trim().toLowerCase() === String(resolveAliasName(out.name, nameAliases)||"").trim().toLowerCase());
         if (existing) {
           if (siteList.length) out.sites = siteList;
           out.ledgerType = "Employee";
@@ -4285,8 +4345,9 @@ function ERPApp(){
         const idHit = idKey ? recurring.find(r => r.id === idKey) : null;
         if (idHit) { toUpdate.push({ existing:idHit, data:out, source:c.source }); return; }
 
+        // v6.62: same nameAliases fallback as Vendors/Employees above.
         const existing = recurring.find(r =>
-          String(r.name||"").trim().toLowerCase() === String(out.name||"").trim().toLowerCase());
+          String(resolveAliasName(r.name, nameAliases)||"").trim().toLowerCase() === String(resolveAliasName(out.name, nameAliases)||"").trim().toLowerCase());
         if (existing) { toUpdate.push({ existing, data:out, source:c.source }); return; }
 
         toAdd.push({ data:out, source:c.source });
@@ -4333,7 +4394,17 @@ function ERPApp(){
     // the same person, same site, same day, same amount) was accepted
     // knowingly rather than left to the much more common description-drift
     // false negative.
-    const sheetDupKey = (r) => dupKey(r);
+    // v6.62: resolved through nameAliases (the same user-confirmed spelling
+    // pairs the Master write-back already trusts — see resolveAliasName)
+    // before the key is built, for both the already-recorded requisition and
+    // the incoming sheet row. Before this, confirming an alias only ever
+    // helped the write-back find the right row in the sheet — it did nothing
+    // for THIS matching, which is what decides whether a sheet row is "the
+    // same payment" or a brand-new one in the first place. A no-op whenever
+    // nameAliases is empty, so a sync with none defined behaves exactly as
+    // before.
+    const sheetDupKey = (r) => dupKey((nameAliases && nameAliases.length)
+      ? { ...r, name: resolveAliasName(r.name, nameAliases) } : r);
     const existingByKey = new Map(reqs.map(r => [sheetDupKey(r), r]));
     const seenKeys = new Set();
     const updatedIds = new Set();
@@ -4379,7 +4450,29 @@ function ERPApp(){
       const k = sheetDupKey(out);
       const refKey = out.refNo ? String(out.refNo).trim().toLowerCase() : "";
       const byRef = refKey ? existingByRefNo.get(refKey) : null;
-      const existing = (byRef && !updatedIds.has(byRef.id)) ? byRef : existingByKey.get(k);
+      let existing = (byRef && !updatedIds.has(byRef.id)) ? byRef : existingByKey.get(k);
+
+      // v6.62: the actual fix for "I corrected a misspelled name in the
+      // sheet and it came in as a second entry". Ref No. and dupKey (even
+      // alias-resolved above) both missed — try once more on Date + Site +
+      // Amount alone, leaving Name out of the key entirely. The very first
+      // time a name is corrected there is no alias on file yet for the line
+      // above to resolve through, so this is the safety net for exactly
+      // that first correction; once it succeeds, CORRECTABLE_FIELDS below
+      // (which already includes "name") brings the stored requisition's
+      // name in line with the sheet, so every later resync matches by
+      // dupKey alone with no alias needed. Only trusted when precisely ONE
+      // not-yet-matched requisition shares Date+Site+Amount — two labourers
+      // paid the identical wage on the same day at the same site is a
+      // perfectly ordinary thing to see in this data, so an ambiguous soft
+      // match is left alone and falls through to "new payment" below,
+      // exactly as it always has.
+      if (!existing) {
+        const softKey = [matchDate(out), String(out.site||"").trim().toLowerCase(), Number(out.amount||0)].join("|");
+        const softCandidates = reqs.filter(r => !updatedIds.has(r.id)
+          && [matchDate(r), String(r.site||"").trim().toLowerCase(), Number(r.amount||0)].join("|") === softKey);
+        if (softCandidates.length === 1) existing = softCandidates[0];
+      }
       if (existing) {
         const canPromoteToPaid = out.paymentStatus === "Paid"
           && existing.paymentStatus !== "Paid"
@@ -4426,7 +4519,7 @@ function ERPApp(){
     });
 
     queueResult({ kind, toAdd, toUpdate, duplicates, errors, failures, missing, map, headers, list, fileReport, skippedFiles, seenFiles, notes });
-  }, [lists, expenses, reqs, recurring, cards, cashTxns, machines, diesel, dieselLog, dieselLogPurchases, dieselLogMachines, vendors]);
+  }, [lists, expenses, reqs, recurring, cards, cashTxns, machines, diesel, dieselLog, dieselLogPurchases, dieselLogMachines, vendors, nameAliases]);
 
   const syncSheets = useCallback(async (list, opts) => {
     const silent = !!(opts && opts.silent);
@@ -5123,7 +5216,7 @@ function ERPApp(){
         {tab==="export" && <ExportTab reqs={reqs} setReqs={setReqs} vendors={vendors} setVendors={setVendors} lists={lists} setLists={setLists} expenses={expenses} setExpenses={setExpenses} goTo={navigate} openImport={openImport} showToast={showToast} sheets={sheets} syncSheets={syncSheets} sheetSyncBusy={sheetSyncBusy} recurring={recurring} setRecurring={setRecurring} />}
         {tab==="recurring" && <RecurringTab vendors={vendors} setVendors={setVendors} recurring={recurring} setRecurring={setRecurring} reqs={reqs} setReqs={setReqs} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} openImport={openImport}
           sheets={sheets} syncSheets={syncSheets} sheetSyncBusy={sheetSyncBusy} />}
-        {tab==="import" && <ImportTab focusKind={importFocus} clearFocus={()=>setImportFocus("")} presetCardId={importCardHint} vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqsFromImport} recurring={recurring} setRecurring={setRecurring} expenses={expenses} setExpenses={setExpenses} cards={cards} setCards={setCards} cashTxns={cashTxns} setCashTxns={setCashTxns} machines={machines} setMachines={setMachines} diesel={diesel} setDiesel={setDiesel} utilities={utilities} setUtilities={setUtilities} attendance={attendance} setAttendance={setAttendance} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} />}
+        {tab==="import" && <ImportTab focusKind={importFocus} clearFocus={()=>setImportFocus("")} presetCardId={importCardHint} vendors={vendors} setVendors={setVendors} reqs={reqs} setReqs={setReqsFromImport} recurring={recurring} setRecurring={setRecurring} expenses={expenses} setExpenses={setExpenses} cards={cards} setCards={setCards} cashTxns={cashTxns} setCashTxns={setCashTxns} machines={machines} setMachines={setMachines} diesel={diesel} setDiesel={setDiesel} utilities={utilities} setUtilities={setUtilities} attendance={attendance} setAttendance={setAttendance} lists={lists} setLists={setLists} showToast={showToast} goTo={navigate} nameAliases={nameAliases} />}
         {tab==="fixedcost" && <FixedCostTab recurring={recurring} setRecurring={setRecurring} vendors={vendors} machines={machines} reqs={reqs} setReqs={setReqs} showToast={showToast} goTo={navigate}
           sheets={sheets} syncSheets={syncSheets} sheetSyncBusy={sheetSyncBusy} />}
         {tab==="categorybreakdown" && <CategoryBreakdownTab reqs={reqs} goTo={navigate} />}
@@ -15130,7 +15223,7 @@ const REQ_TEMPLATE = [
   { key:"paymentStatus", headers:["Payment Status","Status"] },
   { key:"accNo",         headers:["A/c No.","Account No.","Account No","Account Number"] },
   { key:"ifsc",          headers:["IFSC Code","IFSC"], upper:true },
-  { key:"paymentDate",   headers:["Payment Date","Paid On"], date:true },
+  { key:"paymentDate",   headers:["Payment Date","Paid On","Paid Date","Date Paid"], date:true },
   { key:"paymentMode",   headers:["Payment Mode","Mode"] },
   // v6.55: a "payment to be done" sheet can carry its own Amount After TDS
   // column once tax is withheld at source — this is the NET figure actually
@@ -15190,7 +15283,20 @@ const REGISTER_TEMPLATE = [
   { key:"amount",        headers:["Amount","Amt"], number:true, required:true },
   { key:"description",   headers:["Description","Narration","Particulars","Remarks"] },
   { key:"paidBy",        headers:["Paid By","Paid Through","Paid From","Funded By","Payment By"] },
-  { key:"paymentStatus", headers:["Payment Status","Status","Paid On","Payment"] },
+  { key:"paymentStatus", headers:["Payment Status","Status","Payment"] },
+  // v6.61: this sheet kind's own description has always told the user "write
+  // the date it was paid, or the word Pending" INTO the Payment Status column
+  // itself — there was deliberately no separate date column for it, unlike
+  // every other place in the app that uses a dedicated "Payment Date" column
+  // next to a Pending/Paid status. A user following the pattern they already
+  // know from Requisitions/Expenses (a column literally named "Payment Date")
+  // got nothing: this template had no field recognizing it at all, so that
+  // column was silently dropped and the row stayed Pending no matter what was
+  // written there. Added a real paymentDate field, matching REQ_TEMPLATE, so
+  // a dedicated Payment Date column now also works here — the original
+  // date-in-the-Status-column convention still works exactly as before too,
+  // so nothing already relying on it breaks.
+  { key:"paymentDate",   headers:["Payment Date","Paid On","Paid Date","Date Paid"], date:true },
   { key:"paymentMode",   headers:["Payment Mode","Mode"] },
   // v6.55: see the identical field on REQ_TEMPLATE above — Payment Register
   // imports are just as likely to carry an Amount After TDS column.
@@ -15209,7 +15315,7 @@ const UTILITY_TEMPLATE = [
   { key:"dueDate",     headers:["Due Date","Last Date"], date:true },
   { key:"billAmount",  headers:["Bill Amount","Bill","Amount","Total Bill"], number:true, required:true },
   { key:"paidAmount",  headers:["Amount Paid","Paid","Payment","Paid Amount"], number:true },
-  { key:"paymentDate", headers:["Payment Date","Paid On"], date:true },
+  { key:"paymentDate", headers:["Payment Date","Paid On","Paid Date","Date Paid"], date:true },
   { key:"paymentMode", headers:["Payment Mode","Paid By","Mode"] },
   { key:"cardCharge",  headers:["Card Charge","Surcharge","Convenience Fee","Transaction Charge"], number:true },
   { key:"meterPrev",   headers:["Previous Reading","Meter Previous","Prev Reading","Old Reading"], number:true },
@@ -15278,7 +15384,7 @@ const EXPENSE_TEMPLATE = [
   { key:"settledTo",   headers:["Paid To","Partner","Reimbursed To","Settled To","Paid To Partner"] },
   { key:"onwardTo",    headers:["Passed On To","Onward To","Shared With","Transferred To","Split To"] },
   { key:"onwardDate",  headers:["Passed On Date","Onward Date","Transfer Date","Split Date"], date:true },
-  { key:"paidDate",    headers:["Payment Date","Paid On","Date Paid","Settled On","Payment Date to Partner","Reimbursed On"], date:true },
+  { key:"paidDate",    headers:["Payment Date","Paid On","Paid Date","Date Paid","Settled On","Payment Date to Partner","Reimbursed On"], date:true },
 ];
 
 const EMPLOYEE_TEMPLATE = [
@@ -15444,7 +15550,7 @@ function downloadTemplate(kind){
   XLSX.writeFile(wb, kind === "vendors" ? "Template_Vendors.xlsx" : "Template_Requisitions.xlsx");
 }
 
-function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, reqs, setReqs, recurring, setRecurring, expenses, setExpenses, cards, setCards, cashTxns, setCashTxns, machines, setMachines, diesel, setDiesel, utilities, setUtilities, attendance, setAttendance, lists, setLists, showToast, goTo }){
+function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, reqs, setReqs, recurring, setRecurring, expenses, setExpenses, cards, setCards, cashTxns, setCashTxns, machines, setMachines, diesel, setDiesel, utilities, setUtilities, attendance, setAttendance, lists, setLists, showToast, goTo, nameAliases }){
   const [mapping, setMapping] = useState(null);   // column-mapping step
   const [preview, setPreview] = useState(null);   // final confirm step
   const [skip, setSkip] = useState(new Set());
@@ -15530,6 +15636,7 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
     const seenRefs = new Set();
     const existingKeys = new Set((kind === "requisitions" || kind === "register") ? reqs.map(importDupKey) : []);
     const seenKeys = new Set();
+    const usedSoftReqIds = new Set();   // v6.62: see the name-correction soft match below
     // v6.50: matches an existing expense by Paid By + Amount + Description +
     // Sub-Category only — deliberately NOT Date — so a corrected Date in the
     // source file is recognised as "this same expense, corrected" instead of
@@ -15539,11 +15646,19 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
     // two genuinely separate expenses sharing person+amount+description+
     // sub-category on two different days will be seen as one being
     // corrected, not two.
+    // v6.62: Paid By resolved through nameAliases first (same confirmed
+    // pairs the Master write-back already trusts), so a rename confirmed
+    // once via "Remembered name spellings" is recognised here too, on a
+    // plain Import from Excel and not just the live Google Sheets sync.
+    // No-op when nameAliases is empty.
+    const expenseCorrectionKeyOf = (e) => [
+      String((nameAliases && nameAliases.length) ? resolveAliasName(e.paidBy, nameAliases) : (e.paidBy||"")).trim().toLowerCase(),
+      Number(e.amount||0),
+      String(e.description||"").trim().toLowerCase(), String(e.subCategory||"").trim().toLowerCase()].join("|");
     const expenseByKey = new Map();
     if (kind === "expenses") {
       (expenses||[]).forEach(e => {
-        const k = [String(e.paidBy||"").trim().toLowerCase(), Number(e.amount||0),
-                   String(e.description||"").trim().toLowerCase(), String(e.subCategory||"").trim().toLowerCase()].join("|");
+        const k = expenseCorrectionKeyOf(e);
         if (!expenseByKey.has(k)) expenseByKey.set(k, e);
       });
     }
@@ -15751,8 +15866,7 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
         // only (see expenseByKey above) — NOT on ek (which still includes
         // Date, kept below for within-file duplicate detection only) — so a
         // corrected Date is recognised as this same row, not a miss.
-        const ck = [String(out.paidBy||"").trim().toLowerCase(), Number(out.amount||0),
-                    String(out.description||"").trim().toLowerCase(), String(out.subCategory||"").trim().toLowerCase()].join("|");
+        const ck = expenseCorrectionKeyOf(out);
         const sameRow = expenseByKey.get(ck);
         if (sameRow && !usedExpense.has(sameRow.id)) {
           usedExpense.add(sameRow.id);
@@ -15802,9 +15916,12 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
         }
         const idHit = byId(vendors, out.id);
         if (idHit) { toUpdate.push({ existing:idHit, data:out, rowNum:i+offset }); return; }
+        // v6.62: name compared through nameAliases (same confirmed pairs the
+        // Master write-back already trusts) — a no-op when nameAliases is
+        // empty. See the Vendors branch below for the full reasoning.
         const existing = vendors.find(v =>
           (out.empCode && v.empCode && String(v.empCode).trim().toLowerCase() === String(out.empCode).trim().toLowerCase()) ||
-          String(v.name||"").trim().toLowerCase() === out.name.trim().toLowerCase());
+          String(resolveAliasName(v.name, nameAliases)||"").trim().toLowerCase() === String(resolveAliasName(out.name, nameAliases)||"").trim().toLowerCase());
         if (existing) {
           if (siteList.length) out.sites = siteList;
           out.ledgerType = "Employee";
@@ -15868,8 +15985,10 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
         }
         const idHit = byId(recurring, out.id);
         if (idHit) { toUpdate.push({ existing:idHit, data:out, rowNum:i+offset }); return; }
+        // v6.62: same nameAliases fallback as Employees/Vendors — see the
+        // Vendors branch below for the full reasoning.
         const existing = recurring.find(r =>
-          String(r.name||"").trim().toLowerCase() === out.name.trim().toLowerCase());
+          String(resolveAliasName(r.name, nameAliases)||"").trim().toLowerCase() === String(resolveAliasName(out.name, nameAliases)||"").trim().toLowerCase());
         if (existing) toUpdate.push({ existing, data:out, rowNum:i+offset });
         else toAdd.push({ data:out, rowNum:i+offset });
         return;
@@ -15880,9 +15999,22 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
           ? String(out.sitesRaw).split(/[,;|/]/).map(x=>x.trim()).filter(Boolean)
           : [];
         delete out.sitesRaw;
+        // v6.62: name compared through nameAliases (the same user-confirmed
+        // spelling pairs the Master write-back already trusts — see
+        // resolveAliasName) rather than a plain lowercase compare. Fixes a
+        // real case from this app's own data: one person who is both a
+        // salaried employee and a house/land owner, recorded under two
+        // slightly different spellings — correcting the spelling in Excel
+        // to be consistent used to match neither existing ledger record and
+        // create a THIRD, duplicate one on the next sync. Now, once the
+        // user confirms the two spellings are the same person (the
+        // "Remembered name spellings" panel on the Sheets tab), every sync
+        // and import kind recognises them as one ledger. A no-op whenever
+        // nameAliases is empty, so nothing already matching by exact name
+        // changes.
         const existing = vendors.find(v =>
           (out.gstin && v.gstin && v.gstin.toUpperCase() === out.gstin) ||
-          String(v.name||"").trim().toLowerCase() === out.name.trim().toLowerCase()
+          String(resolveAliasName(v.name, nameAliases)||"").trim().toLowerCase() === String(resolveAliasName(out.name, nameAliases)||"").trim().toLowerCase()
         );
         if (existing) {
           // only overwrite sites/type when the sheet actually supplies them
@@ -15911,6 +16043,24 @@ function ImportTab({ focusKind, clearFocus, presetCardId, vendors, setVendors, r
         if (existingKeys.has(k)) { duplicates.push({ data:out, rowNum:i+offset, why:"already in the app" }); return; }
         if (seenKeys.has(k)) { duplicates.push({ data:out, rowNum:i+offset, why:"repeated in this file" }); return; }
         seenKeys.add(k);
+
+        // v6.62: no Ref No. and no exact dupKey match - try once more on
+        // Date + Site + Amount alone, leaving Name out of the key entirely.
+        // Same fix, and the same ambiguity safeguard, as the live Google
+        // Sheets sync's identical addition (see its comment) — this is the
+        // "Import from Excel" copy of it, for a name corrected in a file
+        // that gets re-uploaded by hand instead of synced live. Only
+        // trusted when precisely ONE not-yet-matched requisition shares
+        // Date+Site+Amount.
+        const softKey = [matchDate(out), String(out.site||"").trim().toLowerCase(), Number(out.amount||0)].join("|");
+        const softCandidates = reqs.filter(r => !usedSoftReqIds.has(r.id)
+          && [matchDate(r), String(r.site||"").trim().toLowerCase(), Number(r.amount||0)].join("|") === softKey);
+        if (softCandidates.length === 1) {
+          usedSoftReqIds.add(softCandidates[0].id);
+          toUpdate.push({ existing:softCandidates[0], data:out, rowNum:i+offset });
+          return;
+        }
+
         toAdd.push({ data:out, rowNum:i+offset });
       }
     });
